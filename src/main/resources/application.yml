@@ -1,0 +1,42 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: gb28181-platform-demo
+  jackson:
+    default-property-inclusion: non_null
+
+logging:
+  level:
+    io.github.rurulalanana: INFO
+    gov.nist.javax.sip: WARN
+
+gb28181:
+  # 平台 20 位编码
+  platform-id: "34020000002000000001"
+  # SIP 信令监听
+  sip-host: "0.0.0.0"
+  sip-port: 5060
+  # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
+  media-ip: ""
+  # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）
+  http-port: 8081
+  rtmp-port: 11935
+  rtsp-port: 18554
+  rtc-port: 18000
+  app: rtp
+  # 随流上下线自动录像
+  auto-record: false
+  record-root: ""
+
+  # 内置设备模拟器：无真实摄像头时用它验证全链路
+  simulator:
+    enabled: true
+    device-id-prefix: "34020000001320000001"
+    count: 1
+    # 开启后模拟设备会用 ffmpeg 推测试画面（需要本机安装 ffmpeg）
+    push-test-media: false
+    ffmpeg: ffmpeg
+    test-source: "testsrc2=size=640x360:rate=25"

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.2.5</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>gb28181-platform-demo</artifactId>
+  <version>1.0.0</version>
+  <name>gb28181-platform-demo</name>
+  <description>GB28181 流媒体平台测试工程：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体）</description>
+
+  <properties>
+    <java.version>17</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <sip.module.version>1.0.2</sip.module.version>
+    <zlm.module.version>1.0.0</zlm.module.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- GB28181 信令模块。
+         注意：jain-sip 1.2.344 硬依赖 log4j 1.x 的 API（org.apache.log4j.Priority / Layout），
+         log4j-over-slf4j 不提供 Layout，缺失会直接抛 PeerUnavailableException，
+         因此这里不能排除 log4j；其日志输出由 log4j.properties 单独收敛（应用日志仍走 Logback）。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>gb28181-sip</artifactId>
+      <version>${sip.module.version}</version>
+    </dependency>
+
+    <!-- 流媒体服务模块（内嵌 ZLMediaKit，自带各平台原生库） -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>gb28181-sip-zlm</artifactId>
+      <version>${zlm.module.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.2.0</version>
+        <configuration>
+          <classpathScope>test</classpathScope>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <mainClass>io.github.rurulalanana.demo.Gb28181PlatformApplication</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB28181 流媒体平台 · 测试台</title>
+<style>
+  :root { --bd: #e5e7eb; --muted: #6b7280; --bg: #f9fafb; --pri: #2563eb; --ok: #059669; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: #111827; }
+  header { padding: 16px 24px; background: #fff; border-bottom: 1px solid var(--bd);
+           display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px 24px; display: grid; gap: 20px;
+         grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  section { background: #fff; border: 1px solid var(--bd); border-radius: 10px; padding: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+  video { width: 100%; background: #000; border-radius: 8px; aspect-ratio: 16/9; display: block; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  button { padding: 6px 12px; border: 1px solid var(--bd); background: #fff; border-radius: 6px;
+           cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--pri); color: var(--pri); }
+  button.primary { background: var(--pri); border-color: var(--pri); color: #fff; }
+  input { padding: 6px 10px; border: 1px solid var(--bd); border-radius: 6px; font-size: 13px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace; width: 230px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bd);
+           font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  th { color: var(--muted); font-weight: 500; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;
+        overflow: auto; max-height: 340px; font-size: 12px; margin: 0; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 11px; }
+  .tag.ok { background: #d1fae5; color: var(--ok); }
+  .tag.off { background: #f3f4f6; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  a { color: var(--pri); }
+</style>
+</head>
+<body>
+<header>
+  <h1>GB28181 流媒体平台 · 测试台</h1>
+  <span class="sub" id="platformInfo">加载中…</span>
+</header>
+
+<main>
+  <section>
+    <h2>画面（WebRTC）</h2>
+    <video id="video" autoplay playsinline muted controls></video>
+    <div class="row" style="margin-top:12px">
+      <input id="streamInput" value="rtp/34020000001320000001">
+      <button class="primary" onclick="playWebrtc()">WebRTC 播放</button>
+      <button onclick="stopPlay()">停止</button>
+      <span class="hint" id="playState"></span>
+    </div>
+    <div class="hint">
+      嵌入式模式下 ZLMediaKit 未注册 HTTP 播放路由（FLV/HLS 不可用），<b>WebRTC 是浏览器出画面的唯一通路</b>。
+      如需验证 FLV/HLS/RTSP，请用 VLC/ffplay 打开下方播放地址中的 rtsp:// / rtmp://。
+    </div>
+  </section>
+
+  <section>
+    <h2>平台操作</h2>
+    <div class="row">
+      <input id="deviceInput" value="34020000001320000001">
+      <button onclick="act('play')">点播</button>
+      <button onclick="act('playback')">回放</button>
+      <button onclick="queryRecords()">查录像</button>
+      <button onclick="act('stop')">停止</button>
+    </div>
+    <div class="row">
+      <button onclick="toggleMedia()">开/关测试推流</button>
+      <button onclick="refresh()">刷新状态</button>
+      <button onclick="startRecord()">开始录像</button>
+      <button onclick="stopRecord()">停止录像</button>
+    </div>
+    <div class="hint">点播会走「平台主动 INVITE」；回放需先「查录像」拿到 filePath 再发起。</div>
+  </section>
+
+  <section>
+    <h2>运行日志</h2>
+    <pre id="log">等待操作…</pre>
+  </section>
+
+  <section>
+    <h2>状态</h2>
+    <table id="statusTable"><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>在线设备</h2>
+    <table id="deviceTable"><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>模拟设备</h2>
+    <table id="simTable"><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>收流会话</h2>
+    <table id="sessionTable"><tbody></tbody></table>
+  </section>
+</main>
+
+<script>
+let pc = null;
+const logEl = document.getElementById('log');
+function log(obj) {
+  const text = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  logEl.textContent = (typeof obj === 'string' && obj.startsWith('[') ? '' : logEl.textContent + '\n') + text;
+  if (typeof obj !== 'string' || !obj.startsWith('[')) logEl.scrollTop = logEl.scrollHeight;
+  else logEl.textContent = text;
+}
+async function api(path, method = 'GET') {
+  const res = await fetch('/api' + path, { method });
+  const json = await res.json().catch(() => ({}));
+  return json;
+}
+
+async function refresh() {
+  const s = await api('/status');
+  document.getElementById('platformInfo').textContent =
+    `平台 ${s.platformId} · SIP ${s.sip} · 媒体 http=${s.http} rtsp=${s.rtsp} webrtc=${s.webrtc}`;
+  const rows = [
+    ['会话数', s.sessionCount], ['录像数', s.recordCount],
+    ['模拟设备', s.simulatorCount], ['模拟器推流', s.simulatorPushMedia ? '开' : '关'],
+  ];
+  document.getElementById('statusTable').innerHTML =
+    rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
+
+  const devices = await api('/devices');
+  document.getElementById('deviceTable').innerHTML =
+    `<tr><th>设备编码</th><th>地址</th><th>在线</th><th>注册时间</th></tr>` +
+    (devices.length ? devices.map(d =>
+      `<tr><td>${d.deviceId}</td><td>${d.address}</td>` +
+      `<td><span class="tag ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span></td>` +
+      `<td>${new Date(d.registerTime).toLocaleString()}</td></tr>`).join('')
+      : '<tr><td colspan="4">（无）</td></tr>');
+
+  const sims = await api('/simulators');
+  document.getElementById('simTable').innerHTML =
+    `<tr><th>设备编码</th><th>本地地址</th><th>注册</th><th>推流</th><th>最近收到</th></tr>` +
+    (sims.length ? sims.map(d =>
+      `<tr><td>${d.deviceId}</td><td>${d.address}</td>` +
+      `<td><span class="tag ${d.registered ? 'ok' : 'off'}">${d.registered ? '已注册' : '未注册'}</span></td>` +
+      `<td><span class="tag ${d.pushing ? 'ok' : 'off'}">${d.pushing ? '推流中' : '空闲'}</span></td>` +
+      `<td>${d.lastRequest || '-'}</td></tr>`).join('')
+      : '<tr><td colspan="5">（无）</td></tr>');
+
+  const sessions = await api('/sessions');
+  document.getElementById('sessionTable').innerHTML =
+    `<tr><th>通道</th><th>类型</th><th>状态</th><th>RTP端口</th><th>SSRC</th></tr>` +
+    (sessions.length ? sessions.map(x =>
+      `<tr><td>${x.channelId}</td><td>${x.type}</td><td>${x.state}</td>` +
+      `<td>${x.port}</td><td>${x.ssrc}</td></tr>`).join('')
+      : '<tr><td colspan="5">（无）</td></tr>');
+}
+
+async function act(action) {
+  const id = document.getElementById('deviceInput').value.trim();
+  try {
+    let result;
+    if (action === 'play') {
+      result = await api('/play/' + id, 'POST');
+      log(['[点播] ' + id, result]);
+    } else if (action === 'playback') {
+      const records = await api('/records/' + id);
+      if (!records.length) {
+        log(['[回放] 未查到录像段。真实设备先支持 RecordInfo 响应；' +
+             '模拟设备可在下方用「开始录像」后再试。', records]);
+        return;
+      }
+      result = await api('/playback/' + id + '?filePath=' + encodeURIComponent(records[0].filePath), 'POST');
+      log(['[回放] ' + records[0].filePath, result]);
+    } else if (action === 'stop') {
+      result = await api('/stop/' + id, 'POST');
+      log(['[停止] ' + id, result]);
+    }
+  } catch (e) {
+    log('[操作失败] ' + e);
+  }
+  refresh();
+}
+
+async function queryRecords() {
+  const id = document.getElementById('deviceInput').value.trim();
+  try {
+    const records = await api('/records/' + id);
+    log(['[录像检索] ' + id, records]);
+  } catch (e) {
+    log('[录像检索超时] ' + id + '（设备无响应）');
+  }
+  refresh();
+}
+
+async function startRecord() {
+  const id = document.getElementById('deviceInput').value.trim();
+  log(['[开始录像]', await api('/record/' + id, 'POST')]);
+  refresh();
+}
+async function stopRecord() {
+  const id = document.getElementById('deviceInput').value.trim();
+  log(['[停止录像]', await api('/record/' + id, 'DELETE')]);
+  refresh();
+}
+async function toggleMedia() {
+  const sims = await api('/simulators');
+  if (!sims.length) { log('[无模拟设备]'); return; }
+  const enable = !sims[0].pushing;
+  log(['[模拟器推流 ' + (enable ? '开' : '关') + ']',
+       await api('/simulators/' + sims[0].deviceId + '/media?enabled=' + enable, 'POST')]);
+  refresh();
+}
+
+async function playWebrtc() {
+  const stream = document.getElementById('streamInput').value.trim();
+  const peerId = 'browser-' + Math.random().toString(36).slice(2, 10);
+  log('[WebRTC] 正在协商 ' + stream);
+  try {
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.ontrack = (e) => {
+      document.getElementById('video').srcObject = e.streams[0];
+      document.getElementById('playState').textContent = '播放中';
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await new Promise(r => {
+      if (pc.iceGatheringState === 'complete') return r();
+      const t = setTimeout(r, 3000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); r(); }
+      };
+    });
+    const answer = await api('/webrtc/play?stream=' + encodeURIComponent(stream) +
+                              '&peerId=' + peerId, 'POST');
+    if (answer.code !== 0) throw new Error(answer.sdp || 'answer 获取失败');
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    log('[WebRTC] 协商完成，webrtcUrl=' + answer.webrtcUrl);
+  } catch (e) {
+    log('[WebRTC] 失败：' + e.message + '（请确认已点播、有流在推、浏览器与平台网络互通）');
+    document.getElementById('playState').textContent = '失败';
+  }
+}
+function stopPlay() {
+  if (pc) { pc.close(); pc = null; }
+  document.getElementById('video').srcObject = null;
+  document.getElementById('playState').textContent = '已停止';
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
