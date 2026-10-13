@@ -19,6 +19,10 @@ gb28181:
   # SIP 信令监听
   sip-host: "0.0.0.0"
   sip-port: 5060
+  # SIP 对外通告地址（写入 INVITE 的 From / Contact）。留空自动推断本机非回环 IPv4。
+  # 接真实设备时若平台有多个网卡或经过 NAT，务必改成设备可达的本机 IP，
+  # 否则设备无法回包，表现为「点播无响应」。
+  sip-advertised-ip: ""
   # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
   media-ip: ""
   # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）

@@ -83,6 +83,7 @@ open http://localhost:8080/
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `platform-id` | `34020000002000000001` | 平台 20 位编码 |
+| `sip-advertised-ip` | 空（自动推断本机非回环 IP） | **写入 INVITE 的 From/Contact**，NAT 或多网卡时必须显式指定 |
 | `sip-host/sip-port` | `0.0.0.0` / `5060` | SIP 信令 |
 | `media-ip` | 空=自动探测 | **SDP `c=` 行与播放地址主机，必须是设备可达地址** |
 | `http-port` | `8081` | 媒体 HTTP（FLV/HLS；嵌入式模式下路由未注册） |
@@ -122,6 +123,22 @@ rm -rf ~/.m2/repository/io/github/rurulalanana
   <version>1.12.0</version>
 </dependency>
 ```
+
+### 真机点播：设备注册成功但一直不出画面
+
+日志特征：设备注册正常、`已发起点播 INVITE`，随后反复出现
+`RtpProcess timeout` 与 `SIP 事务超时: server=false`，ZLM 从未收到 RTP。
+
+按这个顺序查：
+
+1. **平台是否通告了设备可达的地址**（最常见）。INVITE 的 `Contact` 是设备回包的依据，
+   若为 `0.0.0.0` 或 `127.0.0.1`，设备无法送达就会静默丢弃。设置 `gb28181.sip-advertised-ip`
+   为设备能访问到的本机 IP（与 `media-ip` 通常一致），多网卡时尤其重要。
+2. **抓包确认**。Wireshark 过滤 `udp.port == <sip-port>`，看 INVITE 的 From/Contact 主机
+   是否可达，以及设备是否发出任何应答（100/200/486/603）。
+3. **设备侧是否要求 TCP 收流**。本工程默认 UDP（`tcp_mode=0`）；若设备只肯发 TCP，
+   需在 `RtpSessionManager` 建 RTP 服务器时改用 TCP 被动模式。
+4. **SDP 的 `y=` SSRC**：平台主动点播时应由平台给出 10 位 SSRC，且与收流端口对应。
 
 ### 其它启动期报错
 

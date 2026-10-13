@@ -20,6 +20,7 @@ public class Gb28181PlatformConfiguration {
         MediaServerProperties.MediaServerPropertiesBuilder builder = MediaServerProperties.builder()
                 .platformId(props.getPlatformId())
                 .sipHost(props.getSipHost())
+                .sipAdvertisedIp(props.getSipAdvertisedIp())
                 .sipPort(props.getSipPort())
                 .httpPort(props.getHttpPort())
                 .rtmpPort(props.getRtmpPort())

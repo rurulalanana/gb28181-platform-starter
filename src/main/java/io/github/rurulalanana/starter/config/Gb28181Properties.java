@@ -17,6 +17,14 @@ public class Gb28181Properties {
     private String sipHost = "0.0.0.0";
     private int sipPort = 5060;
 
+    /**
+     * SIP 对外通告地址（写入 INVITE 的 From / Contact）。
+     *
+     * <p>留空自动推断本机非回环 IPv4。平台在 NAT 后或多网卡时必须显式配置，
+     * 否则设备收到回环地址的 Contact 无法回包，表现为「点播无响应」。
+     */
+    private String sipAdvertisedIp;
+
     /** 媒体 IP：SDP {@code c=} 行与播放地址主机，必须是设备可达地址；留空自动探测。 */
     private String mediaIp = "";
 
