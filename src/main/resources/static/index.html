@@ -71,7 +71,6 @@
       <button onclick="act('stop')">停止</button>
     </div>
     <div class="row">
-      <button onclick="toggleMedia()">开/关测试推流</button>
       <button onclick="refresh()">刷新状态</button>
       <button onclick="startRecord()">开始录像</button>
       <button onclick="stopRecord()">停止录像</button>
@@ -92,11 +91,6 @@
   <section>
     <h2>在线设备</h2>
     <table id="deviceTable"><tbody></tbody></table>
-  </section>
-
-  <section>
-    <h2>模拟设备</h2>
-    <table id="simTable"><tbody></tbody></table>
   </section>
 
   <section>
@@ -126,7 +120,6 @@ async function refresh() {
     `平台 ${s.platformId} · SIP ${s.sip} · 媒体 http=${s.http} rtsp=${s.rtsp} webrtc=${s.webrtc}`;
   const rows = [
     ['会话数', s.sessionCount], ['录像数', s.recordCount],
-    ['模拟设备', s.simulatorCount], ['模拟器推流', s.simulatorPushMedia ? '开' : '关'],
   ];
   document.getElementById('statusTable').innerHTML =
     rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
@@ -139,16 +132,6 @@ async function refresh() {
       `<td><span class="tag ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span></td>` +
       `<td>${new Date(d.registerTime).toLocaleString()}</td></tr>`).join('')
       : '<tr><td colspan="4">（无）</td></tr>');
-
-  const sims = await api('/simulators');
-  document.getElementById('simTable').innerHTML =
-    `<tr><th>设备编码</th><th>本地地址</th><th>注册</th><th>推流</th><th>最近收到</th></tr>` +
-    (sims.length ? sims.map(d =>
-      `<tr><td>${d.deviceId}</td><td>${d.address}</td>` +
-      `<td><span class="tag ${d.registered ? 'ok' : 'off'}">${d.registered ? '已注册' : '未注册'}</span></td>` +
-      `<td><span class="tag ${d.pushing ? 'ok' : 'off'}">${d.pushing ? '推流中' : '空闲'}</span></td>` +
-      `<td>${d.lastRequest || '-'}</td></tr>`).join('')
-      : '<tr><td colspan="5">（无）</td></tr>');
 
   const sessions = await api('/sessions');
   document.getElementById('sessionTable').innerHTML =
@@ -169,8 +152,7 @@ async function act(action) {
     } else if (action === 'playback') {
       const records = await api('/records/' + id);
       if (!records.length) {
-        log(['[回放] 未查到录像段。真实设备先支持 RecordInfo 响应；' +
-             '模拟设备可在下方用「开始录像」后再试。', records]);
+        log(['[回放] 未查到录像段，请确认设备支持 RecordInfo 响应。', records]);
         return;
       }
       result = await api('/playback/' + id + '?filePath=' + encodeURIComponent(records[0].filePath), 'POST');
@@ -204,14 +186,6 @@ async function startRecord() {
 async function stopRecord() {
   const id = document.getElementById('deviceInput').value.trim();
   log(['[停止录像]', await api('/record/' + id, 'DELETE')]);
-  refresh();
-}
-async function toggleMedia() {
-  const sims = await api('/simulators');
-  if (!sims.length) { log('[无模拟设备]'); return; }
-  const enable = !sims[0].pushing;
-  log(['[模拟器推流 ' + (enable ? '开' : '关') + ']',
-       await api('/simulators/' + sims[0].deviceId + '/media?enabled=' + enable, 'POST')]);
   refresh();
 }
 
