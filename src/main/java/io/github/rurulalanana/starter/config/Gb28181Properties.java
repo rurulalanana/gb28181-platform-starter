@@ -25,6 +25,18 @@ public class Gb28181Properties {
      */
     private String sipAdvertisedIp;
 
+    /**
+     * SIP 注册鉴权密码（平台密码，系统级统一密码）。
+     *
+     * <p>设置后设备 REGISTER 需通过 Digest 鉴权，密码错误返回 401。
+     * 留空 = 不鉴权（内网联调方便，公网部署务必设置）。
+     *
+     * <p><b>不校验用户名</b>：SIP 的 Authorization.username 只是查密码用的键，
+     * 各厂商填法不一（SIP 域 / 平台编码 / 设备编号），强制校验会让大量设备注册失败。
+     * 因此这里是全局统一密码，所有设备共用。
+     */
+    private String sipPassword;
+
     /** 媒体 IP：SDP {@code c=} 行与播放地址主机，必须是设备可达地址；留空自动探测。 */
     private String mediaIp = "";
 
@@ -43,23 +55,44 @@ public class Gb28181Properties {
     /** 录像根目录（留空用 ${user.dir}/record）。 */
     private String recordRoot = "";
 
-    /** 设备模拟器是否随应用启动。 */
-    private Simulator simulator = new Simulator();
+    /** 平台运行时行为。 */
+    private Starter starter = new Starter();
 
-    /** 内置模拟设备配置。 */
+    /** 平台运行时行为配置。 */
     @Data
-    public static class Simulator {
-        /** 是否启用。 */
-        private boolean enabled = true;
-        /** 模拟设备编码前缀（依次生成 <prefix>01、<prefix>02…）。 */
-        private String deviceIdPrefix = "34020000001320000001";
-        /** 启动时注册的模拟设备数量。 */
-        private int count = 1;
-        /** 是否为模拟设备自动用 ffmpeg 推测试视频流（需本机有 ffmpeg）。 */
-        private boolean pushTestMedia = false;
-        /** ffmpeg 可执行文件路径。 */
-        private String ffmpeg = "ffmpeg";
-        /** 测试画面参数（testsrc2 滤镜）。 */
-        private String testSource = "testsrc2=size=640x360:rate=25";
+    public static class Starter {
+
+        /** 是否在启动时执行 db/schema.sql 建表（幂等，可重复执行）。 */
+        private boolean initSchema = true;
+
+        /** 启动后是否自动点播第一路在线设备（原自检行为）。 */
+        private boolean selfCheck = false;
+
+        /**
+         * 设备离线判定阈值（秒）：超过该时长未收到心跳即标记离线。
+         *
+         * <p>应大于设备心跳周期的 2~3 倍，默认 180 秒（设备心跳通常 60 秒）。
+         */
+        private int deviceOfflineSeconds = 180;
+
+        /**
+         * 设备注册后是否自动下发查询采集数据（目录/信息/状态）。
+         *
+         * <p>关闭后需手动调 {@code /api/v1/device/fetchcatalog} 等接口拉取。
+         */
+        private boolean autoCollect = true;
+
+        /**
+         * 同一设备两次自动采集的最小间隔（秒）。
+         *
+         * <p>设备频繁重启会反复注册，靠这个节流避免把设备打爆。默认 300 秒。
+         */
+        private int collectIntervalSeconds = 300;
+
+        /** 是否采集设备信息（厂商/型号/固件，对应 DeviceInfo 查询）。 */
+        private boolean collectDeviceInfo = true;
+
+        /** 是否采集设备状态（对应 DeviceStatus 查询）。 */
+        private boolean collectDeviceStatus = true;
     }
 }

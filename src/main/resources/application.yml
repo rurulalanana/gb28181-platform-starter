@@ -7,11 +7,54 @@ spring:
     name: gb28181-platform-starter
   jackson:
     default-property-inclusion: non_null
+  datasource:
+    url: jdbc:postgresql://160.202.254.65:25432/gb28181
+    username: postgres
+    password: Li374382471
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  # 实体类所在包（配合 @MapperScan 在 MybatisPlusConfiguration 中声明）
+  type-aliases-package: io.github.rurulalanana.starter.entity
+  configuration:
+    # 下划线列名 -> 驼峰属性名（如 device_id -> deviceId）
+    map-underscore-to-camel-case: true
+    # 允许把 null 字段也写入 SQL（配合实体上的 @TableField 策略使用）
+    call-setters-on-nulls: true
+  global-config:
+    banner: false
+    db-config:
+      # 主键自增（对应建表脚本的 BIGSERIAL）
+      id-type: auto
+      # 逻辑删除字段（实体未使用，保留默认约定）
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
 
 logging:
   level:
     io.github.rurulalanana: INFO
-    gov.nist.javax.sip: WARN
+    gov.nist.javax.sip: INFO
+    io.github.rurulalanana.gb28181.sip: DEBUG
+    # 需要看 SQL 时打开下面这行
+    # io.github.rurulalanana.starter.mapper: DEBUG
+
+
+# ==================== Sa-Token ====================
+sa-token:
+  token-name: Authorization
+  timeout: 86400
+  active-timeout: -1
+  is-concurrent: true
+  is-share: false
+  token-style: uuid
+  is-log: false
+  is-read-cookie: false
+  is-read-header: true
 
 gb28181:
   # 平台 20 位编码
@@ -22,9 +65,16 @@ gb28181:
   # SIP 对外通告地址（写入 INVITE 的 From / Contact）。留空自动推断本机非回环 IPv4。
   # 接真实设备时若平台有多个网卡或经过 NAT，务必改成设备可达的本机 IP，
   # 否则设备无法回包，表现为「点播无响应」。
-  sip-advertised-ip: ""
+  sip-advertised-ip: "192.168.20.138"
+
+  # ==================== SIP 注册鉴权（平台密码） ====================
+  # 系统级统一密码：设置后设备 REGISTER 需通过 Digest 鉴权，密码错误返回 401。
+  # 留空 = 不鉴权（内网联调方便，公网部署务必设置）。
+  # 注意：鉴权只校验密码，不校验用户名（各厂商 username 填法不一，强制校验会误拦设备）。
+  sip-password: ""
+
   # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
-  media-ip: ""
+  media-ip: "192.168.20.138"
   # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）
   http-port: 8081
   rtmp-port: 11935
@@ -35,12 +85,21 @@ gb28181:
   auto-record: false
   record-root: ""
 
-  # 内置设备模拟器：无真实摄像头时用它验证全链路
-  simulator:
-    enabled: true
-    device-id-prefix: "34020000001320000001"
-    count: 1
-    # 开启后模拟设备会用 ffmpeg 推测试画面（需要本机安装 ffmpeg）
-    push-test-media: false
-    ffmpeg: ffmpeg
-    test-source: "testsrc2=size=640x360:rate=25"
+  # 平台运行时行为
+  starter:
+    # 启动时执行 db/schema.sql 建表（幂等：全部 CREATE TABLE IF NOT EXISTS）
+    init-schema: true
+    # 启动后自动点播第一台在线设备，便于快速验证「注册→INVITE→收流」
+    self-check: false
+    # 设备离线判定阈值（秒）：超过该时长未收到心跳即标记离线，应大于心跳周期 2~3 倍
+    device-offline-seconds: 180
+    # 离线巡检间隔（毫秒）
+    offline-scan-interval-ms: 60000
+    # 设备注册后自动下发查询采集数据（目录/信息/状态），落库到 gb_channel / gb_device
+    auto-collect: true
+    # 同一设备两次自动采集的最小间隔（秒），防止设备频繁重启把设备打爆
+    collect-interval-seconds: 300
+    # 是否采集设备信息（厂商/型号/固件）
+    collect-device-info: true
+    # 是否采集设备状态
+    collect-device-status: true

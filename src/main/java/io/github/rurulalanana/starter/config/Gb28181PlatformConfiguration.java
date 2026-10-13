@@ -2,6 +2,7 @@ package io.github.rurulalanana.starter.config;
 
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,6 +14,7 @@ import org.springframework.context.annotation.Configuration;
  */
 @Slf4j
 @Configuration
+@RequiredArgsConstructor
 public class Gb28181PlatformConfiguration {
 
     @Bean(destroyMethod = "stop")
@@ -22,6 +24,7 @@ public class Gb28181PlatformConfiguration {
                 .sipHost(props.getSipHost())
                 .sipAdvertisedIp(props.getSipAdvertisedIp())
                 .sipPort(props.getSipPort())
+                .sipPassword(props.getSipPassword())
                 .httpPort(props.getHttpPort())
                 .rtmpPort(props.getRtmpPort())
                 .rtspPort(props.getRtspPort())
