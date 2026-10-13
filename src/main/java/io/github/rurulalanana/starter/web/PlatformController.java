@@ -1,8 +1,8 @@
-package io.github.rurulalanana.demo.web;
+package io.github.rurulalanana.starter.web;
 
-import io.github.rurulalanana.demo.config.Gb28181Properties;
-import io.github.rurulalanana.demo.simulator.DeviceSimulatorService;
-import io.github.rurulalanana.demo.simulator.SimulatedDevice;
+import io.github.rurulalanana.starter.config.Gb28181Properties;
+import io.github.rurulalanana.starter.simulator.DeviceSimulatorService;
+import io.github.rurulalanana.starter.simulator.SimulatedDevice;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaService;
 import io.github.rurulalanana.gb28181.sip.zlm.PlayUrls;

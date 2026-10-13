@@ -1,10 +1,10 @@
-package io.github.rurulalanana.demo;
+package io.github.rurulalanana.starter;
 
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
-import io.github.rurulalanana.demo.simulator.SimulatedDevice;
+import io.github.rurulalanana.starter.simulator.SimulatedDevice;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

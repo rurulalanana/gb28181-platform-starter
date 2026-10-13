@@ -1,10 +1,10 @@
-package io.github.rurulalanana.demo;
+package io.github.rurulalanana.starter;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
-import io.github.rurulalanana.demo.config.Gb28181Properties;
+import io.github.rurulalanana.starter.config.Gb28181Properties;
 
 /**
  * GB28181 流媒体平台测试工程。

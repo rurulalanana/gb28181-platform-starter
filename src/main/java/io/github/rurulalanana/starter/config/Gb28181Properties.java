@@ -1,4 +1,4 @@
-package io.github.rurulalanana.demo.config;
+package io.github.rurulalanana.starter.config;
 
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;

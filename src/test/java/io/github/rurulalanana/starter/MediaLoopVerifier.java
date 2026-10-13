@@ -1,6 +1,6 @@
-package io.github.rurulalanana.demo;
+package io.github.rurulalanana.starter;
 
-import io.github.rurulalanana.demo.simulator.SimulatedDevice;
+import io.github.rurulalanana.starter.simulator.SimulatedDevice;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
  * <p>验证链路：模拟设备注册 → 平台点播 → 模拟设备用 ffmpeg 推 H264 RTP
  * → 平台 RTP 服务器收流 → ZLMediaKit 解出轨道并注册媒体源（流上线事件）。
  *
- * <p>运行：{@code mvn -q test-compile exec:java -Dexec.mainClass=io.github.rurulalanana.demo.MediaLoopVerifier}
+ * <p>运行：{@code mvn -q test-compile exec:java -Dexec.mainClass=io.github.rurulalanana.starter.MediaLoopVerifier}
  */
 public final class MediaLoopVerifier {
 

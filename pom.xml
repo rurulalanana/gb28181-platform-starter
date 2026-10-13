@@ -12,10 +12,10 @@
   </parent>
 
   <groupId>io.github.rurulalanana</groupId>
-  <artifactId>gb28181-platform-demo</artifactId>
+  <artifactId>gb28181-platform-starter</artifactId>
   <version>1.0.0</version>
-  <name>gb28181-platform-demo</name>
-  <description>GB28181 流媒体平台测试工程：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体）</description>
+  <name>gb28181-platform-starter</name>
+  <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
 
   <properties>
     <java.version>17</java.version>
@@ -74,7 +74,7 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
-          <mainClass>io.github.rurulalanana.demo.Gb28181PlatformApplication</mainClass>
+          <mainClass>io.github.rurulalanana.starter.Gb28181PlatformApplication</mainClass>
         </configuration>
       </plugin>
     </plugins>

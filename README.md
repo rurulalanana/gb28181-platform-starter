@@ -1,11 +1,17 @@
-# gb28181-platform-demo
+# gb28181-platform-starter
 
-Spring Boot 测试工程：把 [`gb28181-sip`](https://central.sonatype.com/artifact/io.github.rurulalanana/gb28181-sip)（信令）
-与 [`gb28181-sip-zlm`](https://github.com/rurulalanana/gb28181-sip-zlm)（媒体）跑成一个可操作的国标流媒体平台。
+**GB28181 流媒体平台 Starter**：把 [`gb28181-sip`](https://central.sonatype.com/artifact/io.github.rurulalanana/gb28181-sip)（信令）
+与 [`gb28181-sip-zlm`](https://github.com/rurulalanana/gb28181-sip-zlm)（媒体，内嵌 ZLMediaKit）
+装配成一个可运行的 Spring Boot 工程。克隆即可当作你的平台起点：REST API、Web 测试页、
+设备模拟器、启动自检都已接好，改配置与包名就能直接用。
 
 - **零真实摄像头依赖**：内置 GB28181 设备模拟器，可用 ffmpeg 造真实测试画面
 - **开箱即测**：REST API + Web 测试页（WebRTC 播放）+ 启动自检
 - **媒体链路可验证**：`./verify-media-loop.sh` 一条命令验证「注册 → 点播 → RTP 收流 → 解出 H264 轨道」
+
+> 新项目用起来建议：改 `gb28181.platform-id` / `sip-port` / `media-ip`，
+> 把 `gb28181.simulator.enabled` 设为 `false` 接入真实设备，
+> 然后按需扩展 `PlatformController` 与 `application.yml`。
 
 ## 快速开始
 
@@ -14,13 +20,13 @@ Spring Boot 测试工程：把 [`gb28181-sip`](https://central.sonatype.com/arti
 cd ../gb28181-sip     && mvn -q clean install -DskipTests
 cd ../gb28181-sip-zlm && mvn -q clean install -DskipTests
 
-cd ../gb28181-platform-demo
+cd ../gb28181-platform-starter
 mvn clean package
 
 # 启动（模拟设备默认开启，且会推 ffmpeg 测试画面）
-java -jar target/gb28181-platform-demo-1.0.0.jar \
+java -jar target/gb28181-platform-starter-1.0.0.jar \
      --gb28181.simulator.push-test-media=true \
-     --gb28181.demo.self-check=true
+     --gb28181.starter.self-check=true
 
 # 浏览器打开测试页
 open http://localhost:8080/
@@ -34,7 +40,7 @@ open http://localhost:8080/
 | # | 操作 | 期望 |
 |---|---|---|
 | 1 | 启动日志 | `平台已启动：SIP 0.0.0.0:5060 / 媒体 http=8081 …`，随后 `模拟设备已创建并注册` |
-| 2 | 自检（`--gb28181.demo.self-check=true`） | `[自检] 收流端口=… ssrc=…`，ZLM 日志出现 `onAllTrackReady … H264[640/360/25]` |
+| 2 | 自检（`--gb28181.starter.self-check=true`） | `[自检] 收流端口=… ssrc=…`，ZLM 日志出现 `onAllTrackReady … H264[640/360/25]` |
 | 3 | `./verify-media-loop.sh` | `✅ 媒体闭环通过` |
 | 4 | `mvn test` | 4 个集成用例通过（注册 / 点播 / REST / 录像） |
 | 5 | 测试页「点播」→ 「WebRTC 播放」 | 浏览器出画面（需与平台网络互通） |

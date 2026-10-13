@@ -22,7 +22,7 @@ fi
 [ -d target/test-classes ] || mvn -q test-compile || exit 1
 
 LOG=$(mktemp -t gb28181-loop).log
-"$JAVA" -cp "$CP" io.github.rurulalanana.demo.MediaLoopVerifier 2>&1 | tee "$LOG"
+"$JAVA" -cp "$CP" io.github.rurulalanana.starter.MediaLoopVerifier 2>&1 | tee "$LOG"
 APP_CODE=${PIPESTATUS[0]}
 
 echo "───────────────────────────────"

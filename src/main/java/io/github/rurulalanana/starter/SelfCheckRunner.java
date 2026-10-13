@@ -1,4 +1,4 @@
-package io.github.rurulalanana.demo;
+package io.github.rurulalanana.starter;
 
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.PlayUrls;
@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
  * 启动自检：应用起来后自动向第一台在线设备发起点播，便于快速验证
  * 「注册 → INVITE → 收流」链路是否打通。
  *
- * <p>开启方式：{@code --gb28181.demo.self-check=true}
+ * <p>开启方式：{@code --gb28181.starter.self-check=true}
  */
 @Slf4j
 @Component
@@ -25,10 +25,10 @@ public class SelfCheckRunner implements ApplicationRunner {
 
     private final Gb28181MediaPlatform platform;
 
-    @Value("${gb28181.demo.self-check:false}")
+    @Value("${gb28181.starter.self-check:false}")
     private boolean enabled;
 
-    @Value("${gb28181.demo.self-check-delay-ms:3000}")
+    @Value("${gb28181.starter.self-check-delay-ms:3000}")
     private long delayMs;
 
     @Override

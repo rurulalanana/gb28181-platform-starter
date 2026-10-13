@@ -1,4 +1,4 @@
-package io.github.rurulalanana.demo.config;
+package io.github.rurulalanana.starter.config;
 
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;

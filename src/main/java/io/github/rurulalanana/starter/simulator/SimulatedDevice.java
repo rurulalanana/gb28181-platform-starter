@@ -1,4 +1,4 @@
-package io.github.rurulalanana.demo.simulator;
+package io.github.rurulalanana.starter.simulator;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;

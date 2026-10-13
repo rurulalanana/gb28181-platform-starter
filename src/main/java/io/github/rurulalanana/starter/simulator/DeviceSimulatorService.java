@@ -1,6 +1,6 @@
-package io.github.rurulalanana.demo.simulator;
+package io.github.rurulalanana.starter.simulator;
 
-import io.github.rurulalanana.demo.config.Gb28181Properties;
+import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
