@@ -91,7 +91,45 @@ open http://localhost:8080/
 | `auto-record` / `record-root` | `false` / `${user.dir}/record` | 平台录像 |
 | `simulator.enabled/count` | `true` / `1` | 内置模拟设备 |
 | `simulator.push-test-media` | `false` | 模拟设备用 ffmpeg 推测试画面（需 ffmpeg） |
-| `demo.self-check` | `false` | 启动后自动点播第一路在线设备 |
+| `starter.self-check` | `false` | 启动后自动点播第一路在线设备 |
+
+## 排障
+
+### `NoClassDefFoundError: com/aizuda/zlm4j/core/ZLMApi`
+
+`zlm4j` 是 `gb28181-sip-zlm` 的传递依赖，未出现在 classpath。**绝大多数情况是本地 Maven 缓存了"该构件不存在"的结论**——版本刚发布时国内镜像（阿里云等）有几分钟同步延迟，Maven 把 404 记进 `~/.m2/repository/**/*.lastUpdated` 后就不再重试。
+
+按顺序排查：
+
+```bash
+# 1) 先确认依赖树里有没有 zlm4j
+mvn dependency:tree | grep -E 'zlm4j|gb28181'
+
+# 2) 强制更新缓存里的 404 记录（最常见的解法）
+mvn -U clean install
+
+# 3) 还不行，清掉这两个坐标的缓存重下
+rm -rf ~/.m2/repository/com/aizuda/zlm4j
+rm -rf ~/.m2/repository/io/github/rurulalanana
+```
+
+若你的项目只在 pom 里声明了 `gb28181-sip-zlm` 而没显式声明 `zlm4j`，而镜像同步还没追上，可临时显式加上（镜像追上后可去掉）：
+
+```xml
+<dependency>
+  <groupId>com.aizuda</groupId>
+  <artifactId>zlm4j</artifactId>
+  <version>1.12.0</version>
+</dependency>
+```
+
+### 其它启动期报错
+
+| 现象 | 原因与处理 |
+|---|---|
+| `PeerUnavailableException: SipStackImpl could not be instantiated` | 排除了 log4j。jain-sip 需要 log4j 1.x 的 `Layout` 等 API，`log4j-over-slf4j` 不提供，**不能排除** |
+| `UnsatisfiedLinkError` / 加载 `mk_api` 失败 | 运行平台没有对应原生库；zlm4j 1.12.0 内含 win/linux/mac（x86_64 与 arm64），检查是否被裁剪或运行在不支持的平台 |
+| 媒体服务启动失败但无堆栈 | ZLM 的 `mk_http_server_start` 等启动失败**返回 0 而不抛异常**，看日志中是否有 ZLM 原生输出 |
 
 ## 已知限制（嵌入式 ZLMediaKit）
 
