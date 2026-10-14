@@ -20,8 +20,8 @@
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <sip.module.version>1.0.2</sip.module.version>
-    <zlm.module.version>1.0.0</zlm.module.version>
+    <sip.module.version>1.0.3</sip.module.version>
+    <zlm.module.version>1.0.1</zlm.module.version>
     <mybatis-plus.version>3.5.11</mybatis-plus.version>
   </properties>
 
