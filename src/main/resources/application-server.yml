@@ -1,0 +1,44 @@
+# ======================================================================
+# 服务器部署配置（大端口，设备直连，不经 frp）
+# ======================================================================
+# 用法：java -jar gb28181-platform-starter-1.0.0.jar \
+#            --spring.profiles.active=server
+#
+# 端口对照（已按服务器实际情况探测，避开已占用端口）：
+#   用途                默认       本 profile    说明
+#   Spring Boot HTTP    8080   →   48088        48080 已被占用
+#   SIP 信令(UDP/TCP)   5060   →   45060
+#   ZLM HTTP/FLV/WS     8081   →   48089        48081 已被占用
+#   ZLM RTMP            11935  →   41935
+#   ZLM RTSP            18554  →   48554
+#   ZLM WebRTC          18000  →   48000
+#   RTP 单端口(UDP/TCP) 24560  →   44560
+# ----------------------------------------------------------------------
+
+server:
+  port: 48088
+
+spring:
+  datasource:
+    # 同机部署：直连本地 PostgreSQL（服务器上是 5432，非本地的 25432）
+    url: jdbc:postgresql://127.0.0.1:5432/gb28181
+
+gb28181:
+  # ---- SIP 信令 ----
+  sip-host: "0.0.0.0"
+  sip-port: 45060
+  # 对外通告地址：写入 INVITE 的 From/Contact 与 Via，必须是设备可达的地址。
+  # 设备直连本机，故填公网 IP。
+  sip-advertised-ip: "160.202.254.65"
+
+  # ---- 媒体 ----
+  # SDP c= 行与播放地址主机，同样必须是设备可达地址
+  media-ip: "160.202.254.65"
+  http-port: 48089
+  rtmp-port: 41935
+  rtsp-port: 48554
+  rtc-port: 48000
+
+  # ---- RTP 收流：单端口，只需在防火墙放行一个端口 ----
+  rtp-single-port: true
+  rtp-single-port-number: 44560

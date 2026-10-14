@@ -114,9 +114,12 @@ CREATE TABLE IF NOT EXISTS gb_channel (
     shared            BOOLEAN      DEFAULT FALSE,
     update_time       TIMESTAMP,
     create_time       TIMESTAMP    DEFAULT NOW(),
-    UNIQUE (channel_id)
+    -- 通道编码只在单设备内唯一（GB/T 28181 只保证设备编码全局唯一），
+    -- 故唯一键必须是 (设备编码, 通道编码) 组合
+    UNIQUE (device_id, channel_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gb_channel_device ON gb_channel (device_id);
+CREATE INDEX IF NOT EXISTS idx_gb_channel_channel ON gb_channel (channel_id);
 CREATE INDEX IF NOT EXISTS idx_gb_channel_status ON gb_channel (status);
 CREATE INDEX IF NOT EXISTS idx_gb_channel_parent ON gb_channel (parent_id);
 
@@ -361,6 +364,46 @@ CREATE TABLE IF NOT EXISTS gb_user (
 
 
 -- ============================================================
+--  第 1.5 段：结构迁移（老库升级用；全新库上为空操作）
+--
+--  CREATE TABLE IF NOT EXISTS 不会修改已存在的表，故唯一键变更需显式处理。
+--  下面用 DO 块先判断旧约束是否存在，存在才替换，重复执行安全。
+--
+--  变更内容：gb_channel 的唯一键由 (channel_id) 改为 (device_id, channel_id)。
+--  原因：GB/T 28181 只保证**设备编码**全局唯一，**通道编码**只在单设备内唯一，
+--  不同设备可以出现相同通道编码。旧约束会让第二台设备的同号通道插不进库。
+-- ============================================================
+
+DO $$
+BEGIN
+    -- 旧唯一键名（PostgreSQL 默认命名：<表>_<列>_key）
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'gb_channel_channel_id_key'
+          AND conrelid = 'gb_channel'::regclass
+    ) THEN
+        -- 先清掉与即将建立的组合键重复的旧数据（同设备同通道只保留 id 最小的一条）
+        DELETE FROM gb_channel a
+        USING gb_channel b
+        WHERE a.id > b.id
+          AND a.device_id = b.device_id
+          AND a.channel_id = b.channel_id;
+        ALTER TABLE gb_channel DROP CONSTRAINT gb_channel_channel_id_key;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'gb_channel_device_id_channel_id_key'
+          AND conrelid = 'gb_channel'::regclass
+    ) THEN
+        ALTER TABLE gb_channel
+            ADD CONSTRAINT gb_channel_device_id_channel_id_key
+            UNIQUE (device_id, channel_id);
+    END IF;
+END $$;
+
+
+-- ============================================================
 --  第 2 段：注释（表与字段的中文说明，便于用 DBeaver/Navicat 等工具看库）
 --  COMMENT ON 在 PostgreSQL 中是「覆盖写」，重复执行安全
 -- ============================================================
@@ -406,8 +449,8 @@ COMMENT ON COLUMN gb_device.extra              IS '扩展字段（JSON 等自由
 -- -------------------- gb_channel --------------------
 COMMENT ON TABLE  gb_channel IS '通道：设备下的视频通道，可直接点播；直连相机会有与设备同编号的通道';
 COMMENT ON COLUMN gb_channel.id                 IS '自增主键';
-COMMENT ON COLUMN gb_channel.channel_id         IS '通道国标编码（20 位，唯一）';
-COMMENT ON COLUMN gb_channel.device_id          IS '所属设备国标编码';
+COMMENT ON COLUMN gb_channel.channel_id         IS '通道国标编码（20 位；仅单设备内唯一，跨设备可重复）';
+COMMENT ON COLUMN gb_channel.device_id          IS '所属设备国标编码（全局唯一，与 channel_id 组成唯一键）';
 COMMENT ON COLUMN gb_channel.name               IS '通道名称（来自目录）';
 COMMENT ON COLUMN gb_channel.custom_name        IS '平台侧自定义名称，展示时优先于 name';
 COMMENT ON COLUMN gb_channel.custom_id          IS '平台侧自定义编号（可改，不影响与设备交互）';
@@ -456,11 +499,11 @@ COMMENT ON COLUMN gb_channel.create_time        IS '首次入库时间';
 -- -------------------- gb_stream --------------------
 COMMENT ON TABLE  gb_stream IS '直播流：一次点播对应一条记录，含各协议播放地址';
 COMMENT ON COLUMN gb_stream.id           IS '自增主键';
-COMMENT ON COLUMN gb_stream.stream_key   IS '流标识：<通道编码>/<流序号>，唯一';
+COMMENT ON COLUMN gb_stream.stream_key   IS '流标识：<设备编码>/<通道编码>，与 ZLM 的 app/stream 一致，唯一';
 COMMENT ON COLUMN gb_stream.channel_id   IS '通道国标编码';
 COMMENT ON COLUMN gb_stream.device_id    IS '所属设备国标编码';
 COMMENT ON COLUMN gb_stream.stream_name  IS 'ZLM 流名';
-COMMENT ON COLUMN gb_stream.app          IS 'ZLM 应用名（默认 rtp）';
+COMMENT ON COLUMN gb_stream.app          IS 'ZLM 应用名（= 设备编码）';
 COMMENT ON COLUMN gb_stream.ssrc         IS 'RTP SSRC（16 进制字符串）';
 COMMENT ON COLUMN gb_stream.rtp_port     IS '平台收流端口';
 COMMENT ON COLUMN gb_stream.stream_type  IS '流类型：live 实时 / playback 回放';

@@ -49,6 +49,20 @@ public class Gb28181Properties {
     /** ZLM 应用名（播放 URL 第一段）。 */
     private String app = "rtp";
 
+    /**
+     * 单端口收流模式：所有设备推流到同一端口，ZLM 按 RTP 的 SSRC 分流。
+     *
+     * <p>默认关闭（每通道独占端口）。开启后端口数不再受 ZLM 内置端口池
+     * （{@code [30000,35000]}，仅 2500 对）限制，防火墙也只需放行一个端口。
+     *
+     * <p><b>代价</b>：RTCP 失效（丢包率统计不可用）、ZLM 的 RTP detach 回调不触发
+     * （超时改由流下线事件感知）、无法做 SSRC 过滤。
+     */
+    private boolean rtpSinglePort = false;
+
+    /** 单端口模式下的收流端口（UDP 与 TCP 被动共用）。 */
+    private int rtpSinglePortNumber = 24560;
+
     /** 是否随流上下线自动录像。 */
     private boolean autoRecord = false;
 

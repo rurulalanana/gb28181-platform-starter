@@ -880,7 +880,8 @@ public class DeviceController {
         vo.setNumOutputs(c.getStreamId() == null ? 0 : 1);
         // 正在直播时附带播放地址，前端可直接取用
         if (c.getStreamId() != null && !c.getStreamId().isBlank()) {
-            var session = streamService.session(c.getChannelId());
+            // 用 (设备编码, 通道编码) 精确定位：通道编码跨设备可重复
+            var session = streamService.session(c.getDeviceId(), c.getChannelId());
             if (session != null) {
                 StreamVo urls = streamService.describe(session);
                 vo.setWebrtc(urls.getWebrtc());

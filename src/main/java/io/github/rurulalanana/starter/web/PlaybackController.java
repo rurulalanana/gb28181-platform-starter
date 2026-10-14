@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaService;
 import io.github.rurulalanana.gb28181.sip.zlm.RecordItem;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
@@ -114,6 +115,11 @@ public class PlaybackController {
     @PostMapping("/start")
     public ApiResponse<PlaybackVo> start(@RequestBody PlaybackStartRequest req) {
         StpUtil.checkLogin();
+        // serial = 设备编码（SIP 目标），code = 通道编码（省略则视为设备直连）
+        String deviceId = req.getSerial();
+        if (deviceId == null || deviceId.isBlank()) {
+            throw BizException.badRequest("缺少参数 serial（设备编码）");
+        }
         String channelId = req.resolveCode();
         if (channelId == null || channelId.isBlank()) {
             throw BizException.badRequest("缺少参数 serial 或 code");
@@ -134,8 +140,8 @@ public class PlaybackController {
             req.setFilePath(records.get(0).getFilePath());
         }
         RecordItem item = RecordItem.ofFilePath(channelId, req.getFilePath());
-        GbStream stream = streamService.startPlayback(channelId, item);
-        StreamVo base = streamService.describe(streamService.session(channelId));
+        GbStream stream = streamService.startPlayback(deviceId, channelId, item);
+        StreamVo base = streamService.describe(streamService.session(deviceId, channelId));
         PlaybackVo vo = new PlaybackVo();
         BeanUtils.copyProperties(base, vo);
         if (vo.getStreamId() == null) {
@@ -158,14 +164,14 @@ public class PlaybackController {
                                           @RequestParam(required = false) String serial,
                                           @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = resolveChannel(streamid, serial, code);
-        if (channelId == null) {
-            throw BizException.badRequest("需提供 streamid 或 serial/code 以定位回放流");
+        RtpSession session = resolveSession(streamid, serial, code);
+        if (session == null) {
+            throw BizException.badRequest("回放会话不存在，或需提供 streamid 或 serial/code 以定位");
         }
         // 下载模式下文件已由 ZLM 落盘，停止前先取出路径
-        var session = streamService.session(channelId);
-        String mediaUri = session == null ? null : session.getMediaUri();
-        boolean stopped = streamService.stop(channelId);
+        String mediaUri = session.getMediaUri();
+        String channelId = session.getChannelId();
+        boolean stopped = streamService.stop(session.getDeviceId(), channelId);
         StreamStopVo vo = new StreamStopVo();
         vo.setOk(stopped);
         vo.setChannelId(channelId);
@@ -189,12 +195,11 @@ public class PlaybackController {
                                      @RequestParam(required = false) String range,
                                      @RequestParam(defaultValue = "2") Float scale) {
         StpUtil.checkLogin();
-        String channelId = resolveChannel(streamid, serial, code);
-        if (channelId == null) {
+        RtpSession session = resolveSession(streamid, serial, code);
+        if (session == null) {
             throw BizException.badRequest("需提供 streamid 或 serial/code 以定位回放流");
         }
-        RtpSession session = streamService.session(channelId);
-        if (session == null || session.getCallId() == null) {
+        if (session.getCallId() == null) {
             throw BizException.badRequest("回放会话不存在，请先调用 playback/start");
         }
         Gb28181MediaService.PlaybackCommand cmd;
@@ -217,12 +222,13 @@ public class PlaybackController {
             case "pause" -> cmd = Gb28181MediaService.PlaybackCommand.PAUSE;
             case "scale" -> cmd = Gb28181MediaService.PlaybackCommand.SPEED;
             case "teardown" -> {
-                streamService.stop(channelId);
+                streamService.stop(session.getDeviceId(), session.getChannelId());
                 return ApiResponse.ok();
             }
             default -> throw BizException.badRequest("不支持的回放控制命令：" + command);
         }
-        streamService.mediaService().playbackControl(channelId, session.getCallId(),
+        // 回放控制是发给设备的信令，目标必须是设备编码（不是通道编码）
+        streamService.mediaService().playbackControl(session.getDeviceId(), session.getCallId(),
                 cmd, seekTime, rate);
         return ApiResponse.ok();
     }
@@ -276,24 +282,55 @@ public class PlaybackController {
 
     // ==================== 内部 ====================
 
-    /** 由 streamid 或 serial/code 定位通道编号。 */
-    private String resolveChannel(String streamid, String serial, String code) {
+    /**
+     * 由 streamid 或 serial/code 定位回放会话。
+     *
+     * <p>会话对象同时带设备编码与通道编码，故直接返回会话而非通道编码——
+     * 通道编码跨设备可重复，光有通道编码无法唯一定位（会误停别的设备的流）。
+     */
+    private RtpSession resolveSession(String streamid, String serial, String code) {
         if (streamid != null && !streamid.isBlank()) {
-            RtpSession session = findSession(streamid);
-            return session != null ? session.getChannelId() : stripIndex(streamid);
+            return findSession(streamid);
         }
-        if (code != null && !code.isBlank()) {
-            return code;
+        String channel = (code == null || code.isBlank()) ? serial : code;
+        if (channel == null || channel.isBlank()) {
+            return null;
         }
-        return serial;
+        // serial 是设备编码：能同时命中 (设备, 通道) 时最准
+        RtpSession session = (serial == null || serial.isBlank())
+                ? null : streamService.session(serial, channel);
+        return session != null ? session : streamService.session(channel);
     }
 
-    /** 按 ZLM 流名查会话。 */
+    /** 由 streamid 或 serial/code 定位通道编号（仅用于展示）。 */
+    private String resolveChannel(String streamid, String serial, String code) {
+        RtpSession session = resolveSession(streamid, serial, code);
+        if (session != null) {
+            return session.getChannelId();
+        }
+        if (streamid != null && !streamid.isBlank()) {
+            return channelOf(streamid);
+        }
+        return (code == null || code.isBlank()) ? serial : code;
+    }
+
+    /**
+     * 按流标识查会话。
+     *
+     * <p>支持三种形式：复合标识 {@code <设备编码>/<通道编码>}、
+     * 裸通道编码（设备直连）、以及流名。
+     */
     private RtpSession findSession(String streamid) {
         if (streamid == null || streamid.isBlank()) {
             return null;
         }
-        RtpSession session = streamService.session(streamid);
+        // 复合标识优先：直接按会话键命中
+        RtpSession session = streamService.sessionByKey(streamid);
+        if (session != null) {
+            return session;
+        }
+        // 裸通道编码（设备直连）
+        session = streamService.session(streamid);
         if (session != null) {
             return session;
         }
@@ -305,10 +342,19 @@ public class PlaybackController {
         return null;
     }
 
-    /** 剥离流名尾部的 {@code /序号}。 */
-    private static String stripIndex(String stream) {
+    /**
+     * 从复合标识 {@code <设备编码>/<通道编码>} 中取出通道编码。
+     *
+     * <p>不按斜杠盲拆：GB28181 编码本身不含斜杠，而历史流名曾形如
+     * {@code <通道编码>/<序号>}，故只在第二段是 20 位编码时才当作复合标识。
+     */
+    private static String channelOf(String stream) {
         int slash = stream.lastIndexOf('/');
-        return slash > 0 ? stream.substring(0, slash) : stream;
+        if (slash <= 0) {
+            return stream;
+        }
+        String tail = stream.substring(slash + 1);
+        return ZlmMediaServer.isChannelId(tail) ? tail : stream;
     }
 
     /** 录像段 → 返回体。 */

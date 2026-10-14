@@ -65,7 +65,7 @@ gb28181:
   # SIP 对外通告地址（写入 INVITE 的 From / Contact）。留空自动推断本机非回环 IPv4。
   # 接真实设备时若平台有多个网卡或经过 NAT，务必改成设备可达的本机 IP，
   # 否则设备无法回包，表现为「点播无响应」。
-  sip-advertised-ip: "192.168.20.138"
+  sip-advertised-ip: "123.57.109.223"
 
   # ==================== SIP 注册鉴权（平台密码） ====================
   # 系统级统一密码：设置后设备 REGISTER 需通过 Digest 鉴权，密码错误返回 401。
@@ -74,13 +74,21 @@ gb28181:
   sip-password: ""
 
   # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
-  media-ip: "192.168.20.138"
+  media-ip: "123.57.109.223"
   # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）
   http-port: 8081
   rtmp-port: 11935
   rtsp-port: 18554
   rtc-port: 18000
   app: rtp
+  # RTP 收流模式
+  # false（默认）= 每通道独占一个端口（ZLM 自动分配，受内置端口池 [30000,35000] 限制）
+  # true          = 单端口收流：所有设备推到同一端口，ZLM 按 RTP 的 SSRC 分流
+  #                 优点：端口数不受限、防火墙只需放行一个端口
+  #                 代价：RTCP 失效（无丢包率）、RTP 超时不再触发 detach 回调、不能做 SSRC 过滤
+  rtp-single-port: true
+  # 单端口模式下的收流端口（UDP 与 TCP 被动共用）
+  rtp-single-port-number: 24560
   # 随流上下线自动录像
   auto-record: false
   record-root: ""

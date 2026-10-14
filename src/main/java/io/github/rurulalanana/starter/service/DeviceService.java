@@ -73,12 +73,35 @@ public class DeviceService {
                 .orderByAsc(GbChannel::getChannelNo));
     }
 
-    /** 按通道编号查询。 */
+    /**
+     * 按通道编号查询。
+     *
+     * <p><b>注意</b>：通道编号只在单设备内唯一，多设备环境请用
+     * {@link #findChannel(String, String)} 指定设备编码，否则可能拿到别的设备的同号通道。
+     */
     public GbChannel findChannel(String channelId) {
         if (channelId == null || channelId.isBlank()) {
             return null;
         }
         return channelMapper.selectOne(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getChannelId, channelId).last("limit 1"));
+    }
+
+    /**
+     * 按「设备编码 + 通道编码」查询通道（推荐）。
+     *
+     * <p>通道编码跨设备可重复（GB/T 28181 只保证设备编码全局唯一），
+     * 只按通道编码查会随机命中别的设备的同号通道。
+     */
+    public GbChannel findChannel(String deviceId, String channelId) {
+        if (channelId == null || channelId.isBlank()) {
+            return null;
+        }
+        if (deviceId == null || deviceId.isBlank()) {
+            return findChannel(channelId);
+        }
+        return channelMapper.selectOne(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId)
                 .eq(GbChannel::getChannelId, channelId).last("limit 1"));
     }
 
@@ -249,17 +272,26 @@ public class DeviceService {
                 .eq(GbDevice::getOnline, true)
                 .and(w -> w.isNull(GbDevice::getKeepaliveTime)
                         .or().lt(GbDevice::getKeepaliveTime, deadline)));
-        for (GbDevice d : silent) {
-            d.setOnline(false);
-            d.setStatus("OFF");
-            d.setUpdateTime(LocalDateTime.now());
-            deviceMapper.updateById(d);
-            touchDeviceChannels(d.getDeviceId(), "OFF");
-            logStatus(d.getDeviceId(), null, "ON", "OFF", "心跳超时", "silent");
+        if (silent.isEmpty()) {
+            return 0;
         }
-        if (!silent.isEmpty()) {
-            log.info("心跳超时下线 {} 个设备（阈值 {}s）", silent.size(), timeoutSeconds);
-        }
+        // 千台规模下逐台 updateById + touchDeviceChannels + logStatus 是数千次数据库往返，
+        // 事务会一直挂着（实测能把落库线程拖到「看起来卡死」）。这里改成三条批量 SQL。
+        List<String> deviceIds = silent.stream().map(GbDevice::getDeviceId).toList();
+        deviceMapper.markOffline(deviceIds);
+        channelMapper.offlineByDeviceIds(deviceIds);
+        LocalDateTime now = LocalDateTime.now();
+        statusLogMapper.insertBatch(silent.stream().map(d -> {
+            GbStatusLog entry = new GbStatusLog();
+            entry.setDeviceId(d.getDeviceId());
+            entry.setOldStatus("ON");
+            entry.setNewStatus("OFF");
+            entry.setDescription("心跳超时");
+            entry.setReason("silent");
+            entry.setCreateTime(now);
+            return entry;
+        }).toList());
+        log.info("心跳超时下线 {} 个设备（阈值 {}s）", silent.size(), timeoutSeconds);
         return silent.size();
     }
 
@@ -283,6 +315,10 @@ public class DeviceService {
     /**
      * 处理设备目录应答，落库设备与通道。
      *
+     * <p><b>通道只由目录应答产生</b>：设备报了什么就存什么，没报就不存。
+     * 不在这里做「目录为空则把设备自身登记为通道」的兜底 —— 目录应答是异步的，
+     * 兜底一旦抢跑就会和设备随后上报的真实子通道并存，留下两条脏数据。
+     *
      * @param parentDeviceId 应答来源设备（目录项归属该设备）
      * @param items          目录项
      */
@@ -300,7 +336,6 @@ public class DeviceService {
             device.setCreateTime(LocalDateTime.now());
             deviceMapper.insert(device);
         }
-        int channelCount = 0;
         for (CatalogItem item : items) {
             if (item == null || item.getDeviceId() == null || item.getDeviceId().isBlank()) {
                 continue;
@@ -311,95 +346,26 @@ public class DeviceService {
                 continue;
             }
             saveChannel(device, item);
-            channelCount++;
         }
-        if (channelCount > 0) {
-            device.setChannelCount(channelCount);
-        } else {
-            // 目录为空：设备本身就是一路摄像头（直连相机常见），
-            // 为它建一条「自身通道」，否则前端 channellist 永远是空的。
-            materializeSelfChannel(device);
-        }
+        // 通道数按【库里的实际行数】回填，不用本次目录项计数：
+        // 目录应答可能是分页/增量的（一次只报部分通道），累加会得到偏小的值；
+        // 设备自身那条（deviceId == parentDeviceId）也不该计入通道。
+        // 早先直接用 channelCount++ 的结果覆盖，遇到「先 DeviceInfo 报 Channel=1、
+        // 后 Catalog 报 3 条」就会停在 1，与 gb_channel 的行数对不上。
+        int channelCount = countChannels(parentDeviceId);
+        device.setChannelCount(channelCount);
         device.setUpdateTime(LocalDateTime.now());
         deviceMapper.updateById(device);
-        log.info("目录已同步: device={} 通道数={}", parentDeviceId, device.getChannelCount());
+        log.info("目录已同步: device={} 本次目录项={} 通道总数={}",
+                parentDeviceId, items.size(), channelCount);
     }
 
-    /**
-     * 把设备自身登记为一条通道（供定时任务调用）。
-     *
-     * <p>很多 IPC/NVR 的 Catalog 应答不含子通道（或 Channel=1 但不下发 Item），
-     * 此时设备编号本身即可作为通道编号点播。不建这条记录的话，
-     * 前端通道列表为空，用户看不到任何可播放的通道。
-     *
-     * @return true 表示本次新建了通道
-     */
-    @Transactional
-    public boolean ensureSelfChannel(String deviceId) {
-        if (deviceId == null || deviceId.isBlank()) {
-            return false;
-        }
-        GbDevice device = findDevice(deviceId);
-        if (device == null || !Boolean.TRUE.equals(device.getOnline())) {
-            return false;
-        }
-        // 已有任何通道（含子通道）就不再补自身通道
-        Long existing = channelMapper.selectCount(Wrappers.<GbChannel>lambdaQuery()
-                .eq(GbChannel::getDeviceId, deviceId));
-        if (existing != null && existing > 0) {
-            return false;
-        }
-        materializeSelfChannel(device);
-        device.setUpdateTime(LocalDateTime.now());
-        deviceMapper.updateById(device);
-        return true;
-    }
-
-    /**
-     * 把设备自身登记为一条通道。
-     *
-     * <p>很多 IPC/NVR 的 Catalog 应答不含子通道（或 Channel=1 但不下发 Item），
-     * 此时设备编号本身即可作为通道编号点播。不建这条记录的话，
-     * 前端通道列表为空，用户看不到任何可播放的通道。
-     */
-    private void materializeSelfChannel(GbDevice device) {
-        String deviceId = device.getDeviceId();
-        if (deviceId == null || deviceId.isBlank()) {
-            return;
-        }
-        GbChannel existing = findChannel(deviceId);
-        if (existing != null) {
-            // 已存在则只刷新在线状态与名称，不覆盖用户改过的自定义字段
-            if (existing.getStatus() == null || !existing.getStatus().equals(device.getStatus())) {
-                existing.setStatus(device.getStatus());
-                existing.setUpdateTime(LocalDateTime.now());
-                channelMapper.updateById(existing);
-            }
-            if (device.getChannelCount() == null || device.getChannelCount() == 0) {
-                device.setChannelCount(1);
-            }
-            return;
-        }
-        GbChannel channel = new GbChannel();
-        channel.setChannelId(deviceId);
-        channel.setDeviceId(deviceId);
-        channel.setName(device.displayName());
-        channel.setManufacturer(device.getManufacturer());
-        channel.setModel(device.getModel());
-        channel.setCivilCode(device.getCivilCode());
-        channel.setAddress(device.getAddress());
-        channel.setParentId(device.getParentId());
-        channel.setLongitude(device.getLongitude());
-        channel.setLatitude(device.getLatitude());
-        channel.setPtzType(device.getPtzType());
-        channel.setStatus(device.getStatus());
-        channel.setRegisterWay(1);
-        channel.setOnDemand(true);
-        channel.setCreateTime(LocalDateTime.now());
-        channel.setUpdateTime(LocalDateTime.now());
-        channelMapper.insert(channel);
-        device.setChannelCount(1);
-        log.info("目录无子通道，已把设备自身登记为通道: device={}", deviceId);
+    /** 统计某设备下的通道行数（设备自身那条目录项不计入）。 */
+    private int countChannels(String deviceId) {
+        Long n = channelMapper.selectCount(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId)
+                .ne(GbChannel::getChannelId, deviceId));
+        return n == null ? 0 : n.intValue();
     }
 
     /** 处理设备信息应答（{@code DeviceInfo} 查询结果），更新设备属性。 */
@@ -415,15 +381,21 @@ public class DeviceService {
         applyText(msg, "Firmware", device::setFirmware);
         applyText(msg, "CivilCode", device::setCivilCode);
         applyText(msg, "Address", device::setAddress);
-        applyInt(msg, "Channel", device::setChannelCount);
+        // 刻意不采纳 DeviceInfo 里的 <Channel>：那是设备自报的通道数，
+        // 与平台实际同步到的 gb_channel 行数常不一致（设备少报/多报、目录尚未同步完），
+        // 采纳会让「设备列表的通道数」与「通道列表的实际条数」对不上。
+        // 通道数一律以 gb_channel 的实际行数为准（见 saveCatalog / countChannels）。
         applyDouble(msg, "Longitude", v -> device.setLongitude(BigDecimal.valueOf(v)));
         applyDouble(msg, "Latitude", v -> device.setLatitude(BigDecimal.valueOf(v)));
+        device.setChannelCount(countChannels(deviceId));
         device.setUpdateTime(LocalDateTime.now());
         deviceMapper.updateById(device);
     }
 
     private void saveChannel(GbDevice device, CatalogItem item) {
-        GbChannel channel = findChannel(item.getDeviceId());
+        // 必须按「设备编码 + 通道编码」查：通道编码跨设备可重复，
+        // 只按通道编码查会把第二台设备的同号通道当成已存在而覆盖掉
+        GbChannel channel = findChannel(device.getDeviceId(), item.getDeviceId());
         if (channel == null) {
             channel = new GbChannel();
             channel.setChannelId(item.getDeviceId());
@@ -504,10 +476,46 @@ public class DeviceService {
         logStatus(channel.getDeviceId(), channelId, old, status, "通道状态变更", null);
     }
 
+    /**
+     * 更新通道状态（按「设备编码 + 通道编码」精确定位）。
+     *
+     * <p>通道编码跨设备可重复，只按通道编码可能改到别的设备的同号通道。
+     */
+    public void setChannelStatus(String deviceId, String channelId, String status) {
+        GbChannel channel = findChannel(deviceId, channelId);
+        if (channel == null) {
+            return;
+        }
+        String old = channel.getStatus();
+        if (status.equals(old)) {
+            return;
+        }
+        channel.setStatus(status);
+        channel.setUpdateTime(LocalDateTime.now());
+        channelMapper.updateById(channel);
+        logStatus(channel.getDeviceId(), channelId, old, status, "通道状态变更", null);
+    }
+
     /** 记录 / 清除通道的当前直播流。 */
     @Transactional
     public void setChannelStream(String channelId, String streamId) {
         GbChannel channel = findChannel(channelId);
+        if (channel == null) {
+            return;
+        }
+        channel.setStreamId(streamId);
+        channel.setUpdateTime(LocalDateTime.now());
+        channelMapper.updateById(channel);
+    }
+
+    /**
+     * 记录 / 清除通道的当前直播流（按「设备编码 + 通道编码」精确定位）。
+     *
+     * <p>通道编码跨设备可重复，只用通道编码可能改到别的设备的同号通道。
+     */
+    @Transactional
+    public void setChannelStream(String deviceId, String channelId, String streamId) {
+        GbChannel channel = findChannel(deviceId, channelId);
         if (channel == null) {
             return;
         }
@@ -569,15 +577,7 @@ public class DeviceService {
     }
 
     private void touchDeviceChannels(String deviceId, String status) {
-        List<GbChannel> channels = channelsOf(deviceId);
-        for (GbChannel c : channels) {
-            if (status.equals(c.getStatus())) {
-                continue;
-            }
-            c.setStatus(status);
-            c.setUpdateTime(LocalDateTime.now());
-            channelMapper.updateById(c);
-        }
+        channelMapper.updateStatusByDeviceId(deviceId, status);
     }
 
     // ==================== 状态日志 ====================
@@ -618,13 +618,6 @@ public class DeviceService {
     private static void applyText(ManscdpMessage msg, String tag, java.util.function.Consumer<String> setter) {
         String v = msg.firstText(tag);
         if (v != null && !v.isBlank()) {
-            setter.accept(v);
-        }
-    }
-
-    private static void applyInt(ManscdpMessage msg, String tag, java.util.function.Consumer<Integer> setter) {
-        Integer v = msg.intOf(tag);
-        if (v != null) {
             setter.accept(v);
         }
     }

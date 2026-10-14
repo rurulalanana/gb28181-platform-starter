@@ -49,28 +49,40 @@ public class StreamService {
     /**
      * 开始实时直播（标准 9.2）。
      *
-     * @param channelId 通道编号（= ZLM 流名）
+     * @param deviceId  设备编码（SIP 目标，全局唯一）
+     * @param channelId 通道编码（= ZLM 流名）；{@code null} 或与设备编码相同表示设备自身
      * @return 流信息
      */
-    public GbStream startLive(String channelId) {
-        RtpSession existing = platform.sessionManager().getByChannel(channelId);
+    public GbStream startLive(String deviceId, String channelId) {
+        String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+        RtpSession existing = platform.sessionManager().getByChannel(deviceId, channel);
         if (existing != null && !RtpSession.CLOSED.equals(existing.getState())) {
             // 已有点播：直接复用，避免重复 INVITE 造成设备侧抖动
             return toStream(existing, GbStream.TYPE_LIVE);
         }
-        GbChannel channel = deviceService.findChannel(channelId);
-        if (channel != null && !channel.isOnline()) {
-            throw BizException.badRequest("通道不在线：" + channelId);
+        GbChannel ch = deviceService.findChannel(deviceId, channel);
+        if (ch != null && !ch.isOnline()) {
+            throw BizException.badRequest("通道不在线：" + channel);
         }
         // 平台重启后 SIP 注册表为空（纯内存），而设备要到下次心跳才自愈，
         // 空窗期内点播会报「设备未注册或会话已失效」。这里按库里的地址先补一次，
         // 让重启后立刻点播也能成功。
-        healRegistryIfNeeded(channel);
-        RtpSession session = platform.mediaService().play(channelId);
+        healRegistryIfNeeded(ch);
+        RtpSession session = platform.mediaService().play(deviceId, channel);
         GbStream stream = toStream(session, GbStream.TYPE_LIVE);
         save(stream);
-        deviceService.setChannelStream(channelId, stream.getStreamKey());
+        deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
         return stream;
+    }
+
+    /**
+     * 开始实时直播（设备直连：设备编码即通道编码）。
+     *
+     * <p>适用于直连摄像机或设备自身就是一路通道的场景；
+     * 下挂子通道请用 {@link #startLive(String, String)}。
+     */
+    public GbStream startLive(String deviceId) {
+        return startLive(deviceId, deviceId);
     }
 
     /** 注册表缺该通道所属设备时，按数据库记录重建会话。 */
@@ -93,42 +105,50 @@ public class StreamService {
     /**
      * 开始历史回放（标准 9.8）。
      *
-     * @param item 录像段（{@link RecordItem#ofFilePath} 可只带 filePath）
+     * @param deviceId  设备编码（SIP 目标）
+     * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
+     * @param item      录像段（{@link RecordItem#ofFilePath} 可只带 filePath）
      */
-    public GbStream startPlayback(String channelId, RecordItem item) {
-        RtpSession session = platform.mediaService().playback(channelId, item);
+    public GbStream startPlayback(String deviceId, String channelId, RecordItem item) {
+        RtpSession session = platform.mediaService().playback(deviceId, channelId, item);
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;
     }
 
-    /** 停止某通道的流（发 BYE 释放设备带宽 + 关闭收流端口）。 */
-    public boolean stop(String channelId) {
-        RtpSession session = platform.sessionManager().getByChannel(channelId);
-        if (session == null) {
-            return false;
-        }
-        String callId = session.getCallId();
-        String deviceId = session.getDeviceId();
-        // 发 BYE 让设备停止推流，否则设备会持续占用上行带宽
-        if (callId != null && deviceId != null && platform.client() != null) {
-            try {
-                platform.client().bye(deviceId, callId, session.getToTag());
-            } catch (Exception e) {
-                log.warn("发送 BYE 失败: channel={} callId={} {}", channelId, callId, e.getMessage());
-            }
-        }
-        platform.sessionManager().closeByChannel(channelId);
-        markClosed(channelId);
-        deviceService.setChannelStream(channelId, null);
-        return true;
+    /** 开始历史回放（设备直连：设备编码即通道编码）。 */
+    public GbStream startPlayback(String deviceId, RecordItem item) {
+        return startPlayback(deviceId, deviceId, item);
+    }
+
+    /**
+     * 停止某通道的流（发 BYE 释放设备带宽 + 关闭收流端口）。
+     *
+     * <p>BYE 与本地释放统一由 {@link Gb28181MediaService#stop(String, String)}
+     * 负责，避免两条停止路径（原生接口 / 业务接口）行为不一致——
+     * 早先 {@code /api/stop} 只释放本地资源不发 BYE，设备会继续推流。
+     *
+     * <p>数据库状态由 {@code StreamEventBridge.onSessionClosed} 回写
+     * （{@code gb_stream} 置 CLOSED、通道 stream_id 清空），此处不重复处理。
+     *
+     * @param deviceId  设备编码
+     * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
+     * @return 是否找到并关闭了会话
+     */
+    public boolean stop(String deviceId, String channelId) {
+        return platform.mediaService().stop(deviceId, channelId);
+    }
+
+    /** 停止某通道的流（设备直连：设备编码即通道编码）。 */
+    public boolean stop(String deviceId) {
+        return stop(deviceId, deviceId);
     }
 
     /** 停止全部流。 */
     public int stopAll() {
         List<RtpSession> sessions = new ArrayList<>(platform.sessionManager().sessions());
         for (RtpSession s : sessions) {
-            stop(s.getChannelId());
+            stop(s.getDeviceId(), s.getChannelId());
         }
         return sessions.size();
     }
@@ -137,15 +157,39 @@ public class StreamService {
     public void stopByCallId(String callId) {
         RtpSession session = platform.sessionManager().getByCallId(callId);
         if (session != null) {
-            markClosed(session.getChannelId());
+            markClosed(session.getSessionKey());
         }
     }
 
     // ==================== 查询 ====================
 
-    /** 某通道当前会话。 */
+    /**
+     * 某通道当前会话。
+     *
+     * @param deviceId  设备编码
+     * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
+     */
+    public RtpSession session(String deviceId, String channelId) {
+        return platform.sessionManager().getByChannel(deviceId, channelId);
+    }
+
+    /**
+     * 某通道当前会话（设备直连：设备编码即通道编码）。
+     *
+     * <p><b>注意</b>：通道编码跨设备可能重复，多设备环境请用
+     * {@link #session(String, String)} 精确指定。
+     */
     public RtpSession session(String channelId) {
         return platform.sessionManager().getByChannel(channelId);
+    }
+
+    /**
+     * 按会话键取会话（{@code <设备编码>/<通道编码>}）。
+     *
+     * <p>与 ZLM 的 {@code app/stream} 一致，是会话的唯一标识。
+     */
+    public RtpSession sessionByKey(String sessionKey) {
+        return platform.sessionManager().getByKey(sessionKey);
     }
 
     /** 当前全部会话。 */
@@ -159,9 +203,11 @@ public class StreamService {
         if (session == null) {
             return vo;
         }
-        String stream = session.getStream();
-        PlayUrls urls = platform.mediaServer() == null ? null : platform.mediaServer().playUrls(stream);
-        vo.setStreamId(stream);
+        PlayUrls urls = platform.mediaServer() == null
+                ? null : platform.mediaServer().playUrls(session);
+        // streamId 用「设备编码/通道编码」复合标识：通道编码跨设备可重复，
+        // 单独返回通道编码会让前端无法区分两台设备的同号通道
+        vo.setStreamId(session.getSessionKey());
         vo.setDeviceId(session.getDeviceId());
         vo.setChannelId(session.getChannelId());
         vo.setSmsId(props.getPlatformId());
@@ -177,7 +223,7 @@ public class StreamService {
             vo.setRtsp(urls.getRtsp());
             vo.setRtmp(urls.getRtmp());
         }
-        GbChannel channel = deviceService.findChannel(session.getChannelId());
+        GbChannel channel = deviceService.findChannel(session.getDeviceId(), session.getChannelId());
         if (channel != null) {
             vo.setChannelName(channel.displayName());
             vo.setChannelPtzType(channel.getPtzType());
@@ -196,11 +242,13 @@ public class StreamService {
     /** 会话 → 数据库实体。 */
     public GbStream toStream(RtpSession session, String type) {
         GbStream s = new GbStream();
-        s.setStreamKey(session.getStream());
+        // stream_key 用复合标识（设备/通道），与 ZLM 的 app/stream 一致，
+        // 保证唯一约束不会因两台设备同号通道而冲突
+        s.setStreamKey(session.getSessionKey());
         s.setChannelId(session.getChannelId());
         s.setDeviceId(session.getDeviceId());
         s.setStreamName(session.getStream());
-        s.setApp(props.getApp());
+        s.setApp(session.getZlmApp());
         s.setSsrc(session.getSsrc());
         s.setRtpPort(session.getPort());
         s.setStreamType(type);
@@ -209,8 +257,8 @@ public class StreamService {
         s.setTransport(session.getTcpMode() == 1 ? "TCP" : "UDP");
         s.setStartTime(TimeFormats.ofEpochMilli(session.getCreatedAt()));
         s.setUpdateTime(LocalDateTime.now());
-        PlayUrls urls = platform.mediaServer() == null ? null
-                : platform.mediaServer().playUrls(session.getStream());
+        PlayUrls urls = platform.mediaServer() == null
+                ? null : platform.mediaServer().playUrls(session);
         if (urls != null) {
             s.setHttpFlv(urls.getHttpFlv());
             s.setWsFlv(urls.getWsFlv());
@@ -254,45 +302,35 @@ public class StreamService {
         }
     }
 
-    /** 流上线。
+    /**
+     * 流上线。
      *
-     * <p>ZLM 上报的 {@code (app, stream)} 有两种布局，两种都要认（详见
-     * {@code RtpSessionManager.findByStream}）：{@code app=rtp, stream=<通道>/<序号>}
-     * 与 {@code app=<通道>, stream=<序号>}。因此不能用 app 做过滤条件，
-     * 只能靠「能否映射到已知通道」来判定。
-     *
-     * @param app    ZLM 应用名（可能是 {@code rtp}，也可能是通道编码）
-     * @param stream ZLM 流名（{@code <通道编码>} 或 {@code <序号>}）
+     * @param streamKey 复合流标识 {@code <设备编码>/<通道编码>}
      */
-    public void markOnline(String app, String stream) {
-        String channelId = channelKeyOf(app, stream);
-        if (channelId == null) {
+    public void markOnline(String streamKey) {
+        if (streamKey == null || streamKey.isBlank()) {
             return;
         }
-        GbStream record = findByChannel(channelId, GbStream.TYPE_LIVE);
+        GbStream record = findByStreamKey(streamKey);
         if (record == null) {
-            record = findByChannel(channelId, GbStream.TYPE_PLAYBACK);
+            return;
         }
-        if (record != null) {
+        if (!GbStream.STATE_ONLINE.equals(record.getState())) {
             record.setState(GbStream.STATE_ONLINE);
             record.setUpdateTime(LocalDateTime.now());
             streamMapper.updateById(record);
         }
-        if (deviceService.findChannel(channelId) != null) {
-            deviceService.setChannelStatus(channelId, "ON");
+        if (deviceService.findChannel(record.getDeviceId(), record.getChannelId()) != null) {
+            deviceService.setChannelStatus(record.getDeviceId(), record.getChannelId(), "ON");
         }
     }
 
     /** 流下线（端口保留，等设备恢复）。参数含义同 {@link #markOnline}。 */
-    public void markOffline(String app, String stream) {
-        String channelId = channelKeyOf(app, stream);
-        if (channelId == null) {
+    public void markOffline(String streamKey) {
+        if (streamKey == null || streamKey.isBlank()) {
             return;
         }
-        GbStream record = findByChannel(channelId, GbStream.TYPE_LIVE);
-        if (record == null) {
-            record = findByChannel(channelId, GbStream.TYPE_PLAYBACK);
-        }
+        GbStream record = findByStreamKey(streamKey);
         if (record != null && !GbStream.STATE_CLOSED.equals(record.getState())) {
             record.setState(GbStream.STATE_NEGOTIATING);
             record.setUpdateTime(LocalDateTime.now());
@@ -300,25 +338,50 @@ public class StreamService {
         }
     }
 
-    /** 标记通道流已关闭。 */
-    public void markClosed(String channelId) {
-        for (GbStream s : streamMapper.selectList(Wrappers.<GbStream>lambdaQuery()
-                .eq(GbStream::getChannelId, channelId)
-                .ne(GbStream::getState, GbStream.STATE_CLOSED))) {
-            s.setState(GbStream.STATE_CLOSED);
-            s.setUpdateTime(LocalDateTime.now());
-            streamMapper.updateById(s);
+    /**
+     * 标记流已关闭。
+     *
+     * @param streamKey 复合流标识 {@code <设备编码>/<通道编码>}
+     */
+    public void markClosed(String streamKey) {
+        if (streamKey == null || streamKey.isBlank()) {
+            return;
+        }
+        GbStream record = findByStreamKey(streamKey);
+        if (record != null && !GbStream.STATE_CLOSED.equals(record.getState())) {
+            record.setState(GbStream.STATE_CLOSED);
+            record.setUpdateTime(LocalDateTime.now());
+            streamMapper.updateById(record);
         }
     }
 
-    /** 按类型查某通道的当前流记录。 */
-    public GbStream findByChannel(String channelId, String type) {
+    /**
+     * 按类型查某通道的当前流记录。
+     *
+     * <p>用「设备编码 + 通道编码」精确定位：通道编码跨设备可重复，
+     * 只按通道编码查会拿到别的设备的同号通道记录。
+     *
+     * @param deviceId  设备编码；{@code null} 时退化为只按通道编码查
+     * @param channelId 通道编码
+     */
+    public GbStream findByChannel(String deviceId, String channelId, String type) {
         return streamMapper.selectOne(Wrappers.<GbStream>lambdaQuery()
                 .eq(GbStream::getChannelId, channelId)
+                .eq(deviceId != null && !deviceId.isBlank(), GbStream::getDeviceId, deviceId)
                 .eq(GbStream::getStreamType, type)
                 .ne(GbStream::getState, GbStream.STATE_CLOSED)
                 .orderByDesc(GbStream::getStartTime)
                 .last("limit 1"));
+    }
+
+    /**
+     * 按类型查某通道的当前流记录（设备直连：设备编码即通道编码）。
+     *
+     * <p><b>注意</b>：通道编码跨设备可能重复，多设备环境请用
+     * {@link #findByChannel(String, String, String)}。
+     */
+    public GbStream findByChannel(String channelId, String type) {
+        return findByChannel(null, channelId, type);
     }
 
     /** 按流名查记录。 */
@@ -347,30 +410,6 @@ public class StreamService {
             }
         }
         return out;
-    }
-
-    /**
-     * 把 ZLM 上报的 {@code (app, stream)} 归一成通道编码。
-     *
-     * <p>ZLM 的两种流标识布局：
-     * <ul>
-     *   <li>{@code app=rtp, stream=<通道编码>/<序号>} —— 取 stream 的斜杠前部分</li>
-     *   <li>{@code app=<通道编码>, stream=<序号>} —— 取 app</li>
-     * </ul>
-     * 都不是则返回 null（无法归属到任何通道，直接忽略）。
-     */
-    private String channelKeyOf(String app, String stream) {
-        if (stream != null) {
-            int slash = stream.lastIndexOf('/');
-            if (slash > 0) {
-                return stream.substring(0, slash);
-            }
-        }
-        if (app != null && !app.isBlank() && !props.getApp().equals(app)) {
-            return app;
-        }
-        // app=rtp 且 stream 不带斜杠：stream 可能就是通道编码
-        return stream == null || stream.isBlank() ? null : stream;
     }
 
     private String deviceNameOf(String deviceId) {
