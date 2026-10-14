@@ -30,6 +30,8 @@ public class Gb28181PlatformConfiguration {
                 .rtspPort(props.getRtspPort())
                 .rtcPort(props.getRtcPort())
                 .app(props.getApp())
+                .rtpSinglePort(props.isRtpSinglePort())
+                .rtpSinglePortNumber(props.getRtpSinglePortNumber())
                 .autoRecord(props.isAutoRecord())
                 .recordRoot(isBlank(props.getRecordRoot())
                         ? System.getProperty("user.dir") + "/record" : props.getRecordRoot());
@@ -42,10 +44,12 @@ public class Gb28181PlatformConfiguration {
 
         Gb28181MediaPlatform platform = new Gb28181MediaPlatform(mediaProps);
         platform.start();
-        log.info("GB28181 平台已启动：SIP {}:{} / 媒体 http={} rtmp={} rtsp={} rtc={}",
+        log.info("GB28181 平台已启动：SIP {}:{} / 媒体 http={} rtmp={} rtsp={} rtc={} / RTP收流={}",
                 props.getSipHost(), props.getSipPort(),
                 platform.mediaServer().getHttpPort(), platform.mediaServer().getRtmpPort(),
-                platform.mediaServer().getRtspPort(), platform.mediaServer().getRtcPort());
+                platform.mediaServer().getRtspPort(), platform.mediaServer().getRtcPort(),
+                platform.mediaServer().isSinglePortMode()
+                        ? ("单端口:" + platform.mediaServer().getSinglePort()) : "每通道独占端口");
         return platform;
     }
 

@@ -131,8 +131,9 @@ public class RelayService {
         int rtspPort = platform.mediaServer().getRtspPort();
         String ip = props.getMediaIp() == null || props.getMediaIp().isBlank()
                 ? "127.0.0.1" : props.getMediaIp();
-        // 本地拉流用回环地址，避免绕一圈网卡
-        return "rtsp://127.0.0.1:" + rtspPort + "/" + session.getStream()
+        // 本地拉流用回环地址，避免绕一圈网卡。
+        // 路径必须是 app/stream（app=设备编码、stream=通道编码），只写通道编码会 404。
+        return "rtsp://127.0.0.1:" + rtspPort + "/" + session.getZlmApp() + "/" + session.getStream()
                 + "?ip=" + ip;
     }
 

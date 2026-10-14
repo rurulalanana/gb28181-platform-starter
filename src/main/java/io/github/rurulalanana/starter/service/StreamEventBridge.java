@@ -43,12 +43,13 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
             platform.mediaServer().addStreamListener(new ZlmMediaServer.StreamListener() {
                 @Override
                 public void onStreamOnline(String app, String stream) {
-                    asyncExecutor.run("流上线落库", () -> streamService.markOnline(app, stream));
+                    // app=设备编码、stream=通道编码，拼起来就是 stream_key
+                    asyncExecutor.run("流上线落库", () -> streamService.markOnline(app + "/" + stream));
                 }
 
                 @Override
                 public void onStreamOffline(String app, String stream) {
-                    asyncExecutor.run("流下线落库", () -> streamService.markOffline(app, stream));
+                    asyncExecutor.run("流下线落库", () -> streamService.markOffline(app + "/" + stream));
                 }
             });
         }
@@ -69,26 +70,26 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
 
     @Override
     public void onSessionOnline(RtpSession session) {
-        log.info("媒体流已上线: channel={} port={} ssrc={}",
-                session.getChannelId(), session.getPort(), session.getSsrc());
+        log.info("媒体流已上线: {} port={} ssrc={}",
+                session.getSessionKey(), session.getPort(), session.getSsrc());
         asyncExecutor.run("流上线处理", () -> {
-            deviceService.setChannelStatus(session.getChannelId(), "ON");
-            streamService.markOnline(null, session.getStream());
+            deviceService.setChannelStatus(session.getDeviceId(), session.getChannelId(), "ON");
+            streamService.markOnline(session.getSessionKey());
         });
     }
 
     @Override
     public void onSessionOffline(RtpSession session) {
-        log.info("媒体流已下线（端口保留等待恢复）: channel={}", session.getChannelId());
-        asyncExecutor.run("流下线处理", () -> streamService.markOffline(null, session.getStream()));
+        log.info("媒体流已下线（端口保留等待恢复）: {}", session.getSessionKey());
+        asyncExecutor.run("流下线处理", () -> streamService.markOffline(session.getSessionKey()));
     }
 
     @Override
     public void onSessionClosed(RtpSession session) {
-        log.info("会话已关闭: channel={}", session.getChannelId());
+        log.info("会话已关闭: {}", session.getSessionKey());
         asyncExecutor.run("会话关闭处理", () -> {
-            streamService.markClosed(session.getChannelId());
-            deviceService.setChannelStream(session.getChannelId(), null);
+            streamService.markClosed(session.getSessionKey());
+            deviceService.setChannelStream(session.getDeviceId(), session.getChannelId(), null);
         });
     }
 }

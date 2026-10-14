@@ -8,6 +8,7 @@ import io.github.rurulalanana.starter.vo.WebrtcConfigVo;
 import io.github.rurulalanana.starter.vo.WebrtcPlayVo;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -56,8 +57,11 @@ public class WebRtcController {
     /**
      * 交换 SDP。
      *
-     * <p>{@code stream} 传通道编号（如 {@code 34020000001320000001}），
-     * 或 {@code app/stream} 完整流标识。
+     * <p>ZLM 媒体源标识是 {@code app/stream}，本平台约定 {@code app = 设备编码}、
+     * {@code stream = 通道编码}（通道编码跨设备可重复，必须带上设备编码）。
+     *
+     * @param stream {@code <设备编码>/<通道编码>}；设备直连（设备编码即通道编码）
+     *               时可只传一个编码
      */
     @PostMapping(value = "/play", consumes = "*/*", produces = "application/json;charset=UTF-8")
     public ApiResponse<WebrtcPlayVo> play(@RequestParam String stream,
@@ -66,20 +70,25 @@ public class WebRtcController {
         if (platform.webRtcService() == null || platform.mediaServer() == null) {
             throw BizException.badRequest("媒体服务未启动，无法进行 WebRTC 交换");
         }
-        String app = props.getApp();
-        String channel = stream;
-        if (stream.contains("/")) {
+        String app;
+        String channel;
+        if (stream != null && stream.contains("/")) {
             String[] parts = stream.split("/", 2);
             app = parts[0];
             channel = parts[1];
+        } else {
+            // 单个编码 = 设备直连（设备编码即通道编码）
+            app = stream;
+            channel = stream;
         }
         // 若流尚未建立，自动点播（避免浏览器拿到空流）
-        RtpSession session = platform.sessionManager().getByChannel(channel);
+        RtpSession session = platform.sessionManager().getByChannel(app, channel);
         if (session == null) {
             try {
-                streamService.startLive(channel);
+                streamService.startLive(app, channel);
             } catch (Exception e) {
-                log.warn("WebRTC 播放前自动点播失败: channel={} err={}", channel, e.getMessage());
+                log.warn("WebRTC 播放前自动点播失败: app={} channel={} err={}",
+                        app, channel, e.getMessage());
             }
         }
         String peer = peerId == null || peerId.isBlank()
@@ -93,7 +102,7 @@ public class WebRtcController {
             vo.setPeerId(peer);
             vo.setSdp(answer);
             vo.setStreamId(app + "/" + channel);
-            vo.setWebrtc(platform.mediaServer().playUrls(channel).getWebrtc());
+            vo.setWebrtc(platform.mediaServer().playUrls(app, channel).getWebrtc());
             return ApiResponse.ok(vo);
         } catch (BizException e) {
             throw e;

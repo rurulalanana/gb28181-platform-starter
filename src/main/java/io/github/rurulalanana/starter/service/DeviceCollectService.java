@@ -8,9 +8,8 @@ import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -33,26 +32,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequiredArgsConstructor
 public class DeviceCollectService {
 
-    /** 目录采集后等待应答的时长（毫秒），超时则把设备自身登记为通道。 */
-    private static final long SELF_CHANNEL_FALLBACK_DELAY_MS = 3000L;
-
     private final Gb28181SipClientProvider clientProvider;
     private final Gb28181Properties props;
-    private final DeviceService deviceService;
-    private final PlatformAsyncExecutor asyncExecutor;
 
     /**
-     * 兜底任务调度器。
+     * 采集下发专用线程池。
      *
-     * <p>不能复用 {@link PlatformAsyncExecutor}（单线程串行落库），
-     * 否则一次 sleep 会阻塞后续所有落库任务。这里用独立的小线程池。
+     * <p>采集只做 SIP 下发、<b>不碰数据库</b>，但上千台设备同时上线时，
+     * 若排在 {@link PlatformAsyncExecutor}（单线程串行落库）后面，
+     * 会把设备注册、目录落库一起堵住——实测千台规模下目录应答被推迟 59 秒，
+     * 表现为「设备都注册完了，这边还在慢慢建通道」。
      */
-    private final ScheduledExecutorService fallbackScheduler =
-            Executors.newScheduledThreadPool(1, r -> {
-                Thread t = new Thread(r, "gb28181-fallback");
-                t.setDaemon(true);
-                return t;
-            });
+    private final ExecutorService collectExecutor = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "gb28181-collect");
+        t.setDaemon(true);
+        return t;
+    });
 
     /** 设备编号 → 最近一次采集时间戳（毫秒）。 */
     private final Map<String, Long> lastCollectAt = new ConcurrentHashMap<>();
@@ -84,7 +79,13 @@ public class DeviceCollectService {
             }
         }
         lastCollectAt.put(deviceId, now);
-        asyncExecutor.run("设备数据采集 " + deviceId, () -> doCollect(deviceId));
+        collectExecutor.execute(() -> {
+            try {
+                doCollect(deviceId);
+            } catch (Throwable t) {
+                log.warn("设备数据采集失败: {}", deviceId, t);
+            }
+        });
     }
 
     /** 执行一轮采集。 */
@@ -111,28 +112,9 @@ public class DeviceCollectService {
         }
         collectCount.incrementAndGet();
         log.info("已向设备 {} 下发 {} 项查询（目录/信息/状态）", deviceId, ok);
-        // 目录应答是异步的；延迟兜底：若设备始终不下发子通道，
-        // 把设备自身登记为通道，避免前端通道列表为空
-        scheduleSelfChannelFallback(deviceId);
-    }
-
-    /**
-     * 目录采集兜底：延迟检查是否产生了通道，没有则把设备自身登记为通道。
-     *
-     * <p>设备对 Catalog 的应答通常在 100ms~2s 内到达，这里等 3 秒后检查一次。
-     * <b>注意</b>：不能用 {@link PlatformAsyncExecutor}（单线程）做等待，
-     * 否则会阻塞所有后续落库；这里交给独立的调度线程池。
-     */
-    private void scheduleSelfChannelFallback(String deviceId) {
-        fallbackScheduler.schedule(() -> {
-            try {
-                if (deviceService.ensureSelfChannel(deviceId)) {
-                    log.info("设备 {} 未上报子通道，已登记自身为通道", deviceId);
-                }
-            } catch (Exception e) {
-                log.warn("登记自身通道失败: device={} err={}", deviceId, e.getMessage());
-            }
-        }, SELF_CHANNEL_FALLBACK_DELAY_MS, TimeUnit.MILLISECONDS);
+        // 通道只认设备上报的目录应答（SipEventBridge → saveCatalog）。
+        // 这里刻意不做「等 3 秒没子通道就把设备自身登记为通道」的兜底：
+        // 目录应答经常晚于兜底定时器，结果是设备同时留下「自身通道」和真实子通道两条脏数据。
     }
 
     /** 单条查询下发，异常不影响其他查询。 */

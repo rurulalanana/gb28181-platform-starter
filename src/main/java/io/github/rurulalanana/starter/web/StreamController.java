@@ -57,13 +57,20 @@ public class StreamController {
     private final Gb28181MediaPlatform platform;
     private final Gb28181Properties props;
 
-    /** 开始直播。 */
+    /**
+     * 开始直播。
+     *
+     * <p>{@code serial} = 设备编码，{@code code} = 通道编码（省略则视为设备直连，
+     * 即设备编码本身就是通道编码）。
+     */
     @PostMapping("/start")
     public ApiResponse<StreamVo> start(@RequestBody StreamStartRequest req) {
         StpUtil.checkLogin();
-        String channelId = requireChannel(req.getSerial(), req.getCode());
-        GbStream stream = streamService.startLive(channelId);
-        StreamVo vo = streamService.describe(streamService.session(channelId));
+        requireMedia();
+        String deviceId = requireDevice(req.getSerial());
+        String channelId = channelOf(deviceId, req.getCode());
+        GbStream stream = streamService.startLive(deviceId, channelId);
+        StreamVo vo = streamService.describe(streamService.session(deviceId, channelId));
         if (vo.getStreamId() == null) {
             vo = describeStream(stream);
         }
@@ -78,15 +85,16 @@ public class StreamController {
                                           @RequestParam(value = "check_outputs", defaultValue = "false")
                                           Boolean checkOutputs) {
         StpUtil.checkLogin();
-        String channelId = requireChannel(serial, code);
+        String deviceId = requireDevice(serial);
+        String channelId = channelOf(deviceId, code);
         if (Boolean.TRUE.equals(checkOutputs)) {
-            RtpSession session = streamService.session(channelId);
+            RtpSession session = streamService.session(deviceId, channelId);
             if (session != null) {
                 log.info("停止直播前检查：通道 {} 当前有观看者时仍会停止（嵌入式模式无观看人数统计）", channelId);
             }
         }
-        boolean stopped = streamService.stop(channelId);
-        // 通道下线后转推无源，一并释放
+        boolean stopped = streamService.stop(deviceId, channelId);
+        // 通道下线后转推无源，一并释放（转推按通道聚合，属业务维度）
         int relays = relayService.stopAll(channelId);
         StreamStopVo vo = new StreamStopVo();
         vo.setOk(stopped);
@@ -153,7 +161,8 @@ public class StreamController {
                                                 @RequestParam(required = false) String code,
                                                 @RequestParam String cdn) {
         StpUtil.checkLogin();
-        String channelId = requireChannel(serial, code);
+        requireMedia();
+        String channelId = channelOf(requireDevice(serial), code);
         RelayVo entry = relayService.start(channelId, cdn);
         RelayStartVo vo = new RelayStartVo();
         vo.setStreamId(entry.getStreamId());
@@ -167,7 +176,7 @@ public class StreamController {
     public ApiResponse<RelayListVo> relayList(@RequestParam String serial,
                                               @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = requireChannel(serial, code);
+        String channelId = channelOf(requireDevice(serial), code);
         List<RelayVo> list = relayService.list(channelId);
         RelayListVo vo = new RelayListVo();
         vo.setRelayCount(list.size());
@@ -181,7 +190,7 @@ public class StreamController {
                                               @RequestParam(required = false) String code,
                                               @RequestParam(required = false) String cdn) {
         StpUtil.checkLogin();
-        String channelId = requireChannel(serial, code);
+        String channelId = channelOf(requireDevice(serial), code);
         int removed = (cdn == null || cdn.isBlank())
                 ? relayService.stopAll(channelId)
                 : (relayService.stop(channelId, cdn) ? 1 : 0);
@@ -216,16 +225,24 @@ public class StreamController {
 
     // ==================== 内部 ====================
 
-    /** 解析并校验通道（要求设备在线）。 */
-    private String requireChannel(String serial, String code) {
+    /** 解析并校验设备编码。 */
+    private String requireDevice(String serial) {
         if (serial == null || serial.isBlank()) {
-            throw BizException.badRequest("缺少参数 serial");
+            throw BizException.badRequest("缺少参数 serial（设备编码）");
         }
-        String channelId = code == null || code.isBlank() ? serial : code;
+        return serial;
+    }
+
+    /** 通道编码：未指定 code 时视为设备直连（设备编码即通道编码）。 */
+    private String channelOf(String deviceId, String code) {
+        return code == null || code.isBlank() ? deviceId : code;
+    }
+
+    /** 校验媒体服务可用。 */
+    private void requireMedia() {
         if (streamService.mediaService() == null) {
             throw BizException.badRequest("媒体服务未启动");
         }
-        return channelId;
     }
 
     /** 按 ZLM 流名查会话（兼容传裸通道编号）。 */

@@ -6,3 +6,6 @@ record/
 .DS_Store
 hs_err_pid*.log
 replay_pid*.log
+
+# 本机 frp 启动脚本（含本地绝对路径，不入库）
+frp.bat

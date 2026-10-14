@@ -19,6 +19,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.RecordItem;
 import io.github.rurulalanana.gb28181.sip.zlm.Recording;
 import io.github.rurulalanana.gb28181.sip.zlm.RecordingService;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -84,10 +85,11 @@ public class PlatformController {
 
     // ==================== 媒体会话 ====================
 
-    /** 平台主动点播（标准 9.2）。 */
+    /** 平台主动点播（标准 9.2）。下挂子通道请带 {@code channelId} 参数。 */
     @PostMapping("/play/{deviceId}")
-    public NativeSessionVo play(@PathVariable String deviceId) {
-        RtpSession session = platform.mediaService().play(deviceId);
+    public NativeSessionVo play(@PathVariable String deviceId,
+                               @RequestParam(required = false) String channelId) {
+        RtpSession session = platform.mediaService().play(deviceId, channelId);
         return sessionInfo(session);
     }
 
@@ -122,9 +124,10 @@ public class PlatformController {
     /** 发起历史回放（标准 9.8）：filePath 取自检索结果。 */
     @PostMapping("/playback/{deviceId}")
     public NativeSessionVo playback(@PathVariable String deviceId,
-                                    @RequestParam String filePath) {
+                                    @RequestParam String filePath,
+                                    @RequestParam(required = false) String channelId) {
         RecordItem item = RecordItem.ofFilePath(deviceId, filePath);
-        RtpSession session = platform.mediaService().playback(deviceId, item);
+        RtpSession session = platform.mediaService().playback(deviceId, channelId, item);
         return sessionInfo(session);
     }
 
@@ -153,24 +156,30 @@ public class PlatformController {
     /** 文件下载（标准 9.9）。 */
     @PostMapping("/download/{deviceId}")
     public NativeSessionVo download(@PathVariable String deviceId,
-                                    @RequestParam String filePath) {
-        RtpSession session = platform.mediaService().download(deviceId, filePath);
+                                    @RequestParam String filePath,
+                                    @RequestParam(required = false) String channelId) {
+        RtpSession session = platform.mediaService().download(deviceId, channelId, filePath);
         return sessionInfo(session);
     }
 
-    /** 停止点播并释放收流端口。 */
+    /** 停止点播并释放收流端口（发 BYE 通知设备停止推流）。 */
     @PostMapping("/stop/{deviceId}")
-    public NativeOkVo stop(@PathVariable String deviceId) {
-        platform.mediaService().stop(deviceId);
-        NativeOkVo vo = NativeOkVo.of(true);
+    public NativeOkVo stop(@PathVariable String deviceId,
+                          @RequestParam(required = false) String channelId) {
+        boolean stopped = platform.mediaService().stop(deviceId, channelId);
+        NativeOkVo vo = NativeOkVo.of(stopped);
         vo.setDeviceId(deviceId);
+        if (!stopped) {
+            vo.setMessage("未找到活跃会话");
+        }
         return vo;
     }
 
     /** 当前会话 + 播放地址。 */
     @GetMapping("/stream/{deviceId}")
-    public NativeSessionVo stream(@PathVariable String deviceId) {
-        RtpSession session = platform.sessionManager().getByChannel(deviceId);
+    public NativeSessionVo stream(@PathVariable String deviceId,
+                                 @RequestParam(required = false) String channelId) {
+        RtpSession session = platform.sessionManager().getByChannel(deviceId, channelId);
         if (session == null) {
             NativeSessionVo vo = new NativeSessionVo();
             vo.setStreaming(false);
@@ -185,7 +194,10 @@ public class PlatformController {
         List<NativeSessionItemVo> list = new ArrayList<>();
         for (RtpSession s : platform.sessionManager().sessions()) {
             NativeSessionItemVo vo = new NativeSessionItemVo();
+            // 同时给出设备与通道：通道编码跨设备可重复，只给通道无法区分
+            vo.setDeviceId(s.getDeviceId());
             vo.setChannelId(s.getChannelId());
+            vo.setStreamId(s.getSessionKey());
             vo.setType(s.getType().name());
             vo.setState(s.getState());
             vo.setPort(s.getPort());
@@ -259,7 +271,14 @@ public class PlatformController {
 
     // ==================== WebRTC ====================
 
-    /** 浏览器 offer → ZLM answer（嵌入式模式浏览器出画面的唯一通路）。 */
+    /**
+     * 浏览器 offer → ZLM answer（嵌入式模式浏览器出画面的唯一通路）。
+     *
+     * <p>ZLM 媒体源标识是 {@code app/stream}，本平台约定 {@code app = 设备编码}、
+     * {@code stream = 通道编码}（通道编码跨设备可重复，必须带上设备编码）。
+     * 故 {@code stream} 参数需传 {@code <设备编码>/<通道编码>}；
+     * 设备直连（设备编码即通道编码）时可只传一个编码。
+     */
     @PostMapping("/webrtc/play")
     public NativeWebrtcVo webrtcPlay(@RequestParam String stream,
                                      @RequestParam(required = false) String peerId,
@@ -268,18 +287,20 @@ public class PlatformController {
                 ? platform.webRtcService().nextPeerId() : peerId;
         String app = props.getApp();
         String channel = stream;
-        // 传 "app/stream" 时拆分
-        if (stream.contains("/")) {
+        // "<设备编码>/<通道编码>" 形式才拆分；单个编码视为设备直连（app == stream）
+        if (stream != null && stream.contains("/")) {
             String[] parts = stream.split("/", 2);
             app = parts[0];
             channel = parts[1];
+        } else {
+            app = stream;
         }
         String answer = platform.webRtcService().exchange(peer, app, channel, offerSdp, 5);
         NativeWebrtcVo vo = new NativeWebrtcVo();
         vo.setCode(0);
         vo.setPeerId(peer);
         vo.setSdp(answer);
-        vo.setWebrtcUrl(platform.mediaServer().playUrls(channel).getWebrtc());
+        vo.setWebrtcUrl(platform.mediaServer().playUrls(app, channel).getWebrtc());
         return vo;
     }
 
@@ -299,6 +320,7 @@ public class PlatformController {
     private NativeSessionVo sessionInfo(RtpSession session) {
         NativeSessionVo vo = new NativeSessionVo();
         vo.setOk(true);
+        vo.setDeviceId(session.getDeviceId());
         vo.setChannelId(session.getChannelId());
         vo.setType(session.getType().name());
         vo.setCallId(session.getCallId());
@@ -306,8 +328,9 @@ public class PlatformController {
         vo.setSsrc(session.getSsrc());
         vo.setState(session.getState());
         vo.setMediaUri(session.getMediaUri());
-        PlayUrls urls = platform.mediaService().playUrls(session.getChannelId());
-        vo.setUrls(toUrls(urls));
+        // 播放地址需要 (设备编码, 通道编码) 两段：ZLM 媒体源路径是 app/stream
+        vo.setUrls(toUrls(platform.mediaServer() == null
+                ? null : platform.mediaServer().playUrls(session)));
         return vo;
     }
 
