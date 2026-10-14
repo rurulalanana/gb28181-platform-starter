@@ -111,3 +111,31 @@ gb28181:
     collect-device-info: true
     # 是否采集设备状态
     collect-device-status: true
+
+  # 对象存储（云端录像归档）。采用 S3 兼容协议，一套配置覆盖主流对象存储：
+  #   阿里云 OSS：endpoint=https://oss-cn-hangzhou.aliyuncs.com  region=cn-hangzhou  path-style=false
+  #   腾讯云 COS：endpoint=https://cos.ap-guangzhou.myqcloud.com  region=ap-guangzhou
+  #   MinIO：     endpoint=http://192.168.1.10:9000              path-style=true（必须）
+  #   七牛云 Kodo：endpoint=https://s3-cn-east-1.qiniucs.com      region=cn-east-1
+  #   AWS S3：    endpoint 留空自动推导                            region=us-east-1
+  # 不配置（enabled=false 或密钥为空）时，录像保存在本地磁盘 gb28181.record-root
+  oss:
+    enabled: false
+    endpoint: ""
+    region: "us-east-1"
+    access-key: ""
+    secret-key: ""
+    bucket: ""
+    # 对象键前缀（目录）：<prefix>/<通道编码>/<文件名>
+    prefix: "record"
+    # MinIO / Ceph 等自建存储必须设为 true
+    path-style: false
+    # 桶开启公共读时设为 true（直接拼永久外链）；否则生成签名 URL
+    public-read: false
+    # 签名 URL 有效期（秒）
+    sign-expire-seconds: 3600
+    # 上传成功后是否删除本地文件（false 保留本地副本便于回放兜底）
+    delete-local-after-upload: false
+    connect-timeout-ms: 10000
+    # 录像文件可能很大，读超时默认 5 分钟
+    read-timeout-ms: 300000

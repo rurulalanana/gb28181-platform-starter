@@ -2,15 +2,16 @@
 
 **GB28181 流媒体平台 Starter**：把 [`gb28181-sip`](https://central.sonatype.com/artifact/io.github.rurulalanana/gb28181-sip)（信令）
 与 [`gb28181-sip-zlm`](https://github.com/rurulalanana/gb28181-sip-zlm)（媒体，内嵌 ZLMediaKit）
-装配成一个可运行的 Spring Boot 工程。克隆即可当作你的平台起点：REST API、Web 测试页、
-设备/通道/流/录像/报警入库、启动自检都已接好，改配置与包名就能直接用。
+装配成一个可运行的 Spring Boot 工程。克隆即可当作你的平台起点：REST API、Vue 3 管理前端、
+设备/通道/流/录像/报警入库、云端录像对象存储归档、启动自检都已接好，改配置与包名就能直接用。
 
-- **开箱即测**：REST API + Web 测试页（WebRTC 播放）+ 启动自检
+- **开箱即用**：REST API + Vue 3 + Element Plus 管理前端（WebRTC 播放）+ 启动自检
 - **数据自动入库**：设备注册后自动拉取目录/信息/状态，落 PostgreSQL（MyBatis-Plus）
 - **表结构自维护**：启动自动执行 `db/schema.sql`，建表 + 注释 + 初始账号，幂等可重跑
+- **云端录像可选归档**：S3 兼容协议，一套配置覆盖阿里云 OSS / 腾讯云 COS / MinIO / 七牛 / AWS S3
 
 > 新项目用起来建议：改 `gb28181.platform-id` / `sip-port` / `media-ip`，
-> 然后按需扩展 `web/` 下的 Controller 与 `application.yml`。
+> 然后按需扩展 `web/` 下的 Controller、`frontend/src/views/` 下的页面与 `application.yml`。
 
 ## 快速开始
 
@@ -26,7 +27,7 @@ mvn clean package
 java -jar target/gb28181-platform-starter-1.0.0.jar \
      --gb28181.starter.self-check=true
 
-# 浏览器打开测试页
+# 浏览器打开管理前端（默认账号 admin / admin123）
 open http://localhost:8080/
 ```
 
@@ -40,15 +41,37 @@ open http://localhost:8080/
 | 1 | 启动日志 | `平台已启动：SIP 0.0.0.0:5060 / 媒体 http=8081 …`，`数据库表结构初始化完成` |
 | 2 | 设备注册后 | 日志 `目录已同步: device=… 通道数=…`，查 `/api/v1/device/channellist` 有数据 |
 | 3 | 自检（`--gb28181.starter.self-check=true`） | `[自检] 收流端口=… ssrc=…`，ZLM 日志出现 `onAllTrackReady … H264[1280/720/25]` |
-| 4 | 测试页「点播」→ 「WebRTC 播放」 | 浏览器出画面（需与平台网络互通） |
+| 4 | 前端「实时预览」→ 选择通道 → 播放 | 浏览器出画面（需与平台网络互通） |
 
-## 测试页
+## 管理前端（Vue 3 + Element Plus）
 
-`http://localhost:8080/`
+`http://localhost:8080/`（默认账号 `admin` / `admin123`）
 
-- 左上：WebRTC 播放器（嵌入式模式下浏览器出画面的唯一通路，见下文限制）
-- 右侧：平台状态、在线设备、收流会话，点播/回放/录像
-- **点播** 走「平台主动 INVITE」；**回放** 需先「查录像」拿到 filePath
+| 页面 | 功能 |
+|---|---|
+| 总览 | 设备/通道统计、服务器信息、在线设备、进行中的直播流 |
+| 实时预览 | 1/2/3/4 分屏 WebRTC 播放，先点播再协商 |
+| 设备管理 | 设备列表、一键采集、重命名、删除 |
+| 通道管理 | 通道列表、单通道预览、云端录像开关、重命名 |
+| 设备录像 | 设备侧录像检索（9.8）→ 回放 INVITE → WebRTC，含暂停/倍速/停止控制 |
+| 云端录像 | 按月/日查询、日历标记、点播、下载、重要标记、删除（含对象存储状态） |
+| 报警管理 | 报警列表、级别筛选、删除/清空 |
+| 级联配置 | 上下级平台对接配置、目录推送 |
+| 用户管理 | 用户增删改、启用/停用、重置密码（需 admin） |
+| 系统设置 | 服务器信息、修改密码、播放与对象存储配置说明 |
+
+### 前端开发
+
+```bash
+cd frontend
+npm install
+npm run dev     # 开发模式（Vite dev server，自动代理 /api 到 localhost:8080）
+npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一起打包
+```
+
+> 技术栈：Vue 3 + Vite 6 + Element Plus + Pinia + Vue Router。
+> 构建产物直接进后端静态资源目录，**单 jar 部署**；SPA 路由回退由 `config/SpaWebConfiguration` 处理。
+> 浏览器出画面只走 **WebRTC**（嵌入式 ZLMediaKit 未注册 FLV/HLS 路由，见下文限制）。
 
 ## REST API
 
@@ -116,25 +139,17 @@ open http://localhost:8080/
 | **WebRTC** | `POST /api/v1/webrtc/play?stream=<通道号>` | **浏览器 offer → answer（出画面走这里）** |
 | | `GET /api/v1/webrtc/config` | WebRTC 参数 |
 
-### 二、原生测试接口 `/api/*`（无鉴权，便于本地调试）
+#### 云端录像接口补充（对象存储相关）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/status` | 平台状态（端口、会话数、录像数） |
-| GET | `/api/devices` | 平台注册表中的在线设备 |
-| POST | `/api/play/{deviceId}` | 平台点播（标准 9.2） |
-| GET | `/api/records/{deviceId}` | 检索设备录像（标准 9.8） |
-| POST | `/api/playback/{deviceId}?filePath=…` | 发起回放 |
-| POST | `/api/playback/{deviceId}/control?callId=…&command=pause\|seek\|speed` | 回放控制（附录 D） |
-| POST | `/api/download/{deviceId}?filePath=…` | 文件下载（标准 9.9） |
-| POST | `/api/stop/{deviceId}` | 停止点播并释放端口 |
-| GET | `/api/stream/{deviceId}` | 当前会话与播放地址 |
-| GET | `/api/sessions` | 全部收流会话 |
-| GET | `/api/recordings?channel=&from=&to=` | 平台录像检索 |
-| POST/DELETE | `/api/record/{deviceId}` | 开始/停止平台录像 |
-| POST | `/api/recordings/{id}/play` | 录像点播 |
-| POST | `/api/webrtc/play?stream=&peerId=` | 浏览器 offer → ZLM answer |
-| GET | `/api/webrtc/config` | WebRTC 参数 |
+| POST | `/api/v1/cloudrecord/play?recordId=` | 录像点播（拉入 ZLM 转协议，返回 WebRTC 等播放地址） |
+| POST | `/api/v1/cloudrecord/stopplay?recordId=` | 停止录像点播 |
+| GET | `/api/v1/cloudrecord/download/{serial}/{code}/{period}` | 下载信息（对象存储时为签名/外链地址） |
+| GET | `/api/v1/cloudrecord/file/{recordId}` | 本地录像文件流（对象存储归档的录像不走此接口） |
+
+`CloudRecordVo` / `DownloadVo` 中的 `storageType`（`LOCAL` / `OSS`）与 `uploadState`
+（`NONE` / `PENDING` / `UPLOADED` / `FAILED`）反映归档状态。
 
 ## 配置（application.yml / `--gb28181.*`）
 
@@ -158,6 +173,43 @@ open http://localhost:8080/
 | `starter.collect-device-info` | `true` | 是否采集设备信息（厂商/型号/固件） |
 | `starter.collect-device-status` | `true` | 是否采集设备状态 |
 | `starter.channel-backfill-interval-ms` | `120000` | 通道兜底补齐间隔 |
+
+### 对象存储（云端录像归档，`gb28181.oss.*`）
+
+采用 **S3 兼容协议**（AWS SDK v2），一套配置覆盖主流对象存储；
+**未配置时录像保存在本地磁盘**（`gb28181.record-root`），不影响其他功能。
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `oss.enabled` | `false` | 是否启用对象存储 |
+| `oss.endpoint` | 空 | 服务地址，带 `http(s)://` 前缀（AWS 官方 S3 可留空自动推导） |
+| `oss.region` | `us-east-1` | 区域（MinIO 可填任意非空值） |
+| `oss.access-key` / `oss.secret-key` | 空 | 访问密钥（必填） |
+| `oss.bucket` | 空 | 存储桶（必填） |
+| `oss.prefix` | `record` | 对象键前缀，最终键为 `<prefix>/<通道编码>/<文件名>` |
+| `oss.path-style` | `false` | **MinIO / Ceph 等自建存储必须设为 `true`** |
+| `oss.public-read` | `false` | `false` 生成签名 URL；`true` 直接拼永久外链（需桶已开公共读） |
+| `oss.sign-expire-seconds` | `3600` | 签名 URL 有效期 |
+| `oss.delete-local-after-upload` | `false` | 上传成功后是否删除本地文件（默认保留便于回放兜底） |
+| `oss.connect-timeout-ms` / `read-timeout-ms` | `10000` / `300000` | 连接与读超时（录像文件较大，读超时默认 5 分钟） |
+
+主流对象存储配置示例：
+
+| 对象存储 | endpoint | 关键参数 |
+|---|---|---|
+| 阿里云 OSS | `https://oss-cn-hangzhou.aliyuncs.com` | `region=cn-hangzhou` |
+| 腾讯云 COS | `https://cos.ap-guangzhou.myqcloud.com` | `region=ap-guangzhou` |
+| MinIO | `http://192.168.1.10:9000` | `path-style=true`（必须） |
+| 七牛云 Kodo | `https://s3-cn-east-1.qiniucs.com` | `region=cn-east-1` |
+| AWS S3 | （留空自动推导） | `region=us-east-1` |
+
+**工作方式**：停止云端录像后**异步**上传 MP4（不阻塞接口，等事务提交后再启动），
+上传结果回写 `gb_record.storage_type / object_key / file_url / upload_state`；
+失败只记日志并置 `FAILED`，本地文件保留。启用对象存储后：
+
+- `gb_record` 元数据**以数据库为准**（历史条目重启不丢），ZLMediaKit 内存索引仅用于「录制中」条目
+- 下载接口返回**签名 URL 或公共读外链**，由浏览器直接访问（不再经平台中转）
+- 删除录像时同步删除对象存储中的文件
 
 ## 数据库
 

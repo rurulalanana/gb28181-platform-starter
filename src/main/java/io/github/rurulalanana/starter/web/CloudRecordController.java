@@ -8,10 +8,13 @@ import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.RecordService;
+import io.github.rurulalanana.starter.storage.ObjectStorageService;
 import io.github.rurulalanana.starter.vo.CloudChannelListVo;
 import io.github.rurulalanana.starter.vo.CloudChannelVo;
 import io.github.rurulalanana.starter.vo.CloudDailyVo;
+import io.github.rurulalanana.starter.vo.CloudFlagsVo;
 import io.github.rurulalanana.starter.vo.CloudMonthVo;
+import io.github.rurulalanana.starter.vo.CloudPlayVo;
 import io.github.rurulalanana.starter.vo.CloudRecordVo;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.DownloadVo;
@@ -25,7 +28,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -39,17 +41,22 @@ import java.util.Map;
  *
  * <p>「云端录像」指平台用 ZLMediaKit 把收到的实时流录成 MP4，
  * 文件保存在平台磁盘（{@code gb28181.record-root}），与设备侧录像无关。
+ * 启用对象存储（{@code gb28181.oss.enabled=true}）时，停止录制后自动归档到
+ * 对象存储，下载接口返回签名/外链地址。
  *
  * <pre>
  * GET  /api/v1/cloudrecord/querychannels   有录像的通道
  * GET  /api/v1/cloudrecord/queryflags      按月统计有录像的日子
  * GET  /api/v1/cloudrecord/querymonthly    按月查询
  * GET  /api/v1/cloudrecord/querydaily      按日查询
+ * POST /api/v1/cloudrecord/play            录像点播（拉入 ZLM 转协议）
+ * POST /api/v1/cloudrecord/stopplay        停止录像点播
  * POST /api/v1/cloudrecord/remove          删除单条
  * POST /api/v1/cloudrecord/removechannel   删除通道全部
  * POST /api/v1/cloudrecord/removedaily     按天删除
  * POST /api/v1/cloudrecord/setimportant    重要标记
  * GET  /api/v1/cloudrecord/download/...    下载录像文件
+ * GET  /api/v1/cloudrecord/file/{recordId} 本地录像文件流
  * GET  /api/v1/cloudrecord/video/...       指定时间段合成播放/下载
  * </pre>
  */
@@ -105,7 +112,7 @@ public class CloudRecordController {
 
     /** 按通道统计有录像的月份。 */
     @GetMapping("/queryflags")
-    public ApiResponse<Map<String, String>> queryFlags(
+    public ApiResponse<CloudFlagsVo> queryFlags(
             @RequestParam String serial,
             @RequestParam(required = false) String code,
             @RequestParam(defaultValue = "12") Integer interrupt,
@@ -122,7 +129,9 @@ public class CloudRecordController {
             String month = TimeFormats.MONTH.format(r.getStartTime());
             m.computeIfAbsent(month, k -> recordService.monthFlags(channelId, k));
         }
-        return ApiResponse.ok(m);
+        CloudFlagsVo vo = new CloudFlagsVo();
+        vo.setFlags(m);
+        return ApiResponse.ok(vo);
     }
 
     /** 按月查询。 */
@@ -151,14 +160,7 @@ public class CloudRecordController {
         List<GbRecord> records = recordService.cloudRecords(channelId, day, day.plusDays(1));
         List<CloudRecordVo> list = new ArrayList<>();
         for (GbRecord r : records) {
-            CloudRecordVo item = new CloudRecordVo();
-            item.setName(r.getName());
-            item.setStartAt(TimeFormats.toCompact(r.getStartTime()));
-            item.setDuration(r.getDuration());
-            item.setFileSize(r.getFileSize());
-            item.setHls(r.getFilePath() == null ? null : "file://" + r.getFilePath());
-            item.setImportant(r.getImportant());
-            list.add(item);
+            list.add(toItem(r, false));
         }
         var channel = deviceService.findChannel(channelId);
         CloudDailyVo vo = new CloudDailyVo();
@@ -178,7 +180,7 @@ public class CloudRecordController {
         if (record == null) {
             throw BizException.notFound("录像不存在：" + period);
         }
-        deleteFile(record.getFilePath());
+        recordService.deleteFile(record);
         recordService.removeRecord(record.getRecordId());
         return ApiResponse.ok();
     }
@@ -191,7 +193,7 @@ public class CloudRecordController {
         String channelId = code == null || code.isBlank() ? serial : code;
         int deleted = 0;
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {
-            deleteFile(r.getFilePath());
+            recordService.deleteFile(r);
             deleted++;
         }
         recordService.removeChannelRecords(channelId);
@@ -212,7 +214,7 @@ public class CloudRecordController {
             throw BizException.badRequest("日期格式应为 YYYYMMDD：" + period);
         }
         for (GbRecord r : recordService.cloudRecords(channelId, day, day.plusDays(1))) {
-            deleteFile(r.getFilePath());
+            recordService.deleteFile(r);
         }
         int deleted = recordService.removeDailyRecords(channelId, period);
         DeletedVo vo = DeletedVo.of(deleted);
@@ -236,6 +238,41 @@ public class CloudRecordController {
         return ApiResponse.ok();
     }
 
+    /** 录像点播：把 MP4 拉入 ZLM 转协议输出（返回 WebRTC/FLV/HLS 等播放地址）。 */
+    @PostMapping("/play")
+    public ApiResponse<CloudPlayVo> play(@RequestParam String recordId) {
+        StpUtil.checkLogin();
+        GbRecord record = recordService.findRecord(recordId);
+        if (record == null) {
+            throw BizException.notFound("录像不存在：" + recordId);
+        }
+        PlayUrls urls = recordService.playCloudRecord(recordId);
+        CloudPlayVo vo = new CloudPlayVo();
+        vo.setRecordId(recordId);
+        vo.setChannelId(record.getChannelId());
+        vo.setFileName(record.getFileName());
+        vo.setStartAt(TimeFormats.toCompact(record.getStartTime()));
+        vo.setDuration(record.getDuration());
+        vo.setFileSize(record.getFileSize());
+        vo.setWebrtc(urls.getWebrtc());
+        vo.setFlv(urls.getHttpFlv());
+        vo.setWsFlv(urls.getWsFlv());
+        vo.setHls(urls.getHls());
+        vo.setRtsp(urls.getRtsp());
+        vo.setRtmp(urls.getRtmp());
+        vo.setDownloadUrl(recordService.downloadUrl(record));
+        vo.setNote("嵌入式 ZLMediaKit 下浏览器出画面请用 webrtc 地址");
+        return ApiResponse.ok(vo);
+    }
+
+    /** 停止录像点播。 */
+    @PostMapping("/stopplay")
+    public ApiResponse<Void> stopPlay(@RequestParam String recordId) {
+        StpUtil.checkLogin();
+        recordService.stopCloudRecordPlay(recordId);
+        return ApiResponse.ok();
+    }
+
     /** 下载录像文件。 */
     @GetMapping("/download/{serial}/{code}/{period}")
     public ApiResponse<DownloadVo> download(@PathVariable String serial,
@@ -246,25 +283,33 @@ public class CloudRecordController {
         if (record == null) {
             throw BizException.notFound("录像不存在：" + period);
         }
-        Path path = Path.of(record.getFilePath());
-        if (!Files.exists(path)) {
+        if (!recordService.fileAvailable(record)) {
             throw BizException.notFound("录像文件已丢失：" + record.getFilePath());
         }
         DownloadVo vo = new DownloadVo();
         vo.setFileName(record.getFileName());
         vo.setFilePath(record.getFilePath());
         vo.setFileSize(record.getFileSize());
-        vo.setDownloadUrl("/api/v1/cloudrecord/file/" + record.getRecordId());
+        vo.setDownloadUrl(recordService.downloadUrl(record));
+        vo.setStorageType(record.getStorageType());
         return ApiResponse.ok(vo);
     }
 
-    /** 录像文件流下载（配合 {@code download} 返回的 DownloadURL）。 */
+    /**
+     * 录像文件流下载（配合 {@code download} 返回的本地下载地址）。
+     *
+     * <p>对象存储中的录像不经过本接口（download 直接返回签名/外链地址）。
+     */
     @GetMapping("/file/{recordId}")
     public org.springframework.http.ResponseEntity<org.springframework.core.io.Resource> file(
             @PathVariable String recordId) {
+        StpUtil.checkLogin();
         GbRecord record = recordService.findRecord(recordId);
         if (record == null) {
             throw BizException.notFound("录像不存在：" + recordId);
+        }
+        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())) {
+            throw BizException.badRequest("该录像已归档到对象存储，请使用 download 接口返回的地址");
         }
         Path path = Path.of(record.getFilePath());
         if (!Files.exists(path)) {
@@ -302,13 +347,7 @@ public class CloudRecordController {
         List<CloudRecordVo> list = new ArrayList<>();
         long totalBytes = 0;
         for (GbRecord r : records) {
-            CloudRecordVo item = new CloudRecordVo();
-            item.setStartAt(TimeFormats.toCompact(r.getStartTime()));
-            item.setEndTime(TimeFormats.toCompact(r.getEndTime()));
-            item.setDuration(r.getDuration());
-            item.setFileSize(r.getFileSize());
-            item.setDownloadUrl("/api/v1/cloudrecord/file/" + r.getRecordId());
-            list.add(item);
+            list.add(toItem(r, true));
             totalBytes += r.getFileSize() == null ? 0 : r.getFileSize();
         }
         VideoRangeVo vo = new VideoRangeVo();
@@ -326,19 +365,24 @@ public class CloudRecordController {
 
     // ==================== 内部 ====================
 
-    /** 删除磁盘文件（失败只记日志，不影响记录清理）。 */
-    private void deleteFile(String filePath) {
-        if (filePath == null || filePath.isBlank()) {
-            return;
+    /** 把录像实体组装为出参。 */
+    private CloudRecordVo toItem(GbRecord r, boolean withDownloadUrl) {
+        CloudRecordVo item = new CloudRecordVo();
+        item.setRecordId(r.getRecordId());
+        item.setName(r.getName());
+        item.setChannelId(r.getChannelId());
+        item.setStartAt(TimeFormats.toCompact(r.getStartTime()));
+        item.setEndTime(TimeFormats.toCompact(r.getEndTime()));
+        item.setDuration(r.getDuration());
+        item.setFileSize(r.getFileSize());
+        item.setImportant(r.getImportant());
+        item.setStorageType(r.getStorageType());
+        item.setUploadState(r.getUploadState());
+        item.setRecording(r.getEndTime() == null);
+        if (withDownloadUrl && r.getEndTime() != null && recordService.fileAvailable(r)) {
+            item.setDownloadUrl(recordService.downloadUrl(r));
         }
-        try {
-            File file = new File(filePath);
-            if (file.exists() && !file.delete()) {
-                log.warn("录像文件删除失败: {}", filePath);
-            }
-        } catch (Exception e) {
-            log.warn("删除录像文件异常: {} {}", filePath, e.getMessage());
-        }
+        return item;
     }
 
     private static <T> List<T> slice(List<T> all, int start, int limit) {

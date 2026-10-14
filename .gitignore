@@ -7,5 +7,11 @@ record/
 hs_err_pid*.log
 replay_pid*.log
 
+# 前端：依赖与构建中间产物（构建产物进 src/main/resources/static，需要入库）
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
 # 本机 frp 启动脚本（含本地绝对路径，不入库）
 frp.bat

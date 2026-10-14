@@ -13,11 +13,15 @@ import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.mapper.GbDeviceRecordMapper;
 import io.github.rurulalanana.starter.mapper.GbRecordMapper;
+import io.github.rurulalanana.starter.storage.ObjectStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,8 +35,12 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li><b>设备录像</b>：文件在设备（NVR / SD 卡）上，平台通过 {@code RecordInfo}
  *       查询目录，通过回放 INVITE 让设备把流推回来。</li>
- *   <li><b>云端录像</b>：平台用 ZLMediaKit 把收到的实时流录成 MP4，文件在平台磁盘上。</li>
+ *   <li><b>云端录像</b>：平台用 ZLMediaKit 把收到的实时流录成 MP4，文件在平台磁盘上；
+ *       启用对象存储（{@code gb28181.oss.enabled=true}）时停止录制后自动上传。</li>
  * </ul>
+ *
+ * <p><b>云端录像元数据以 {@code gb_record} 表为准</b>：ZLMediaKit 的内存索引只用于
+ * 查询「正在录制中」的条目，历史条目一律从库读取，避免重启后列表丢失。
  */
 @Slf4j
 @Service
@@ -45,6 +53,8 @@ public class RecordService {
     private final Gb28181MediaPlatform platform;
     private final GbRecordMapper recordMapper;
     private final GbDeviceRecordMapper deviceRecordMapper;
+    private final ObjectStorageService storage;
+    private final io.github.rurulalanana.starter.storage.ObjectStorageProperties storageProps;
 
     // ==================== 设备侧录像（RecordInfo） ====================
 
@@ -146,11 +156,18 @@ public class RecordService {
         }
         Recording recording = platform.recordingService().startRecording(channelId);
         GbRecord record = toRecord(recording);
+        record.setStorageType(storage.type());
+        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
         saveRecord(record);
         return record;
     }
 
-    /** 停止平台侧录像并归档。 */
+    /**
+     * 停止平台侧录像并归档。
+     *
+     * <p>启用对象存储时，录制结束后<b>异步</b>上传 MP4（大文件不阻塞接口），
+     * 上传结果回写 {@code storage_type/object_key/file_url/upload_state}。
+     */
     @Transactional
     public GbRecord stopCloudRecord(String channelId) {
         if (platform.recordingService() == null) {
@@ -161,8 +178,94 @@ public class RecordService {
             return null;
         }
         GbRecord record = toRecord(recording);
+        record.setStorageType(storage.type());
+        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
         saveRecord(record);
+        if (storage.enabled()) {
+            uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
+        }
         return record;
+    }
+
+    /**
+     * 异步上传录像到对象存储。
+     *
+     * <p>上传成功后按配置决定是否删除本地文件；失败只记日志并置
+     * {@code upload_state=FAILED}，本地文件保留，不影响录像的本地下载。
+     *
+     * <p><b>事务安全</b>：调用方在事务内时，上传任务必须等事务提交后再启动，
+     * 否则异步线程可能读不到刚写入的 {@code gb_record} 记录（另一个连接看不到未提交数据）。
+     */
+    private void uploadAsync(String recordId, String filePath, String channelId) {
+        if (filePath == null || filePath.isBlank()) {
+            return;
+        }
+        Runnable task = () -> {
+            try {
+                Path path = Path.of(filePath);
+                if (!Files.exists(path)) {
+                    log.warn("录像文件不存在，跳过上传：{}", filePath);
+                    markUpload(recordId, "FAILED", null, null, 0L);
+                    return;
+                }
+                ObjectStorageService.UploadResult result = storage.upload(path, channelId);
+                markUpload(recordId, "UPLOADED", result.getObjectKey(),
+                        result.getUrl(), result.getSize());
+                log.info("录像已上传对象存储: recordId={} key={}", recordId, result.getObjectKey());
+                if (storageProps.isDeleteLocalAfterUpload()) {
+                    try {
+                        Files.deleteIfExists(path);
+                        log.info("已删除本地录像文件（上传成功）: {}", filePath);
+                    } catch (Exception e) {
+                        log.warn("删除本地录像文件失败: {} {}", filePath, e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                log.error("录像上传对象存储失败: recordId={} {}", recordId, e.getMessage());
+                markUpload(recordId, "FAILED", null, null, 0L);
+            }
+        };
+        if (org.springframework.transaction.support.TransactionSynchronizationManager
+                .isActualTransactionActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager
+                    .registerSynchronization(
+                            new org.springframework.transaction.support.TransactionSynchronization() {
+                                @Override
+                                public void afterCommit() {
+                                    CompletableFuture.runAsync(task);
+                                }
+                            });
+        } else {
+            CompletableFuture.runAsync(task);
+        }
+    }
+
+    /** 回写上传结果。 */
+    private void markUpload(String recordId, String state, String objectKey,
+                            String fileUrl, long size) {
+        try {
+            GbRecord record = findRecord(recordId);
+            if (record == null) {
+                return;
+            }
+            record.setUploadState(state);
+            if (objectKey != null) {
+                record.setObjectKey(objectKey);
+            }
+            if (fileUrl != null) {
+                record.setFileUrl(fileUrl);
+            }
+            if (size > 0) {
+                record.setFileSize(size);
+            }
+            if ("UPLOADED".equals(state)) {
+                record.setUploadTime(LocalDateTime.now());
+                record.setStorageType(storage.type());
+            }
+            recordMapper.updateById(record);
+        } catch (Exception e) {
+            log.warn("回写上传状态失败: recordId={} {}", recordId, e.getMessage());
+        }
     }
 
     /** 云端录像是否正在录制。 */
@@ -171,15 +274,45 @@ public class RecordService {
                 && platform.recordingService().isRecording(channelId);
     }
 
-    /** 云端录像列表（内存索引，正在录制的也会出现）。 */
+    /**
+     * 云端录像列表。
+     *
+     * <p>数据源是 {@code gb_record} 表（历史条目重启不丢），
+     * 再与 ZLMediaKit 内存索引合并：内存中「录制中」的条目用实时状态覆盖，
+     * 库中缺失的内存条目也会补上（例如录像刚开始、库尚未落盘的瞬间）。
+     */
     public List<GbRecord> cloudRecords(String channelId, LocalDateTime from, LocalDateTime to) {
-        List<GbRecord> out = new ArrayList<>();
+        List<GbRecord> out = new ArrayList<>(recordMapper.selectList(
+                Wrappers.<GbRecord>lambdaQuery()
+                        .eq(channelId != null && !channelId.isBlank(),
+                                GbRecord::getChannelId, channelId)
+                        .ge(from != null, GbRecord::getStartTime, from)
+                        .lt(to != null, GbRecord::getStartTime, to)
+                        .orderByAsc(GbRecord::getStartTime)));
+        // 用内存索引覆盖「录制中」条目，并补齐库里还没有的新录像
         if (platform.recordingService() != null) {
+            java.util.Map<String, GbRecord> byId = new java.util.LinkedHashMap<>();
+            for (GbRecord r : out) {
+                byId.put(r.getRecordId(), r);
+            }
             for (Recording r : platform.recordingService().search(channelId,
                     from == null ? null : TimeFormats.toDate(from).getTime(),
                     to == null ? null : TimeFormats.toDate(to).getTime())) {
-                out.add(toRecord(r));
+                GbRecord live = toRecord(r);
+                GbRecord existing = byId.get(live.getRecordId());
+                if (existing == null) {
+                    out.add(live);
+                } else {
+                    // 录制中的条目以内存为准（结束时间/时长实时变化）
+                    if (existing.getEndTime() == null) {
+                        existing.setEndTime(live.getEndTime());
+                        existing.setDuration(live.getDuration());
+                        existing.setFileSize(live.getFileSize());
+                    }
+                }
             }
+            out.sort(java.util.Comparator.comparing(GbRecord::getStartTime,
+                    java.util.Comparator.nullsLast(java.util.Comparator.naturalOrder())));
         }
         return out;
     }
@@ -191,7 +324,22 @@ public class RecordService {
         }
         Recording recording = platform.recordingService().get(recordId);
         if (recording == null) {
-            throw BizException.notFound("录像不存在：" + recordId);
+            // 内存索引重启后为空：用库里的 file_path 重新登记后再点播
+            GbRecord record = findRecord(recordId);
+            if (record == null) {
+                throw BizException.notFound("录像不存在：" + recordId);
+            }
+            if (!ObjectStorageService.TYPE_LOCAL.equals(record.getStorageType())) {
+                throw BizException.badRequest("对象存储中的录像请使用下载地址播放："
+                        + record.getFileUrl());
+            }
+            recording = platform.recordingService().register(record.getRecordId(),
+                    record.getChannelId(), record.getFilePath(),
+                    record.getStartTime() == null ? System.currentTimeMillis()
+                            : TimeFormats.toDate(record.getStartTime()).getTime());
+            if (recording == null) {
+                throw BizException.badRequest("录像文件已丢失：" + record.getFilePath());
+            }
         }
         PlayUrls urls = platform.recordingService().playUrl(recording);
         if (urls == null) {
@@ -204,6 +352,56 @@ public class RecordService {
     public void stopCloudRecordPlay(String recordId) {
         if (platform.recordingService() != null) {
             platform.recordingService().stopPlay(recordId);
+        }
+    }
+
+    /** 录像的可播放/下载地址：对象存储优先用签名或外链，本地回退到平台下载接口。 */
+    public String downloadUrl(GbRecord record) {
+        if (record == null) {
+            return null;
+        }
+        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
+                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+            String url = storage.url(record.getObjectKey(),
+                    Duration.ofSeconds(3600));
+            if (url != null) {
+                return url;
+            }
+            return record.getFileUrl();
+        }
+        return "/api/v1/cloudrecord/file/" + record.getRecordId();
+    }
+
+    /** 录像文件是否可用（本地文件存在，或对象存储中已上传）。 */
+    public boolean fileAvailable(GbRecord record) {
+        if (record == null) {
+            return false;
+        }
+        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
+                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+            return true;
+        }
+        return record.getFilePath() != null && Files.exists(Path.of(record.getFilePath()));
+    }
+
+    /** 删除录像文件（本地磁盘或对象存储，按 storage_type 分派）。 */
+    public void deleteFile(GbRecord record) {
+        if (record == null) {
+            return;
+        }
+        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
+                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+            storage.delete(record.getObjectKey());
+            // 本地副本可能按配置保留或已删除，尽力清理
+        }
+        String path = record.getFilePath();
+        if (path == null || path.isBlank()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(Path.of(path));
+        } catch (Exception e) {
+            log.warn("删除本地录像文件异常: {} {}", path, e.getMessage());
         }
     }
 
@@ -320,6 +518,8 @@ public class RecordService {
         r.setCloudRecord(true);
         r.setImportant(false);
         r.setCreateTime(LocalDateTime.now());
+        r.setStorageType(ObjectStorageService.TYPE_LOCAL);
+        r.setUploadState("NONE");
         java.io.File file = new java.io.File(recording.getFilePath());
         r.setFileSize(file.exists() ? file.length() : 0L);
         return r;
