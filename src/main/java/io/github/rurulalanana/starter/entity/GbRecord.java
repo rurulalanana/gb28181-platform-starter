@@ -48,5 +48,23 @@ public class GbRecord implements Serializable {
 
     private Boolean cloudRecord;
 
+    /** 存储类型：{@code LOCAL} 本地磁盘 / {@code OSS} 对象存储。 */
+    private String storageType;
+
+    /** 对象存储键（{@code storageType=OSS} 时有效）。 */
+    private String objectKey;
+
+    /** 对象存储外链或签名地址（{@code storageType=OSS} 时有效）。 */
+    private String fileUrl;
+
+    /**
+     * 上传状态：{@code NONE} 无需上传 / {@code PENDING} 待上传 /
+     * {@code UPLOADED} 已上传 / {@code FAILED} 上传失败。
+     */
+    private String uploadState;
+
+    /** 上传完成时间。 */
+    private LocalDateTime uploadTime;
+
     private LocalDateTime createTime;
 }

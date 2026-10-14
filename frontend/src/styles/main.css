@@ -1,0 +1,217 @@
+/* 全局基础样式 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI',
+    Roboto, sans-serif;
+  background: #f5f7fa;
+  color: #303133;
+}
+
+/* 编码类文本用等宽字体，便于对齐阅读 */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+/* 视频容器：统一黑底与 16:9 */
+.video-box {
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+}
+
+.video-box video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+/* 页面标题栏 */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.page-header .spacer {
+  flex: 1;
+}
+
+/* 卡片内的次要说明文本 */
+.muted {
+  color: #909399;
+  font-size: 12px;
+}
+
+/* 统计卡片 */
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.stat-card .stat-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.stat-card .stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.stat-card .stat-label {
+  color: #909399;
+  font-size: 13px;
+}
+
+/* 表格中的空状态 */
+.empty-cell {
+  text-align: center;
+  color: #909399;
+  padding: 32px 0 !important;
+}
+
+/* ==================== 页面容器与间距 ==================== */
+
+/* 标准页面容器：统一纵向间距，避免元素挤在一起 */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* 卡片头部：标题 + 右侧操作 */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.card-header > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 搜索/筛选表单：收紧底部留白 */
+.search-form {
+  margin-bottom: 6px;
+}
+
+.search-form :deep(.el-form-item) {
+  margin-bottom: 14px;
+}
+
+/* 表格底部统计 */
+.table-footer {
+  margin-top: 16px;
+  text-align: right;
+  color: #909399;
+  font-size: 13px;
+}
+
+/* ==================== 卡片视觉 ==================== */
+
+.el-card {
+  border-radius: 10px;
+  border-color: #ebeef5;
+}
+
+.el-card__header {
+  padding: 16px 20px;
+  font-size: 15px;
+}
+
+.el-card__body {
+  padding: 20px;
+}
+
+/* 表格与卡片内元素保持一致的圆角与留白 */
+.el-table th.el-table__cell {
+  background: #fafbfc !important;
+  font-weight: 600;
+}
+
+/* ==================== 通用间距工具 ==================== */
+
+.mt-1 {
+  margin-top: 6px;
+}
+
+.mt-2 {
+  margin-top: 10px;
+}
+
+.mt-3 {
+  margin-top: 16px;
+}
+
+.mt-4 {
+  margin-top: 22px;
+}
+
+.mb-1 {
+  margin-bottom: 6px;
+}
+
+.mb-2 {
+  margin-bottom: 10px;
+}
+
+.mb-3 {
+  margin-bottom: 16px;
+}
+
+.mr-2 {
+  margin-right: 10px;
+}
+
+.ml-2 {
+  margin-left: 10px;
+}
+
+/* ==================== 响应式 ==================== */
+
+@media (max-width: 768px) {
+  .el-card__body {
+    padding: 16px;
+  }
+}
+

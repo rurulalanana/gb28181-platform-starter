@@ -56,7 +56,6 @@ public class RecordController {
         vo.setRecordId(record.getRecordId());
         vo.setChannelId(channelId);
         vo.setStartTime(TimeFormats.toCompact(record.getStartTime()));
-        vo.setDownloadUrl("/api/v1/cloudrecord/file/" + record.getRecordId());
         vo.setNote("录像进行中，停止后方可下载（record/stop）");
         return ApiResponse.ok(vo);
     }
@@ -91,12 +90,7 @@ public class RecordController {
         boolean recording = recordService.isRecording(channelId);
         List<CloudRecordVo> list = new ArrayList<>();
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {
-            CloudRecordVo item = fileView(r);
-            // 录制中的文件尚未定稿，不给下载链接
-            if (recording && r.getEndTime() == null) {
-                item.setDownloadUrl(null);
-            }
-            list.add(item);
+            list.add(fileView(r));
         }
         RecordFileListVo vo = new RecordFileListVo();
         vo.setChannelId(channelId);
@@ -110,10 +104,19 @@ public class RecordController {
 
     private CloudRecordVo fileView(GbRecord r) {
         CloudRecordVo item = new CloudRecordVo();
+        item.setRecordId(r.getRecordId());
+        item.setChannelId(r.getChannelId());
         item.setStartAt(TimeFormats.toCompact(r.getStartTime()));
         item.setEndTime(TimeFormats.toCompact(r.getEndTime()));
         item.setFileSize(r.getFileSize());
-        item.setDownloadUrl("/api/v1/cloudrecord/file/" + r.getRecordId());
+        item.setDuration(r.getDuration());
+        item.setStorageType(r.getStorageType());
+        item.setUploadState(r.getUploadState());
+        item.setRecording(r.getEndTime() == null);
+        // 录制中的文件尚未定稿，不给下载链接
+        if (r.getEndTime() != null && recordService.fileAvailable(r)) {
+            item.setDownloadUrl(recordService.downloadUrl(r));
+        }
         return item;
     }
 }

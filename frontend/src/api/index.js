@@ -1,0 +1,146 @@
+import { get, post } from './http'
+
+/**
+ * 系统与用户接口（`/api/v1/*`）。
+ */
+export const systemApi = {
+  login: (payload) => post('/login', null, payload),
+  logout: () => get('/logout'),
+  userinfo: () => get('/userinfo'),
+  serverinfo: () => get('/getserverinfo'),
+  modifyPassword: (payload) => post('/modifypassword', null, payload)
+}
+
+/** 设备与通道接口（`/api/v1/device/*`）。 */
+export const deviceApi = {
+  list: (params) => get('/device/list', params),
+  info: (serial) => get('/device/info', { serial }),
+  onlineStats: () => get('/device/onlinestats'),
+  channelList: (params) => get('/device/channellist', params),
+  channelInfo: (serial, code) => get('/device/channelinfo', { serial, code }),
+  channelTree: (params) => get('/device/channeltree', params),
+  groupTree: (params) => get('/device/grouptree', params),
+  collect: (serial) => post('/device/collect', { serial }),
+  fetchCatalog: (params) => post('/device/fetchcatalog', params),
+  fetchInfo: (params) => post('/device/fetchinfo', params),
+  fetchStatus: (params) => post('/device/fetchstatus', params),
+  remove: (serial) => post('/device/remove', { serial }),
+  setName: (params) => post('/device/setname', params),
+  setChannelName: (params) => post('/device/setchannelname', params),
+  setChannelOnDemand: (params) => post('/device/setchannelondemand', params),
+  setChannelCloudRecord: (params) => post('/device/setchannelcloudrecord', params),
+  statusLog: (params) => get('/device/statuslog', params),
+  streamLog: (params) => get('/device/streamlog', params)
+}
+
+/** 直播流接口（`/api/v1/stream/*`）。 */
+export const streamApi = {
+  start: (payload) => post('/stream/start', null, payload),
+  stop: (params) => post('/stream/stop', params),
+  list: (params) => get('/stream/list', params),
+  info: (streamid, touch) => get('/stream/info', { streamid, touch }),
+  relayStart: (params) => post('/stream/relay/start', params),
+  relayList: (params) => get('/stream/relay/list', params),
+  relayStop: (params) => post('/stream/relay/stop', params)
+}
+
+/** 设备录像（前端录像）接口（`/api/v1/playback/*`）。 */
+export const playbackApi = {
+  recordList: (params) => get('/playback/recordlist', params),
+  start: (payload) => post('/playback/start', null, payload),
+  stop: (params) => post('/playback/stop', params),
+  control: (params) => post('/playback/control', params),
+  streamList: (params) => get('/playback/streamlist', params),
+  streamInfo: (streamid) => get('/playback/streaminfo', { streamid })
+}
+
+/** 云端录像接口（`/api/v1/cloudrecord/*`）。 */
+export const cloudRecordApi = {
+  queryChannels: (params) => get('/cloudrecord/querychannels', params),
+  queryFlags: (params) => get('/cloudrecord/queryflags', params),
+  queryMonthly: (params) => get('/cloudrecord/querymonthly', params),
+  queryDaily: (params) => get('/cloudrecord/querydaily', params),
+  play: (recordId) => post('/cloudrecord/play', { recordId }),
+  stopPlay: (recordId) => post('/cloudrecord/stopplay', { recordId }),
+  remove: (params) => post('/cloudrecord/remove', params),
+  removeChannel: (params) => post('/cloudrecord/removechannel', params),
+  removeDaily: (params) => post('/cloudrecord/removedaily', params),
+  setImportant: (params) => post('/cloudrecord/setimportant', params),
+  download: (serial, code, period) => get(`/cloudrecord/download/${serial}/${code}/${period}`),
+  video: (operate, serial, code, starttime, endtime) =>
+    get(`/cloudrecord/video/${operate}/${serial}/${code}/${starttime}/${endtime}/video.mp4`)
+}
+
+/** 平台实时录像接口（`/api/v1/record/*`）。 */
+export const recordApi = {
+  start: (params) => post('/record/start', params),
+  stop: (params) => post('/record/stop', params),
+  list: (params) => get('/record/list', params)
+}
+
+/** 设备控制接口（`/api/v1/control/*`）。 */
+export const controlApi = {
+  ptz: (params) => post('/control/ptz', params),
+  fi: (params) => post('/control/fi', params),
+  ptzPrecise: (params) => post('/control/ptzprecise', params),
+  dragZoomIn: (params) => post('/control/dragzoomin', params),
+  dragZoomOut: (params) => post('/control/dragzoomout', params),
+  preset: (params) => post('/control/preset', params),
+  homePosition: (params) => post('/control/homeposition', params),
+  navigate: (params) => post('/control/navigate', params),
+  wiper: (params) => post('/control/wiper', params),
+  fillLight: (params) => post('/control/filllight', params),
+  teleBoot: (params) => post('/control/teleboot', params),
+  record: (params) => post('/control/record', params),
+  guard: (params) => post('/control/guard', params),
+  iframe: (params) => post('/control/iframe', params),
+  formatSdCard: (params) => post('/control/formatsdcard', params),
+  alarmNotify: (params) => post('/control/alarmnotify', params),
+  alarmReset: (params) => post('/control/alarmreset', params),
+  deviceConfig: (params) => post('/control/deviceconfig', params),
+  deviceSubscribe: (params) => post('/control/devicesubscribe', params),
+  talk: (params) => post('/control/talk', params),
+  osdConfig: (params) => post('/control/osdconfig', params),
+  snapshotConfig: (params) => post('/control/snapshotconfig', params),
+  deviceUpgrade: (params) => post('/control/deviceupgrade', params),
+  targetTrack: (params) => post('/control/targettrack', params)
+}
+
+/** 报警接口（`/api/v1/alarm/*`）。 */
+export const alarmApi = {
+  list: (params) => get('/alarm/list', params),
+  info: (id) => get('/alarm/info', { id }),
+  remove: (id) => post('/alarm/remove', { id }),
+  clear: () => post('/alarm/clear')
+}
+
+/** 级联接口（`/api/v1/cascade/*`）。 */
+export const cascadeApi = {
+  list: (params) => get('/cascade/list', params),
+  info: (id) => get('/cascade/info', { id }),
+  save: (payload) => post('/cascade/save', null, payload),
+  setEnable: (params) => post('/cascade/setenable', params),
+  remove: (id) => post('/cascade/remove', { id }),
+  channelList: (params) => get('/cascade/channellist', params),
+  saveChannels: (params) => post('/cascade/savechannels', params),
+  removeChannels: (params) => post('/cascade/removechannels', params),
+  pushCatalog: (params) => post('/cascade/pushcatalog', params)
+}
+
+/** 用户管理接口（`/api/v1/user/*`，需 admin）。 */
+export const userApi = {
+  list: (params) => get('/user/list', params),
+  info: (id) => get('/user/info', { id }),
+  save: (params) => post('/user/save', params),
+  remove: (id) => post('/user/remove', { id }),
+  setEnable: (params) => post('/user/setenable', params),
+  resetPassword: (params) => post('/user/resetpassword', params),
+  setPassword: (params) => post('/user/setpassword', params)
+}
+
+/** WebRTC 接口（`/api/v1/webrtc/*`，免登录）。 */
+export const webrtcApi = {
+  play: (stream, peerId, offerSdp) =>
+    post('/webrtc/play', { stream, peerId }, offerSdp),
+  config: () => get('/webrtc/config')
+}

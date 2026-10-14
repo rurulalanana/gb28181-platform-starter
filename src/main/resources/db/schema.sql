@@ -170,6 +170,13 @@ CREATE TABLE IF NOT EXISTS gb_record (
     duration     INTEGER      DEFAULT 0,
     important    BOOLEAN      DEFAULT FALSE,
     cloud_record BOOLEAN      DEFAULT FALSE,
+    -- 对象存储（OSS/S3 兼容）相关：storage_type=LOCAL 时仅用 file_path；
+    -- storage_type=OSS 时文件已上传，object_key 是桶内键、file_url 是外链/签名地址
+    storage_type VARCHAR(16)  DEFAULT 'LOCAL',
+    object_key   VARCHAR(512),
+    file_url     VARCHAR(1024),
+    upload_state VARCHAR(16)  DEFAULT 'NONE',
+    upload_time  TIMESTAMP,
     create_time  TIMESTAMP    DEFAULT NOW(),
     UNIQUE (record_id)
 );
@@ -402,6 +409,18 @@ BEGIN
     END IF;
 END $$;
 
+-- ------------------------------------------------------------
+--  迁移：gb_record 增加对象存储（OSS）字段。
+--  schema.sql 是「全新初始化 + 幂等补丁」脚本，CREATE TABLE IF NOT EXISTS
+--  不会给已存在的表加列，故对老库用 ALTER TABLE ... ADD COLUMN IF NOT EXISTS 补齐。
+-- ------------------------------------------------------------
+
+ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) DEFAULT 'LOCAL';
+ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS object_key   VARCHAR(512);
+ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS file_url     VARCHAR(1024);
+ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS upload_state VARCHAR(16) DEFAULT 'NONE';
+ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS upload_time  TIMESTAMP;
+
 
 -- ============================================================
 --  第 2 段：注释（表与字段的中文说明，便于用 DBeaver/Navicat 等工具看库）
@@ -538,6 +557,11 @@ COMMENT ON COLUMN gb_record.end_time     IS '录像结束时间';
 COMMENT ON COLUMN gb_record.duration     IS '时长（秒）';
 COMMENT ON COLUMN gb_record.important    IS '是否标记为重要录像（重要录像不参与自动清理）';
 COMMENT ON COLUMN gb_record.cloud_record IS '是否为云端录像';
+COMMENT ON COLUMN gb_record.storage_type IS '存储类型：LOCAL 本地磁盘 / OSS 对象存储';
+COMMENT ON COLUMN gb_record.object_key   IS '对象存储键（storage_type=OSS 时有效）';
+COMMENT ON COLUMN gb_record.file_url     IS '对象存储外链或签名地址（storage_type=OSS 时有效）';
+COMMENT ON COLUMN gb_record.upload_state IS '上传状态：NONE 无需上传 / PENDING 待上传 / UPLOADED 已上传 / FAILED 上传失败';
+COMMENT ON COLUMN gb_record.upload_time  IS '上传完成时间';
 COMMENT ON COLUMN gb_record.create_time  IS '入库时间';
 
 -- -------------------- gb_device_record --------------------
