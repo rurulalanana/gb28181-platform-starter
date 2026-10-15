@@ -45,9 +45,12 @@ logging:
 
 
 # ==================== Sa-Token ====================
+# 会话已持久化到 PostgreSQL（sa_token_store 表，见 SaTokenJdbcDao）：
+# 服务重启后已签发的 token 依然有效，用户无需重新登录。
 sa-token:
   token-name: Authorization
-  timeout: 86400
+  # 有效期 7 天（秒）；active-timeout=-1 表示只要在有效期内就不因闲置被踢
+  timeout: 604800
   active-timeout: -1
   is-concurrent: true
   is-share: false
