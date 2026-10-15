@@ -31,7 +31,7 @@ public class CloudPlayVo {
     /** 文件大小（字节）。 */
     private Long fileSize;
 
-    /** WebRTC 播放地址（嵌入式模式下浏览器唯一可用通路）。 */
+    /** WebRTC 播放地址（延迟最低，需浏览器与平台网络可直连）。 */
     private String webrtc;
 
     /** HTTP-FLV 地址。 */
