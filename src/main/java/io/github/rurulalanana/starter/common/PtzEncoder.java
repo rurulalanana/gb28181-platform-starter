@@ -32,11 +32,21 @@ package io.github.rurulalanana.starter.common;
  *   <tr><td>Bit7</td><td>0x40</td><td>置 1 表示进入预置位/巡航/看守位模式</td><td>—</td></tr>
  *   <tr><td>Bit6</td><td>0x20</td><td>变倍缩小</td><td>设置预置位</td></tr>
  *   <tr><td>Bit5</td><td>0x10</td><td>变倍放大</td><td>调用预置位</td></tr>
- *   <tr><td>Bit4</td><td>0x08</td><td>云台下</td><td>删除预置位</td></tr>
- *   <tr><td>Bit3</td><td>0x04</td><td>云台上</td><td>巡航设置 / 看守位使能</td></tr>
- *   <tr><td>Bit2</td><td>0x02</td><td>云台右</td><td>巡航开始</td></tr>
- *   <tr><td>Bit1</td><td>0x01</td><td>云台左</td><td>巡航停止</td></tr>
+ *   <tr><td>Bit4</td><td>0x08</td><td>云台<b>上</b></td><td>删除预置位</td></tr>
+ *   <tr><td>Bit3</td><td>0x04</td><td>云台<b>下</b></td><td>巡航设置 / 看守位使能</td></tr>
+ *   <tr><td>Bit2</td><td>0x02</td><td>云台<b>左</b></td><td>巡航开始</td></tr>
+ *   <tr><td>Bit1</td><td>0x01</td><td>云台<b>右</b></td><td>巡航停止</td></tr>
  * </table>
+ *
+ * <p><b>注意方向位与直觉相反</b>：低位是「右 / 下」，高位是「左 / 上」——
+ * 即 {@code 右(0x01) < 左(0x02)}、{@code 下(0x04) < 上(0x08)}。
+ * 这与「左=0x01 右=0x02 上=0x04 下=0x08」的直觉写法恰好完全镜像，
+ * 极易写错：早期版本按直觉编码，现场表现为<b>四个方向全部反向</b>
+ * （左右互换、上下互换，而变倍、预置位等不受影响）。
+ *
+ * <p>本表与 wvp-GB28181-pro 实测可用实现一致（其
+ * {@code SourcePTZServiceForGbImpl}：{@code pan==0(左) → 1<<1}、
+ * {@code pan==1(右) → 1<<0}、{@code tilt==0(上) → 1<<3}、{@code tilt==1(下) → 1<<2}）。
  *
  * <p>标准约束：Bit2/Bit1、Bit4/Bit3、Bit6/Bit5 不可同时为 1。
  */
@@ -46,14 +56,19 @@ public final class PtzEncoder {
     private static final int HEADER = 0xA5;
 
     // ---------- Bit7=0：方向与变倍 ----------
-    /** 云台左。 */
-    public static final int LEFT = 0x01;
-    /** 云台右。 */
-    public static final int RIGHT = 0x02;
-    /** 云台上。 */
-    public static final int UP = 0x04;
-    /** 云台下。 */
-    public static final int DOWN = 0x08;
+    /**
+     * 云台左（Bit2 = 0x02）。
+     *
+     * <p>方向位与直觉相反：低位对应右/下，高位对应左/上。
+     * 详见类注释表格。对应 wvp 的 {@code pan==0}。
+     */
+    public static final int LEFT = 0x02;
+    /** 云台右（Bit1 = 0x01）。对应 wvp 的 {@code pan==1}。 */
+    public static final int RIGHT = 0x01;
+    /** 云台上（Bit4 = 0x08）。对应 wvp 的 {@code tilt==0}。 */
+    public static final int UP = 0x08;
+    /** 云台下（Bit3 = 0x04）。对应 wvp 的 {@code tilt==1}。 */
+    public static final int DOWN = 0x04;
     /** 变倍放大。 */
     public static final int ZOOM_IN = 0x10;
     /** 变倍缩小。 */

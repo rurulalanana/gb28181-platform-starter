@@ -1,18 +1,14 @@
 <template>
   <div class="ptz-panel">
-    <!-- 云台方向盘 -->
+    <!-- 云台方向盘：按住持续转动，松开停止（全局 pointerup 兜底，见脚本） -->
     <div class="ptz-grid">
       <el-button
         v-for="d in DIRECTIONS"
         :key="d.cmd"
         class="ptz-btn"
         :style="{ gridArea: d.area }"
-        :disabled="disabled || !channel"
-        @mousedown="startMove(d.cmd)"
-        @mouseup="stopMove"
-        @mouseleave="stopMove"
-        @touchstart.prevent="startMove(d.cmd)"
-        @touchend.prevent="stopMove"
+        :disabled="inactive"
+        @pointerdown="beginMove(d.cmd, $event)"
       >
         <el-icon :size="18"><component :is="d.icon" /></el-icon>
       </el-button>
@@ -24,24 +20,16 @@
       <el-button
         class="ptz-btn"
         style="grid-area: zin"
-        :disabled="disabled || !channel"
-        @mousedown="holdZoom('zoomin')"
-        @mouseup="stopMove"
-        @mouseleave="stopMove"
-        @touchstart.prevent="holdZoom('zoomin')"
-        @touchend.prevent="stopMove"
+        :disabled="inactive"
+        @pointerdown="beginMove('zoomin', $event)"
       >
         <el-icon :size="18"><ZoomIn /></el-icon>
       </el-button>
       <el-button
         class="ptz-btn"
         style="grid-area: zout"
-        :disabled="disabled || !channel"
-        @mousedown="holdZoom('zoomout')"
-        @mouseup="stopMove"
-        @mouseleave="stopMove"
-        @touchstart.prevent="holdZoom('zoomout')"
-        @touchend.prevent="stopMove"
+        :disabled="inactive"
+        @pointerdown="beginMove('zoomout', $event)"
       >
         <el-icon :size="18"><ZoomOut /></el-icon>
       </el-button>
@@ -57,21 +45,21 @@
     <!-- 焦点光圈 -->
     <div class="ptz-row">
       <el-button-group>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fi', { command: 'focusnear' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'focusnear' })">
           近焦
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fi', { command: 'focusfar' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'focusfar' })">
           远焦
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fi', { command: 'stop' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'stop' })">
           停
         </el-button>
       </el-button-group>
       <el-button-group>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fi', { command: 'irisin' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'irisin' })">
           光圈+
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fi', { command: 'irisout' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'irisout' })">
           光圈−
         </el-button>
       </el-button-group>
@@ -82,13 +70,13 @@
       <div class="section-title">预置位</div>
       <div class="ptz-row">
         <el-input-number v-model="presetNo" :min="1" :max="255" size="small" controls-position="right" style="width: 100px" />
-        <el-button size="small" type="primary" :disabled="disabled || !channel" @click="cmd('preset', { command: 'set', preset: presetNo })">
+        <el-button size="small" type="primary" :disabled="inactive" @click="cmd('preset', { command: 'set', preset: presetNo })">
           设置
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('preset', { command: 'goto', preset: presetNo })">
+        <el-button size="small" :disabled="inactive" @click="cmd('preset', { command: 'goto', preset: presetNo })">
           调用
         </el-button>
-        <el-button size="small" type="danger" plain :disabled="disabled || !channel" @click="cmd('preset', { command: 'remove', preset: presetNo })">
+        <el-button size="small" type="danger" plain :disabled="inactive" @click="cmd('preset', { command: 'remove', preset: presetNo })">
           删除
         </el-button>
       </div>
@@ -98,30 +86,30 @@
     <div class="ptz-section">
       <div class="section-title">设备功能</div>
       <div class="ptz-row wrap">
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('wiper', { command: 'on' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('wiper', { command: 'on' })">
           <el-icon><Umbrella /></el-icon> 雨刷开
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('wiper', { command: 'off' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('wiper', { command: 'off' })">
           雨刷关
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fillLight', { command: 'on' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fillLight', { command: 'on' })">
           <el-icon><Sunny /></el-icon> 补光开
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('fillLight', { command: 'off' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('fillLight', { command: 'off' })">
           补光关
         </el-button>
       </div>
       <div class="ptz-row wrap mt-2">
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('record', { command: 'start' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('record', { command: 'start' })">
           <el-icon><VideoCamera /></el-icon> 设备录像
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('record', { command: 'stop' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('record', { command: 'stop' })">
           停止录像
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('guard', { command: 'setguard' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('guard', { command: 'setguard' })">
           <el-icon><Lock /></el-icon> 布防
         </el-button>
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('guard', { command: 'resetguard' })">
+        <el-button size="small" :disabled="inactive" @click="cmd('guard', { command: 'resetguard' })">
           撤防
         </el-button>
       </div>
@@ -131,19 +119,19 @@
     <div class="ptz-section">
       <div class="section-title">高级操作</div>
       <div class="ptz-row wrap">
-        <el-button size="small" :disabled="disabled || !channel" @click="cmd('iframe', {}, '已下发关键帧请求')">
+        <el-button size="small" :disabled="inactive" @click="cmd('iframe', {}, '已下发关键帧请求')">
           <el-icon><Picture /></el-icon> 强制关键帧
         </el-button>
         <el-popconfirm title="确定重启该设备？" @confirm="cmd('teleBoot', {}, '重启指令已下发')">
           <template #reference>
-            <el-button size="small" type="warning" plain :disabled="disabled || !channel">
+            <el-button size="small" type="warning" plain :disabled="inactive">
               <el-icon><RefreshRight /></el-icon> 远程重启
             </el-button>
           </template>
         </el-popconfirm>
         <el-popconfirm title="确定格式化设备存储卡？数据将丢失" @confirm="cmd('formatSdCard', { sdCardId: 1 }, '格式化指令已下发')">
           <template #reference>
-            <el-button size="small" type="danger" plain :disabled="disabled || !channel">
+            <el-button size="small" type="danger" plain :disabled="inactive">
               <el-icon><Delete /></el-icon> 格式化存储卡
             </el-button>
           </template>
@@ -156,7 +144,7 @@
       <div class="section-title">语音喊话</div>
       <el-button
         :type="talking ? 'danger' : 'primary'"
-        :disabled="disabled || !channel"
+        :disabled="inactive"
         style="width: 100%"
         @click="toggleTalk"
       >
@@ -169,7 +157,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { controlApi } from '@/api'
 
@@ -182,9 +170,22 @@ const props = defineProps({
   disabled: { type: Boolean, default: false }
 })
 
+/**
+ * 按钮是否不可用。
+ *
+ * <p>判据只能是「外部禁用」或「未选通道」：模板里曾写 {@code disabled || !channel}，
+ * 而 {@code channel} 并非本组件的 prop（只有 {@code serial}/{@code code}），
+ * 在 {@code <script setup>} 中解析为 undefined，{@code !channel} 恒为 true，
+ * 导致整个面板的按钮永久禁用、点不动。
+ */
+const inactive = computed(() => props.disabled || !props.serial)
+
 const speed = ref(129)
 const presetNo = ref(1)
 const talking = ref(false)
+
+/** 方向/变倍按钮当前是否处于「按下持续」状态，避免重复发 stop。 */
+const moving = ref(false)
 
 /** 八方向 + 变倍按钮布局。 */
 const DIRECTIONS = [
@@ -213,18 +214,70 @@ const ACTIONS = {
   talk: controlApi.talk
 }
 
-function startMove(command) {
-  send('ptz', { command, speed: speed.value })
+/**
+ * 按下开始转动。
+ *
+ * <p>用 pointer 事件统一鼠标/触摸，不必分别绑 mouse* 与 touch*。
+ * {@code setPointerCapture} 让指针移出按钮后仍归属本元素，
+ * 松开时按钮能收到 pointerup（但停止不依赖它，见全局兜底）。
+ */
+function beginMove(command, event) {
+  if (inactive.value) {
+    return
+  }
+  if (event?.currentTarget?.setPointerCapture && event.pointerId !== undefined) {
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch (e) {
+      // 指针已释放等情况下会抛错，不影响后续下发指令
+    }
+  }
+  moving.value = true
+  send('ptz', { command, speed: speed.value }, null, true)
 }
 
-/** 方向/变倍为「按下持续、松开停止」语义，松开时必须补发 stop。 */
-function stopMove() {
+/**
+ * 松开停止。
+ *
+ * <p><b>必须判 moving</b>：早期实现把 stop 直接绑在 {@code @mouseleave} 上，
+ * 鼠标只是划过按钮（从未按下）也会向后端发一条 {@code command=stop}。
+ * 且 {@code mouseleave} 在<b>禁用按钮上依然触发</b>（浏览器只屏蔽 click/pointer
+ * 事件），所以面板一禁用，鼠标划过反而开始刷 stop 请求。
+ * 只有确实下发过转动指令且尚未停止时才补发 stop。
+ */
+function endMove() {
+  if (!moving.value) {
+    return
+  }
+  moving.value = false
   send('ptz', { command: 'stop' }, null, true)
 }
 
-function holdZoom(command) {
-  send('ptz', { command, speed: speed.value })
+/** 标签页切到后台时停止：用户此时看不到画面，继续转动没有意义。 */
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    endMove()
+  }
 }
+
+onMounted(() => {
+  // 全局兜底：指针在按钮外释放（拖出去松手）、指针被系统取消、
+  // 窗口失去焦点（Alt+Tab）时都要停，否则云台会一直转到设备自身超时。
+  // endMove 内部有 moving 守卫，无关的 pointerup 不会产生多余请求。
+  window.addEventListener('pointerup', endMove)
+  window.addEventListener('pointercancel', endMove)
+  window.addEventListener('blur', endMove)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('pointerup', endMove)
+  window.removeEventListener('pointercancel', endMove)
+  window.removeEventListener('blur', endMove)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  // 面板关闭时若仍在转动，补发 stop
+  endMove()
+})
 
 /**
  * 下发控制指令。

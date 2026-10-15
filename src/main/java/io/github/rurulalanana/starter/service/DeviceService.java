@@ -7,6 +7,7 @@ import io.github.rurulalanana.gb28181.sip.event.KeepAliveEvent;
 import io.github.rurulalanana.gb28181.sip.event.RegisterEvent;
 import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
+import io.github.rurulalanana.starter.common.CharsetFix;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
@@ -103,6 +104,24 @@ public class DeviceService {
         return channelMapper.selectOne(Wrappers.<GbChannel>lambdaQuery()
                 .eq(GbChannel::getDeviceId, deviceId)
                 .eq(GbChannel::getChannelId, channelId).last("limit 1"));
+    }
+
+    /**
+     * 由通道编码反查其所属设备编码。
+     *
+     * <p><b>为什么需要</b>：GB/T 28181 的控制类命令（云台、预置位、录像、布防…）
+     * 的 {@code <DeviceID>} 是<b>通道编码</b>，而 SIP 的 {@code To}/{@code From}/
+     * 请求行必须是<b>设备编码</b>（设备才是注册实体）。业务侧接口只拿到通道编码，
+     * 必须经此反查才能正确寻址。
+     *
+     * <p>直连摄像机两者恰好相同（设备自身即通道），下级平台接入时则不同——
+     * 少了这一步，级联通道的所有控制命令都会报「设备未注册或会话已失效」。
+     *
+     * @return 所属设备编码；通道不存在时返回 {@code null}
+     */
+    public String deviceIdOfChannel(String channelId) {
+        GbChannel channel = findChannel(channelId);
+        return channel == null ? null : channel.getDeviceId();
     }
 
     /** 某设备下的通道。 */
@@ -439,13 +458,13 @@ public class DeviceService {
             channel.setCreateTime(LocalDateTime.now());
         }
         channel.setDeviceId(device.getDeviceId());
-        channel.setName(item.getName());
-        channel.setManufacturer(item.getManufacturer());
-        channel.setModel(item.getModel());
+        channel.setName(CharsetFix.repair(item.getName()));
+        channel.setManufacturer(CharsetFix.repair(item.getManufacturer()));
+        channel.setModel(CharsetFix.repair(item.getModel()));
         channel.setOwner(null);
         channel.setCivilCode(item.getCivilCode());
-        channel.setBlock(item.getBlock());
-        channel.setAddress(item.getAddress());
+        channel.setBlock(CharsetFix.repair(item.getBlock()));
+        channel.setAddress(CharsetFix.repair(item.getAddress()));
         channel.setParental(item.getParental());
         // ParentID 缺省时挂到所属设备下：通道树按 parentId 组装，
         // 留空会让通道在树里找不到父节点而不显示
@@ -480,19 +499,19 @@ public class DeviceService {
 
     private void applyDeviceInfo(GbDevice device, CatalogItem item) {
         if (item.getName() != null) {
-            device.setName(item.getName());
+            device.setName(CharsetFix.repair(item.getName()));
         }
         if (item.getManufacturer() != null) {
-            device.setManufacturer(item.getManufacturer());
+            device.setManufacturer(CharsetFix.repair(item.getManufacturer()));
         }
         if (item.getModel() != null) {
-            device.setModel(item.getModel());
+            device.setModel(CharsetFix.repair(item.getModel()));
         }
         if (item.getCivilCode() != null) {
             device.setCivilCode(item.getCivilCode());
         }
         if (item.getAddress() != null) {
-            device.setAddress(item.getAddress());
+            device.setAddress(CharsetFix.repair(item.getAddress()));
         }
         if (item.getPtzType() != null) {
             device.setPtzType(item.getPtzType());
@@ -666,7 +685,9 @@ public class DeviceService {
     private static void applyText(ManscdpMessage msg, String tag, java.util.function.Consumer<String> setter) {
         String v = msg.firstText(tag);
         if (v != null && !v.isBlank()) {
-            setter.accept(v);
+            // 设备普遍以 GBK 字节发中文，而解码器仅在出现替换字符时才回退 GBK，
+            // 遇到「GBK 字节恰为合法 UTF-8」的情况会静默产出乱码（如「平台」→「ƽ̨」）
+            setter.accept(CharsetFix.repair(v));
         }
     }
 

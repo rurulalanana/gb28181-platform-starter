@@ -31,6 +31,7 @@ public class ControlService {
     private static final int DEFAULT_ADDRESS = 1;
 
     private final Gb28181SipClientProvider clientProvider;
+    private final DeviceService deviceService;
 
     private Gb28181SipClient client() {
         Gb28181SipClient client = clientProvider.client();
@@ -38,6 +39,65 @@ public class ControlService {
             throw BizException.badRequest("SIP 信令服务未启动，无法下发控制命令");
         }
         return client;
+    }
+
+    // ==================== 寻址：设备编码 vs 通道编码 ====================
+
+    /**
+     * 一次控制指令的寻址对：{@code sipTarget} 用于 SIP 层找会话与构造请求行，
+     * {@code deviceId} 是写进 MANSCDP {@code <DeviceID>} 的值。
+     *
+     * <p><b>为什么必须分开</b>：GB/T 28181 里云台、预置位、录像等控制命令的
+     * {@code <DeviceID>} 是<b>通道编码</b>（功能挂在通道上），而 SIP 的
+     * {@code To}/{@code From}/请求行必须用<b>设备编码</b>（设备才是注册实体）。
+     * 底层 {@code Gb28181SipClient} 的方法只收一个 {@code deviceId} 并同时用于
+     * 这两处，于是「设备编码 ≠ 通道编码」时必然失败：
+     * <pre>
+     * 直连摄像机：设备 34020000001310000001 / 通道 34020000001310000001 → 恰好相同，能跑通
+     * 下级平台：  设备 34020000002000000006 / 通道 34020000001310000002 → 报「设备未注册或会话已失效」
+     * </pre>
+     * 因此本服务统一用本记录分离两者：SIP 层用 {@code sipTarget}，
+     * MANSCDP 用 {@code deviceId}。
+     */
+    private record Target(String sipTarget, String deviceId) {
+    }
+
+    /**
+     * 解析控制指令的寻址对。
+     *
+     * <p>{@code channelId} 是业务侧传入的通道编码。若库中能查到该通道，
+     * 则 SIP 目标取其所属设备编码；查不到（如直接传设备编码、或通道尚未同步）
+     * 则两者都退回 {@code channelId}，保持与旧行为一致。
+     */
+    private Target target(String channelId) {
+        if (channelId == null || channelId.isBlank()) {
+            throw BizException.badRequest("缺少通道编码");
+        }
+        String deviceId = deviceService.deviceIdOfChannel(channelId);
+        return new Target(deviceId == null ? channelId : deviceId, channelId);
+    }
+
+    /**
+     * 下发一条 MANSCDP 控制消息。
+     *
+     * <p>XML 由 {@code xmlBuilder} 用<b>通道编码</b>构造（保证 {@code <DeviceID>}
+     * 符合规范），SIP 层用<b>设备编码</b>寻址。
+     */
+    private void sendControl(String channelId, java.util.function.Function<String, String> xmlBuilder) {
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), xmlBuilder.apply(t.deviceId()));
+    }
+
+    /**
+     * 下发一条 PTZ 指令。
+     *
+     * <p>PTZ 命令码由 {@link PtzEncoder} 生成，与 {@code <DeviceID>} 无关，
+     * 因此只需保证 SIP 层寻址正确、{@code <DeviceID>} 写通道编码。
+     */
+    private void sendPtz(String channelId, String ptzCmd) {
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(),
+                ManscdpBuilder.ptzControl(client().nextSn(), t.deviceId(), ptzCmd));
     }
 
     // ==================== 云台 ====================
@@ -51,7 +111,7 @@ public class ControlService {
         String cmd = normalize(command);
         int sp = speed == null ? 129 : Math.max(0, Math.min(255, speed));
         if ("stop".equals(cmd)) {
-            client().ptzControl(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
+            sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
             return;
         }
         int bits = switch (cmd) {
@@ -67,7 +127,7 @@ public class ControlService {
             case "zoomout" -> PtzEncoder.ZOOM_OUT;
             default -> throw BizException.badRequest("不支持的云台指令：" + command);
         };
-        client().ptzControl(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
+        sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
     }
 
     /**
@@ -85,7 +145,7 @@ public class ControlService {
             case "stop" -> 0;
             default -> throw BizException.badRequest("不支持的焦点光圈指令：" + command);
         };
-        client().ptzControl(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
+        sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
     }
 
     /** 精确云台控制（2022）：角度 + 变焦倍数。 */
@@ -96,7 +156,7 @@ public class ControlService {
     /** 拉框放大 / 缩小。 */
     public void dragZoom(String channelId, boolean zoomIn, int length, int width,
                          int midpointX, int midpointY, int lengthX, int lengthY) {
-        client().ptzControl(channelId, PtzEncoder.dragZoom(zoomIn, length, width,
+        sendPtz(channelId, PtzEncoder.dragZoom(zoomIn, length, width,
                 midpointX, midpointY, lengthX, lengthY));
     }
 
@@ -113,12 +173,12 @@ public class ControlService {
             case "remove", "delete" -> PtzEncoder.PRESET_REMOVE;
             default -> throw BizException.badRequest("不支持的预置位指令：" + command);
         };
-        client().ptzControl(channelId, PtzEncoder.preset(DEFAULT_ADDRESS, op, preset));
+        sendPtz(channelId, PtzEncoder.preset(DEFAULT_ADDRESS, op, preset));
     }
 
     /** 查询设备侧预置位列表。 */
     public void queryPresets(String channelId) {
-        client().queryPresets(channelId);
+        sendControl(channelId, deviceId -> ManscdpBuilder.presetQuery(client().nextSn(), deviceId));
     }
 
     // ==================== 巡航 / 看守位 ====================
@@ -135,18 +195,18 @@ public class ControlService {
         String cmd = normalize(command);
         int group = groupId == null ? 1 : groupId;
         switch (cmd) {
-            case "query" -> client().sendMessage(channelId,
-                    ManscdpBuilder.cruiseTrackListQuery(client().nextSn(), channelId));
-            case "add", "remove" -> client().ptzControl(channelId,
+            case "query" -> sendControl(channelId,
+                    deviceId -> ManscdpBuilder.cruiseTrackListQuery(client().nextSn(), deviceId));
+            case "add", "remove" -> sendPtz(channelId,
                     PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group,
                             preset == null ? 0 : preset));
-            case "setspeed" -> client().ptzControl(channelId, PtzEncoder.cruiseParam(
+            case "setspeed" -> sendPtz(channelId, PtzEncoder.cruiseParam(
                     DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group, speed == null ? 1 : speed));
-            case "setstay" -> client().ptzControl(channelId, PtzEncoder.cruiseParam(
+            case "setstay" -> sendPtz(channelId, PtzEncoder.cruiseParam(
                     DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group, stay == null ? 1 : stay));
-            case "start" -> client().ptzControl(channelId,
+            case "start" -> sendPtz(channelId,
                     PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_START, group, 0));
-            case "stop" -> client().ptzControl(channelId,
+            case "stop" -> sendPtz(channelId,
                     PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_STOP, group, 0));
             default -> throw BizException.badRequest("不支持的巡航指令：" + command);
         }
@@ -156,18 +216,19 @@ public class ControlService {
 
     /** 查询巡航轨迹。 */
     public void queryCruiseTrack(String channelId, Integer number) {
-        client().sendMessage(channelId, ManscdpBuilder.cruiseTrackQuery(
-                client().nextSn(), channelId, number == null ? 0 : number));
+        sendControl(channelId, deviceId -> ManscdpBuilder.cruiseTrackQuery(
+                client().nextSn(), deviceId, number == null ? 0 : number));
     }
 
     /** 查询看守位信息。 */
     public void queryHomePosition(String channelId) {
-        client().sendMessage(channelId, ManscdpBuilder.homePositionQuery(client().nextSn(), channelId));
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.homePositionQuery(client().nextSn(), deviceId));
     }
 
     /** 看守位控制。 */
     public void homePosition(String channelId, Boolean enabled, Integer resetTime, Integer presetIndex) {
-        client().ptzControl(channelId, PtzEncoder.watchdog(DEFAULT_ADDRESS,
+        sendPtz(channelId, PtzEncoder.watchdog(DEFAULT_ADDRESS,
                 Boolean.TRUE.equals(enabled),
                 resetTime == null ? 0 : resetTime,
                 presetIndex == null ? 1 : presetIndex));
@@ -178,13 +239,13 @@ public class ControlService {
     /** 雨刷开关。 */
     public void wiper(String channelId, String command) {
         boolean on = "on".equals(normalize(command));
-        client().ptzControl(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, 0, on));
+        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, 0, on));
     }
 
     /** 补光灯开关。 */
     public void fillLight(String channelId, String command, Integer index) {
         boolean on = "on".equals(normalize(command));
-        client().ptzControl(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS,
+        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS,
                 index == null ? 1 : index, on));
     }
 
@@ -197,8 +258,8 @@ public class ControlService {
             case "stop" -> "StopRecord";
             default -> throw BizException.badRequest("不支持的录像指令：" + command);
         };
-        client().sendMessage(channelId,
-                ManscdpBuilder.recordControl(client().nextSn(), channelId, value, streamNumber));
+        sendControl(channelId, deviceId -> ManscdpBuilder.recordControl(
+                client().nextSn(), deviceId, value, streamNumber));
     }
 
     /** 布防 / 撤防。 */
@@ -208,27 +269,29 @@ public class ControlService {
             case "resetguard" -> "ResetGuard";
             default -> throw BizException.badRequest("不支持的布防指令：" + command);
         };
-        client().sendMessage(channelId, ManscdpBuilder.guardControl(client().nextSn(), channelId, value));
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.guardControl(client().nextSn(), deviceId, value));
     }
 
     /** 设备远程重启（标准 A.2.3.1.3）。 */
     public void teleBoot(String channelId) {
-        client().remoteBoot(channelId);
+        sendControl(channelId, deviceId -> ManscdpBuilder.teleBoot(client().nextSn(), deviceId));
     }
 
     /** 强制关键帧（标准 A.2.3.1.7）。 */
     public void forceIFrame(String channelId) {
-        client().forceIFrame(channelId);
+        sendControl(channelId, deviceId -> ManscdpBuilder.forceIFrame(client().nextSn(), deviceId));
     }
 
     /** 存储卡格式化（标准 A.2.3.1.13）：{@code id=0} 表示全部。 */
     public void formatSdCard(String channelId, Integer sdCardId) {
-        client().formatSdCard(channelId, sdCardId == null ? 0 : sdCardId);
+        sendControl(channelId, deviceId -> ManscdpBuilder.formatSdCard(
+                client().nextSn(), deviceId, sdCardId == null ? 0 : sdCardId));
     }
 
     /** 报警复位（标准 A.2.3.1.9）。 */
     public void alarmReset(String channelId) {
-        client().sendMessage(channelId, ManscdpBuilder.alarmReset(client().nextSn(), channelId));
+        sendControl(channelId, deviceId -> ManscdpBuilder.alarmReset(client().nextSn(), deviceId));
     }
 
     /** 设备配置下发（2022）：直接透传 xml（由调用方按标准拼装配置段）。 */
@@ -236,7 +299,8 @@ public class ControlService {
         if (xml == null || xml.isBlank()) {
             throw BizException.badRequest("配置内容不能为空");
         }
-        client().sendMessage(channelId, xml);
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), xml);
     }
 
     /** 设备订阅（目录 / 报警 / 位置 / PTZ）。 */
@@ -249,40 +313,46 @@ public class ControlService {
             default -> throw BizException.badRequest("不支持的订阅类型：" + type);
         };
         int exp = expires == null ? 3600 : expires;
+        Target t = target(channelId);
         String body = switch (event) {
             case "MobilePosition" -> ManscdpBuilder.mobilePositionSubscribe(
-                    client().nextSn(), channelId, interval);
-            case "Catalog" -> ManscdpBuilder.catalogQuery(client().nextSn(), channelId);
+                    client().nextSn(), t.deviceId(), interval);
+            case "Catalog" -> ManscdpBuilder.catalogQuery(client().nextSn(), t.deviceId());
             default -> null;
         };
-        client().subscribe(channelId, event, exp, body);
-        log.info("已发起订阅: channel={} event={} expires={}", channelId, event, exp);
+        client().subscribe(t.sipTarget(), event, exp, body);
+        log.info("已发起订阅: channel={} sipTarget={} event={} expires={}",
+                channelId, t.sipTarget(), event, exp);
     }
 
     /** 查询设备状态（标准 9.6）。 */
     public void queryDeviceStatus(String channelId) {
-        client().queryDeviceStatus(channelId);
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.deviceStatusQuery(client().nextSn(), deviceId));
     }
 
     /** 查询设备信息（标准 9.5）。 */
     public void queryDeviceInfo(String channelId) {
-        client().queryDeviceInfo(channelId);
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.deviceInfoQuery(client().nextSn(), deviceId));
     }
 
     /** 查询设备配置（标准 A.2.4.7）。 */
     public void queryConfig(String channelId, String configType) {
-        client().sendMessage(channelId, ManscdpBuilder.configDownloadQuery(
-                client().nextSn(), channelId, configType));
+        sendControl(channelId, deviceId -> ManscdpBuilder.configDownloadQuery(
+                client().nextSn(), deviceId, configType));
     }
 
     /** 查询存储卡状态（2022）。 */
     public void querySdCardStatus(String channelId) {
-        client().sendMessage(channelId, ManscdpBuilder.sdCardStatusQuery(client().nextSn(), channelId));
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.sdCardStatusQuery(client().nextSn(), deviceId));
     }
 
     /** 查询 PTZ 精确状态（2022）。 */
     public void queryPtzPosition(String channelId) {
-        client().sendMessage(channelId, ManscdpBuilder.ptzPositionQuery(client().nextSn(), channelId));
+        sendControl(channelId,
+                deviceId -> ManscdpBuilder.ptzPositionQuery(client().nextSn(), deviceId));
     }
 
     // ==================== OSD / 抓拍 / 升级 / 目标跟踪 ====================
@@ -310,7 +380,8 @@ public class ControlService {
                     .append("<Y>").append(nz(textY)).append("</Y></Item>");
         }
         sb.append("</OSDConfig></Control>");
-        client().sendMessage(channelId, sb.toString());
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), sb.toString());
     }
 
     /** 图像抓拍配置（2022）。 */
@@ -328,7 +399,8 @@ public class ControlService {
         sb.append("<SessionID>").append(UUID.randomUUID().toString().replace("-", ""))
                 .append("</SessionID>")
                 .append("</SnapShotConfig></Control>");
-        client().sendMessage(channelId, sb.toString());
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), sb.toString());
     }
 
     /** 设备软件升级（2022）。 */
@@ -341,7 +413,8 @@ public class ControlService {
                 .append("<FileURL>").append(escape(nz(fileUrl))).append("</FileURL>")
                 .append("<Manufacturer>").append(escape(nz(manufacturer))).append("</Manufacturer>")
                 .append("</Control>");
-        client().sendMessage(channelId, sb.toString());
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), sb.toString());
     }
 
     /**
@@ -371,7 +444,8 @@ public class ControlService {
                     .append("<LengthY>").append(nz(lengthY)).append("</LengthY>");
         }
         sb.append("</Control>");
-        client().sendMessage(channelId, sb.toString());
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), sb.toString());
     }
 
     // ==================== 报警通知 / 喊话 ====================
@@ -399,7 +473,8 @@ public class ControlService {
             sb.append("<Latitude>").append(latitude).append("</Latitude>");
         }
         sb.append("</Notify>");
-        client().sendMessage(channelId, sb.toString());
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), sb.toString());
     }
 
     /**
@@ -409,9 +484,11 @@ public class ControlService {
      * 媒体侧由 {@code BroadcastService} 建立下行通道；音频数据通过 WebSocket 持续推送。
      */
     public void talk(String channelId, String sourceId) {
-        client().sendMessage(channelId, ManscdpBuilder.broadcast(
-                client().nextSn(), sourceId, channelId));
-        log.info("已发送语音广播通知: source={} target={}", sourceId, channelId);
+        Target t = target(channelId);
+        client().sendMessage(t.sipTarget(), ManscdpBuilder.broadcast(
+                client().nextSn(), sourceId, t.deviceId()));
+        log.info("已发送语音广播通知: source={} sipTarget={} target={}",
+                sourceId, t.sipTarget(), t.deviceId());
     }
 
     // ==================== 内部 ====================
