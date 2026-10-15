@@ -1,17 +1,18 @@
 <template>
   <div class="page">
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><List /></el-icon> 通道管理</span>
-          <div class="header-actions">
-            <el-button size="small" :loading="loading" @click="load">
-              <el-icon><Refresh /></el-icon> 刷新
-            </el-button>
-          </div>
-        </div>
-      </template>
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">通道管理</h2>
+        <p class="page-subtitle">共 {{ pager.total ?? 0 }} 路通道</p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+      </div>
+    </header>
 
+    <el-card shadow="never">
       <el-form :inline="true" class="search-form">
         <el-form-item label="搜索">
           <el-input
@@ -45,7 +46,7 @@
         <el-table-column label="所属设备" min-width="200">
           <template #default="{ row }">
             <div class="mono">{{ row.deviceId }}</div>
-            <div class="muted">{{ row.deviceCustomName || row.deviceName || '—' }}</div>
+            <div class="text-muted">{{ row.deviceCustomName || row.deviceName || '—' }}</div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
@@ -428,7 +429,7 @@ onUnmounted(() => player.stop())
 }
 
 .preview-side {
-  border-left: 1px solid #ebeef5;
+  border-left: 1px solid var(--border-color);
   padding-left: 18px;
   height: 100%;
   overflow-y: auto;
@@ -460,7 +461,7 @@ onUnmounted(() => player.stop())
     height: auto;
     border-left: none;
     padding-left: 0;
-    border-top: 1px solid #ebeef5;
+    border-top: 1px solid var(--border-color);
     padding-top: 14px;
   }
 }

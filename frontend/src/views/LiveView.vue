@@ -1,38 +1,39 @@
 <template>
-  <div class="live-page">
-    <!-- 工具栏 -->
-    <el-card shadow="never" class="toolbar-card">
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <el-radio-group v-model="gridSize" size="default">
-            <el-radio-button :value="1">单画面</el-radio-button>
-            <el-radio-button :value="4">四分屏</el-radio-button>
-            <el-radio-button :value="6">六分屏</el-radio-button>
-            <el-radio-button :value="9">九分屏</el-radio-button>
-          </el-radio-group>
-
-          <el-select v-model="proto" style="width: 168px" @change="onProtoChange">
-            <el-option label="WebSocket-FLV" value="wsflv" />
-            <el-option label="WebRTC（低延迟）" value="webrtc" />
-          </el-select>        </div>
-
-        <div class="toolbar-right">
-          <el-input v-model="filterText" placeholder="过滤通道" clearable style="width: 200px">
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-          <el-button :loading="loading" @click="loadChannels">
-            <el-icon><Refresh /></el-icon> 刷新
-          </el-button>
-          <el-button type="danger" plain @click="stopAll">
-            <el-icon><SwitchButton /></el-icon> 全部停止
-          </el-button>
-        </div>
+  <div class="page live-page">
+    <!-- 页头 -->
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">实时预览</h2>
+        <p class="page-subtitle">
+          点击右侧通道快速上屏，或在画面格内下拉选择通道 · 当前
+          <b class="text-brand">{{ playingCount }}</b> / {{ gridSize }} 路播放中
+        </p>
       </div>
-    </el-card>
+      <div class="page-actions">
+        <el-radio-group v-model="gridSize" size="small">
+          <el-radio-button :value="1">1</el-radio-button>
+          <el-radio-button :value="4">4</el-radio-button>
+          <el-radio-button :value="6">6</el-radio-button>
+          <el-radio-button :value="9">9</el-radio-button>
+          <el-radio-button :value="16">16</el-radio-button>
+        </el-radio-group>
+        <el-select v-model="proto" style="width: 158px" size="small" @change="onProtoChange">
+          <el-option label="WebSocket-FLV" value="wsflv" />
+          <el-option label="WebRTC（低延迟）" value="webrtc" />
+        </el-select>
+        <el-button size="small" :loading="loading" @click="loadChannels">
+          <el-icon><Refresh /></el-icon> 刷新通道
+        </el-button>
+        <el-button size="small" type="danger" plain :disabled="!playingCount" @click="stopAll">
+          <el-icon><SwitchButton /></el-icon> 全部停止
+        </el-button>
+      </div>
+    </header>
 
-    <!-- 主体：画面网格 + 通道列表 -->
+    <!-- 主体：视频墙 + 通道列表 -->
     <div class="live-body">
-      <div class="grid-area" :class="'grid-' + gridSize">
+      <!-- 视频墙 -->
+      <div class="wall" :class="'wall-' + gridSize">
         <div v-for="tile in visibleTiles" :key="tile.id" class="tile">
           <div class="video-box">
             <!--
@@ -40,22 +41,35 @@
               所以这里不是 <video> 而是普通容器 div。
             -->
             <div :ref="(el) => setContainerRef(tile.id, el)" class="video-container" />
-            <div
-              v-if="!tile.playing"
-              class="tile-overlay"
-              :class="{ clickable: tile.channelKey }"
-              @click="tile.channelKey && playTile(tile)"
-            >
-              <el-icon :size="34"><VideoCamera /></el-icon>
+
+            <!-- 空闲态：提示如何上屏 -->
+            <div v-if="!tile.playing" class="tile-overlay">
+              <el-icon :size="30"><VideoCamera /></el-icon>
               <span class="overlay-text">{{ tile.state }}</span>
               <span v-if="tile.channelKey" class="overlay-hint">点击重试</span>
+              <span v-else class="overlay-hint">从右侧选择通道</span>
             </div>
-            <div v-if="tile.playing" class="tile-badge">
-              <span class="dot" />
-              {{ tile.channelName || tile.code }}
+
+            <!-- 空闲态且已选通道时整块可点 -->
+            <div
+              v-if="!tile.playing && tile.channelKey"
+              class="tile-click"
+              @click="playTile(tile)"
+            />
+
+            <!-- 左上角：通道名 + 序号 -->
+            <div v-if="tile.playing" class="tile-tag">
+              <span class="tile-index">{{ tile.id }}</span>
+              <span class="ellipsis">{{ tile.channelName || tile.code }}</span>
+            </div>
+
+            <!-- 右上角：状态灯 -->
+            <div v-if="tile.playing" class="tile-state" :title="tile.state">
+              <span class="pulse-dot" />
             </div>
           </div>
 
+          <!-- 格内工具条 -->
           <div class="tile-bar">
             <el-select
               v-model="tile.channelKey"
@@ -92,7 +106,7 @@
               >
                 <el-icon><Aim /></el-icon>
               </el-button>
-              <el-button type="danger" size="small" @click="stopTile(tile)">
+              <el-button type="danger" size="small" title="停止" @click="stopTile(tile)">
                 <el-icon><VideoPause /></el-icon>
               </el-button>
             </template>
@@ -100,35 +114,43 @@
         </div>
       </div>
 
-      <!-- 右侧通道列表 -->
-      <el-card shadow="never" class="channel-panel">
-        <template #header>
-          <div class="panel-header">
-            <span>通道列表</span>
-            <el-tag size="small" type="info" effect="plain">{{ filteredChannels.length }}</el-tag>
-          </div>
-        </template>
+      <!-- 通道列表 -->
+      <aside class="channel-panel">
+        <div class="panel-head">
+          <span class="panel-title">通道列表</span>
+          <span class="count-pill">{{ filteredChannels.length }}</span>
+        </div>
 
-        <el-empty v-if="!filteredChannels.length" description="暂无通道" :image-size="70" />
+        <div class="panel-search">
+          <el-input v-model="filterText" placeholder="搜索名称或编码" clearable size="small">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+        </div>
 
-        <div v-else class="channel-list">
-          <div
+        <div v-if="!filteredChannels.length" class="panel-empty">
+          <el-empty :description="channels.length ? '无匹配通道' : '暂无通道'" :image-size="64" />
+        </div>
+
+        <div v-else class="channel-list dark-scroll">
+          <button
             v-for="c in filteredChannels"
             :key="c.deviceId + '/' + c.id"
             class="channel-item"
-            :class="{ offline: !c.deviceOnline }"
+            :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
             @click="pickChannel(c)"
           >
-            <div class="channel-main">
-              <div class="channel-name">{{ c.customName || c.name || c.id }}</div>
-              <div class="channel-code mono">{{ c.id }}</div>
-            </div>
-            <el-tag :type="c.deviceOnline ? 'success' : 'info'" size="small" effect="light">
-              {{ c.deviceOnline ? '在线' : '离线' }}
-            </el-tag>
-          </div>
+            <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
+            <span class="ch-main">
+              <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
+              <span class="ch-code mono ellipsis">{{ c.id }}</span>
+            </span>
+            <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
+              <span class="pulse-dot" />
+            </span>
+            <span v-else-if="!c.deviceOnline" class="ch-offline">离线</span>
+          </button>
         </div>
-      </el-card>
+      </aside>
     </div>
 
     <!-- 云台控制抽屉 -->
@@ -150,6 +172,7 @@
     </el-drawer>
   </div>
 </template>
+
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -206,6 +229,14 @@ function supportsPtz(type) {
 }
 
 const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
+
+/** 正在播放的格子数（用于页头提示与"全部停止"按钮的可用态）。 */
+const playingCount = computed(() => tiles.value.filter((t) => t.playing).length)
+
+/** 已被画面格占用的通道 key，通道列表用它标记"使用中"。 */
+const usedKeys = computed(
+  () => new Set(tiles.value.filter((t) => t.channelKey).map((t) => t.channelKey))
+)
 
 const filteredChannels = computed(() => {
   const needle = (filterText.value || '').trim().toLowerCase()
@@ -395,99 +426,56 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* ============ 布局 ============ */
+
 .live-page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.toolbar-card :deep(.el-card__body) {
-  padding: 14px 18px;
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.toolbar-left,
-.toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  /* 视频墙要吃掉剩余高度，不随内容滚动 */
+  height: 100%;
 }
 
 .live-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 18px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: var(--sp-4);
+  flex: 1;
+  min-height: 0;
 }
 
-@media (max-width: 1200px) {
-  .live-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+/* ============ 视频墙 ============ */
 
-.grid-area {
+.wall {
   display: grid;
-  gap: 16px;
+  gap: var(--sp-3);
+  min-width: 0;
+  align-content: start;
 }
 
-.grid-1 {
-  grid-template-columns: 1fr;
-}
-
-.grid-4 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.grid-6,
-.grid-9 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
+.wall-1 { grid-template-columns: minmax(0, 1fr); }
+.wall-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.wall-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.wall-9 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.wall-16 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .tile {
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
+  min-width: 0;
 }
+
+/* ============ 画面格 ============ */
 
 .tile .video-box {
-  position: relative;
-  background: #000;
-  border-radius: 6px;
-  overflow: hidden;
-  aspect-ratio: 16 / 9;
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-sm);
+  transition: box-shadow 0.18s ease;
 }
 
-/*
- * jessibuca 容器：播放器会在内部创建 canvas（软解渲染）或 video（WebRTC 通路）。
- *
- * ⚠️ 不要在这里对 canvas / video 施加 width/height —— jessibuca 内部按容器尺寸
- * 计算缩放并设置 canvas 的 inline style（含 transform: scale），若被外部样式覆盖
- * 会导致双重缩放，画面缩成小块并偏移到容器外（表现为「跑在左上角」）。
- * 播放器自身的 DOM 全部隔离在 .jessibuca-host 内，样式由它自己管理。
- */
-.tile .video-container {
-  position: absolute;
-  inset: 0;
+.tile:hover .video-box {
+  box-shadow: var(--sh-md);
 }
 
-.tile .video-container :deep(.jessibuca-host) {
-  width: 100%;
-  height: 100%;
-}
-
+/* 空闲遮罩 */
 .tile-overlay {
   position: absolute;
   inset: 0;
@@ -495,63 +483,79 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: #a8abb2;
-  background: rgba(0, 0, 0, 0.72);
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.42);
   pointer-events: none;
+  text-align: center;
+  padding: var(--sp-3);
 }
 
-.tile-overlay.clickable {
-  pointer-events: auto;
+.overlay-text {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.overlay-hint {
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.32);
+}
+
+/* 整块可点层（避免与遮罩的 pointer-events 冲突） */
+.tile-click {
+  position: absolute;
+  inset: 0;
   cursor: pointer;
 }
 
-.tile-overlay.clickable:hover {
-  background: rgba(0, 0, 0, 0.62);
-}
-
-.tile-overlay .overlay-text {
-  font-size: 13px;
-}
-
-.tile-overlay .overlay-hint {
-  font-size: 12px;
-  color: #409eff;
-}
-
-.tile-badge {
+/* 左上角通道标签 */
+.tile-tag {
   position: absolute;
-  left: 10px;
-  top: 10px;
+  top: 8px;
+  left: 8px;
+  right: 34px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-size: 12px;
-  border-radius: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  background: rgba(5, 7, 13, 0.66);
+  backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 11.5px;
   pointer-events: none;
 }
 
-.tile-badge .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #67c23a;
-  animation: blink 1.6s infinite;
+.tile-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--brand-500);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
-@keyframes blink {
-  50% {
-    opacity: 0.35;
-  }
+/* 右上角状态灯 */
+.tile-state {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
 }
 
+/* 格内工具条 */
 .tile-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 
 .tile-select {
@@ -559,66 +563,164 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+/* ============ 通道列表面板 ============ */
+
 .channel-panel {
-  position: sticky;
-  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-xs);
+  overflow: hidden;
 }
 
-.channel-panel :deep(.el-card__body) {
-  padding: 10px;
-  max-height: calc(100vh - 250px);
-  overflow-y: auto;
-}
-
-.panel-header {
+.panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--ink-100);
+  flex-shrink: 0;
+}
+
+.panel-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.count-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: var(--r-full);
+  background: var(--brand-50);
+  color: var(--brand-600);
+  font-size: 11.5px;
   font-weight: 600;
 }
 
-.channel-list {
+.panel-search {
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  flex-shrink: 0;
+}
+
+.panel-empty {
+  flex: 1;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+}
+
+.channel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--sp-2) var(--sp-2);
 }
 
 .channel-item {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
   cursor: pointer;
-  transition: background 0.15s;
+  text-align: left;
+  font: inherit;
+  transition: background 0.13s ease;
 }
 
 .channel-item:hover {
-  background: #ecf5ff;
+  background: var(--ink-50);
 }
 
-.channel-item.offline {
-  opacity: 0.6;
+.channel-item.is-used {
+  background: var(--brand-50);
 }
 
-.channel-main {
+/* 离线通道整体降透明度 */
+.channel-item.is-offline {
+  opacity: 0.55;
+}
+
+.channel-item.is-offline:hover {
+  opacity: 0.8;
+}
+
+.ch-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ch-dot.is-online {
+  background: var(--success-500);
+}
+
+.ch-dot.is-offline {
+  background: var(--ink-300);
+}
+
+.ch-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
 }
 
-.channel-name {
-  font-size: 13px;
-  color: #303133;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ch-name {
+  font-size: 12.5px;
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
-.channel-code {
+.ch-code {
   font-size: 11px;
-  color: #909399;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+
+.ch-playing {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.ch-offline {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* ============ 响应式 ============ */
+
+@media (max-width: 1200px) {
+  .live-body {
+    grid-template-columns: minmax(0, 1fr) 232px;
+  }
+}
+
+@media (max-width: 900px) {
+  .live-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .channel-panel {
+    max-height: 300px;
+  }
+  .wall-16 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .wall-6,
+  .wall-9 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

@@ -1,19 +1,21 @@
 <template>
-  <div>
+  <div class="page">
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">级联配置</h2>
+        <p class="page-subtitle">上下级平台对接与目录共享，共 {{ list.length }} 个级联节点</p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+        <el-button size="small" type="primary" @click="openEdit(null)">
+          <el-icon><Plus /></el-icon> 新增级联
+        </el-button>
+      </div>
+    </header>
+
     <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><Share /></el-icon> 级联配置（上下级平台对接）</span>
-          <div>
-            <el-button size="small" :loading="loading" @click="load">
-              <el-icon><Refresh /></el-icon> 刷新
-            </el-button>
-            <el-button size="small" type="primary" @click="openEdit(null)">
-              <el-icon><Plus /></el-icon> 新增级联
-            </el-button>
-          </div>
-        </div>
-      </template>
 
       <el-table v-loading="loading" :data="list" stripe>
         <el-table-column label="名称" min-width="120">

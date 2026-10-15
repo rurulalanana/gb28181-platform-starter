@@ -1,15 +1,13 @@
 <template>
   <div>
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><Cloudy /></el-icon> 云端录像</span>
-          <el-tag type="info" effect="plain" size="small">
-            平台侧录制（ZLMediaKit 录 MP4），可选归档到对象存储
-          </el-tag>
-        </div>
-      </template>
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">云端录像</h2>
+        <p class="page-subtitle">平台侧录制归档与时间轴检索</p>
+      </div>
+    </header>
 
+    <el-card shadow="never">
       <el-form :inline="true" class="search-form">
         <el-form-item label="通道">
           <el-select
@@ -55,7 +53,7 @@
 
       <!-- 本月有录像的日子 -->
       <div v-if="monthFlags" class="month-flags">
-        <span class="muted">本月有录像的日期：</span>
+        <span class="text-muted">本月有录像的日期：</span>
         <el-button
           v-for="(flag, idx) in monthFlags.split('')"
           :key="idx"
@@ -133,9 +131,7 @@
           </template>
         </el-table-column>
         <template #empty>
-          <div class="empty-cell">
-            当日无云端录像。可在「通道管理」开启云端录像开关，或设备推流时手动开始录像
-          </div>
+          <el-empty :image-size="76" description="当日无云端录像。可在「通道管理」开启云端录像开关，或设备推流时手动开始录像" />
         </template>
       </el-table>
     </el-card>
@@ -477,7 +473,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 4px;
   padding: 10px 12px;
-  background: #fafafa;
+  background: var(--bg-sunken);
   border-radius: 6px;
   margin-bottom: 12px;
 }
