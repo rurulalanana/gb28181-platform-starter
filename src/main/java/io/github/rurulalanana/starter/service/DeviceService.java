@@ -316,8 +316,14 @@ public class DeviceService {
      * 处理设备目录应答，落库设备与通道。
      *
      * <p><b>通道只由目录应答产生</b>：设备报了什么就存什么，没报就不存。
-     * 不在这里做「目录为空则把设备自身登记为通道」的兜底 —— 目录应答是异步的，
+     * 不做「等几秒没子通道就把设备自身登记为通道」的定时兜底 —— 目录应答是异步的，
      * 兜底一旦抢跑就会和设备随后上报的真实子通道并存，留下两条脏数据。
+     *
+     * <p><b>例外：直连摄像机（IPC）</b>。这类设备的目录应答里只有一条，
+     * 且其 {@code DeviceID} 就是设备自身编号（IPC 没有下级通道，设备编号即通道编号）。
+     * 若按「自身那条只当设备属性」处理，界面上会一个通道都没有、也无法点播。
+     * 故当【本次响应只有自身这一条】且【库里还没有真实子通道】时，
+     * 把它同时登记为通道；设备一旦报出真实子通道，这条自身通道会被清理。
      *
      * @param parentDeviceId 应答来源设备（目录项归属该设备）
      * @param items          目录项
@@ -336,20 +342,31 @@ public class DeviceService {
             device.setCreateTime(LocalDateTime.now());
             deviceMapper.insert(device);
         }
+        CatalogItem selfItem = null;
+        boolean hasSubItem = false;
         for (CatalogItem item : items) {
             if (item == null || item.getDeviceId() == null || item.getDeviceId().isBlank()) {
                 continue;
             }
             if (item.getDeviceId().equals(parentDeviceId)) {
-                applyDeviceInfo(device, item);
-                deviceMapper.updateById(device);
+                selfItem = item;
                 continue;
             }
-            saveChannel(device, item);
+            hasSubItem = true;
+            saveChannel(device, item, false);
+        }
+        if (selfItem != null) {
+            applyDeviceInfo(device, selfItem);
+        }
+        if (hasSubItem) {
+            // 设备确实有下级通道 → 清掉可能残留的「自身通道」
+            removeSelfChannel(parentDeviceId);
+        } else if (selfItem != null && !hasSubChannels(parentDeviceId)) {
+            // 直连摄像机：设备自身就是唯一通道
+            saveChannel(device, selfItem, true);
         }
         // 通道数按【库里的实际行数】回填，不用本次目录项计数：
-        // 目录应答可能是分页/增量的（一次只报部分通道），累加会得到偏小的值；
-        // 设备自身那条（deviceId == parentDeviceId）也不该计入通道。
+        // 目录应答可能是分页/增量的（一次只报部分通道），累加会得到偏小的值。
         // 早先直接用 channelCount++ 的结果覆盖，遇到「先 DeviceInfo 报 Channel=1、
         // 后 Catalog 报 3 条」就会停在 1，与 gb_channel 的行数对不上。
         int channelCount = countChannels(parentDeviceId);
@@ -360,12 +377,26 @@ public class DeviceService {
                 parentDeviceId, items.size(), channelCount);
     }
 
-    /** 统计某设备下的通道行数（设备自身那条目录项不计入）。 */
+    /** 统计某设备下的通道行数（含「设备自身即通道」那条）。 */
     private int countChannels(String deviceId) {
+        Long n = channelMapper.selectCount(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId));
+        return n == null ? 0 : n.intValue();
+    }
+
+    /** 是否已有真实子通道（不含「设备自身即通道」那条）。 */
+    private boolean hasSubChannels(String deviceId) {
         Long n = channelMapper.selectCount(Wrappers.<GbChannel>lambdaQuery()
                 .eq(GbChannel::getDeviceId, deviceId)
                 .ne(GbChannel::getChannelId, deviceId));
-        return n == null ? 0 : n.intValue();
+        return n != null && n > 0;
+    }
+
+    /** 删除「设备自身即通道」那条（设备后来报出真实子通道时清理）。 */
+    private void removeSelfChannel(String deviceId) {
+        channelMapper.delete(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId)
+                .eq(GbChannel::getChannelId, deviceId));
     }
 
     /** 处理设备信息应答（{@code DeviceInfo} 查询结果），更新设备属性。 */
@@ -392,7 +423,13 @@ public class DeviceService {
         deviceMapper.updateById(device);
     }
 
-    private void saveChannel(GbDevice device, CatalogItem item) {
+    /**
+     * 保存通道。
+     *
+     * @param selfChannel true 表示这是「设备自身即通道」（直连摄像机）那条，
+     *                    目录项缺 {@code Status} 时用设备状态兜底
+     */
+    private void saveChannel(GbDevice device, CatalogItem item, boolean selfChannel) {
         // 必须按「设备编码 + 通道编码」查：通道编码跨设备可重复，
         // 只按通道编码查会把第二台设备的同号通道当成已存在而覆盖掉
         GbChannel channel = findChannel(device.getDeviceId(), item.getDeviceId());
@@ -410,7 +447,11 @@ public class DeviceService {
         channel.setBlock(item.getBlock());
         channel.setAddress(item.getAddress());
         channel.setParental(item.getParental());
-        channel.setParentId(item.getParentId());
+        // ParentID 缺省时挂到所属设备下：通道树按 parentId 组装，
+        // 留空会让通道在树里找不到父节点而不显示
+        String parentId = item.getParentId();
+        channel.setParentId(parentId == null || parentId.isBlank()
+                ? device.getDeviceId() : parentId);
         channel.setRegisterWay(item.getRegisterWay());
         channel.setSecrecy(item.getSecrecy());
         channel.setIpAddress(item.getIpAddress());
@@ -421,7 +462,14 @@ public class DeviceService {
         channel.setResolution(item.getResolution());
         channel.setDownloadSpeed(item.getDownloadSpeed());
         channel.setBusinessGroupId(item.getBusinessGroupId());
-        channel.setStatus(item.getStatus());
+        String status = item.getStatus();
+        if ((status == null || status.isBlank()) && selfChannel) {
+            // 直连摄像机：自身通道的在线状态就是设备在线状态。
+            // 留空会被 isOnline() 判为离线，点播直接报「通道不在线」。
+            status = device.getStatus() != null ? device.getStatus()
+                    : (Boolean.TRUE.equals(device.getOnline()) ? "ON" : "OFF");
+        }
+        channel.setStatus(status);
         channel.setUpdateTime(LocalDateTime.now());
         if (channel.getId() == null) {
             channelMapper.insert(channel);

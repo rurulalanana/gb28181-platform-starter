@@ -5,9 +5,11 @@ import io.github.rurulalanana.starter.vo.TreeNodeVo;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 通道树 / 设备树组装工具。
@@ -81,14 +83,29 @@ public final class TreeBuilder {
         }
         byParent.values().forEach(list -> list.sort(Comparator.comparing(
                 c -> c.getChannelNo() == null ? 0 : c.getChannelNo())));
-        return buildLevel(rootParentId, byParent);
+        return buildLevel(rootParentId, byParent, new HashSet<>());
     }
 
+    /**
+     * 递归组装一层。
+     *
+     * <p><b>必须带 {@code visited} 做环检测</b>：直连摄像机（IPC）的通道是
+     * 「设备自身即通道」，其 {@code parentId == channelId}，纯递归会
+     * 自己找自己、无限下钻直到 {@link StackOverflowError}。
+     * 同理设备上报的 {@code ParentID} 也可能成环。
+     */
     private static List<TreeNodeVo> buildLevel(String parentId,
-                                               Map<String, List<GbChannel>> byParent) {
+                                               Map<String, List<GbChannel>> byParent,
+                                               Set<String> visited) {
         List<TreeNodeVo> out = new ArrayList<>();
         for (GbChannel c : byParent.getOrDefault(parentId, List.of())) {
-            out.add(node(c, buildLevel(c.getChannelId(), byParent)));
+            String code = c.getChannelId();
+            // 自引用（自身即通道）或已出现过 → 作为叶子节点，不再下钻
+            if (code == null || code.equals(parentId) || !visited.add(code)) {
+                out.add(node(c, null));
+                continue;
+            }
+            out.add(node(c, buildLevel(code, byParent, visited)));
         }
         return out;
     }
