@@ -355,11 +355,4 @@ async function toggleTalk() {
   margin-bottom: 10px;
 }
 
-.mt-1 {
-  margin-top: 6px;
-}
-
-.mt-2 {
-  margin-top: 8px;
-}
 </style>

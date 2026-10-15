@@ -159,7 +159,7 @@
       </template>
 
       <div class="video-box">
-        <video ref="videoEl" autoplay playsinline muted controls />
+        <div ref="videoContainer" class="video-container" />
       </div>
 
       <div class="play-actions">
@@ -183,6 +183,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useVideoPlayer } from '@/composables/useVideoPlayer'
+import { usePlayerStateType } from '@/composables/usePlayerState'
 
 const channels = ref([])
 const selectedChannel = ref('')
@@ -197,14 +198,11 @@ const proto = ref('wsflv')
 /** 当前点播流的播放地址（用于切换协议时重连）。 */
 let currentUrls = {}
 
-const player = useVideoPlayer()
-const videoEl = player.videoEl
+/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+const videoContainer = ref(null)
+const player = useVideoPlayer(videoContainer)
 const playState = computed(() => player.state.value)
-const playStateType = computed(() => {
-  if (playState.value === '播放中') return 'success'
-  if (playState.value.startsWith('失败')) return 'danger'
-  return 'info'
-})
+const playStateType = usePlayerStateType(playState)
 
 const channelOptions = computed(() =>
   channels.value.map((c) => ({
@@ -473,23 +471,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.search-form {
-  margin-bottom: 4px;
-}
-
 .month-flags {
   display: flex;
   align-items: center;
@@ -508,10 +489,6 @@ onUnmounted(() => {
 .day-btn {
   min-width: 34px;
   padding: 6px 0;
-}
-
-.mt-4 {
-  margin-top: 16px;
 }
 
 .play-actions {

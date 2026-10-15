@@ -30,13 +30,21 @@ body {
   overflow: hidden;
   aspect-ratio: 16 / 9;
   width: 100%;
+  position: relative;
 }
 
-.video-box video {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: contain;
+/*
+ * 播放器挂载点。
+ *
+ * 播放器（jessibuca / WebRTC）自行在容器内创建 canvas 或 video 并管理其尺寸，
+ * 因此这里只负责撑满 .video-box，**不要**给内部的 canvas/video 加 width/height ——
+ * jessibuca 会按容器尺寸计算 canvas 的 inline `transform: scale(...)`，
+ * 外部样式覆盖会导致双重缩放（画面缩成小块并偏移到容器外）。
+ * 播放器自身的 DOM 全部隔离在其内部宿主节点中。
+ */
+.video-container {
+  position: absolute;
+  inset: 0;
 }
 
 /* 页面标题栏 */
@@ -135,7 +143,12 @@ body {
   margin-bottom: 6px;
 }
 
-.search-form :deep(.el-form-item) {
+/*
+ * 注意：这里是**全局** CSS 文件，不能用 `:deep()` —— 那是 SFC `<style scoped>`
+ * 的编译期语法，在普通 CSS 里浏览器会当作未知伪类而丢弃整条规则。
+ * 视图侧（scoped）要穿透组件样式时才用 `:deep()`。
+ */
+.search-form .el-form-item {
   margin-bottom: 14px;
 }
 

@@ -293,16 +293,5 @@ onMounted(load)
 </script>
 
 <style scoped>
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+/* .card-header 由 styles/main.css 统一提供 */
 </style>

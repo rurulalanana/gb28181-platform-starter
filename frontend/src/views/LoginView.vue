@@ -128,10 +128,6 @@ async function onSubmit() {
   letter-spacing: 4px;
 }
 
-.mb-3 {
-  margin-bottom: 12px;
-}
-
 .tip {
   text-align: center;
   color: #a8abb2;

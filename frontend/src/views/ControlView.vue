@@ -71,7 +71,7 @@
             </template>
 
             <div class="video-box">
-              <video ref="videoEl" autoplay playsinline muted controls />
+              <div ref="videoContainer" class="video-container" />
             </div>
 
             <div class="video-actions">
@@ -140,6 +140,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { usePlayerStateType } from '@/composables/usePlayerState'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
@@ -150,15 +151,12 @@ const proto = ref('wsflv')
 const mediaHttpPort = ref(null)
 const deviceInfo = ref(null)
 
-const player = useVideoPlayer()
-const videoEl = player.videoEl
+/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+const videoContainer = ref(null)
+const player = useVideoPlayer(videoContainer)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
-const stateType = computed(() => {
-  if (state.value === '播放中') return 'success'
-  if (state.value.startsWith('失败')) return 'danger'
-  return 'info'
-})
+const stateType = usePlayerStateType(state)
 
 const current = computed(() =>
   channels.value.find((c) => `${c.deviceId}/${c.id}` === channelKey.value)
