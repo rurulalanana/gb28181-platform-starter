@@ -71,7 +71,7 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 
 > 技术栈：Vue 3 + Vite 6 + Element Plus + Pinia + Vue Router。
 > 构建产物直接进后端静态资源目录，**单 jar 部署**；SPA 路由回退由 `config/SpaWebConfiguration` 处理。
-> 浏览器出画面只走 **WebRTC**（嵌入式 ZLMediaKit 未注册 FLV/HLS 路由，见下文限制）。
+> 浏览器播放支持 **WebSocket-FLV**（默认）与 **WebRTC** 两种通路，页面右上角可切换。
 
 ## REST API
 
@@ -160,7 +160,7 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 | `sip-host/sip-port` | `0.0.0.0` / `5060` | SIP 信令 |
 | `sip-password` | 空 | **平台注册密码（系统级统一密码）**。留空=不鉴权；公网部署务必设置。只校验密码，不校验用户名 |
 | `media-ip` | 空=自动探测 | **SDP `c=` 行与播放地址主机，必须是设备可达地址** |
-| `http-port` | `8081` | 媒体 HTTP（FLV/HLS；嵌入式模式下路由未注册） |
+| `http-port` | `8081` | 媒体 HTTP（WebSocket-FLV / HTTP-FLV / HLS） |
 | `rtmp/rtsp/rtc-port` | `11935/18554/18000` | 各协议端口，`0`=自动选空闲端口，`-1`=关闭 |
 | `app` | `rtp` | ZLM 应用名 |
 | `auto-record` / `record-root` | `false` / `${user.dir}/record` | 平台录像 |
@@ -396,10 +396,12 @@ rm -rf ~/.m2/repository/io/github/rurulalanana
 
 ## 已知限制（嵌入式 ZLMediaKit）
 
-1. **HTTP 播放路由未注册**：`/index/api/*`、`/app/…live.flv`、HLS 等由 **MediaServer 可执行文件**注册，C API 嵌入模式下不存在（ZLMediaKit issue #3503）。因此：
-   - 浏览器出画面请用 **WebRTC**（本工程实现了 SDP 交换：`POST /api/webrtc/play`）
-   - HTTP-FLV / HLS 地址会返回 404
-2. **RTSP/RTMP 回拉在嵌入模式下报 `no such stream`**：源已注册（日志可见 `媒体注册:rtsp://…`），但播放器侧查询不到。若生产需要 RTSP/RTMP 拉流，建议改为**独立部署 MediaServer 进程** + 本工程通过其 REST API 驱动（WVP 式架构），或改用 WebRTC。
+1. **管理 API 路由未注册，但播放路由可用**：`/index/api/*`（如 `getMediaList`、`getServerConfig`）由 **MediaServer 可执行文件**注册，C API 嵌入模式下不存在。但播放路由由 ZLM 内置 HTTP 服务直接提供：
+   - ✅ **WebSocket-FLV**：`ws://<host>:8081/<设备编码>/<通道编码>.live.flv`（前端默认通路，mpegts.js 播放）
+   - ✅ **HTTP-FLV / HLS**：同路径（`.live.flv` / `/hls.m3u8`）
+   - ✅ **WebRTC**：`POST /api/v1/webrtc/play` 交换 SDP，延迟最低
+   - ❌ `/index/api/*` 管理接口返回 404（流状态改用 MK_EVENTS 回调）
+2. **RTSP/RTMP 回拉在嵌入模式下报 `no such stream`**：源已注册（日志可见 `媒体注册:rtsp://…`），但播放器侧查询不到。若生产需要 RTSP/RTMP 拉流，建议改为**独立部署 MediaServer 进程** + 本工程通过其 REST API 驱动（WVP 式架构）。
 3. **推流鉴权回调未注册**：注册 `on_mk_media_publish` 会让 ZLM 等待 embedder 调用 auth invoker，而 zlm4j 未映射该函数指针（强行调用会导致 JVM 崩溃），因此不注册，由 ZLM 按默认放行。
 4. **jain-sip 是进程级单例**：同一 JVM 不能再起第二个 SIP 服务。要端到端压测或做媒体闭环验证，
    需另起一个进程（不同 JVM）连本平台，不能在同进程内再起一套 SIP。
