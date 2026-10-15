@@ -51,7 +51,8 @@ public class RecordController {
         if (recordService.isRecording(channelId)) {
             throw BizException.badRequest("该通道已在录像中：" + channelId);
         }
-        GbRecord record = recordService.startCloudRecord(channelId);
+        // 传设备编码：流未建立时服务内部会自动点播并等流上线
+        GbRecord record = recordService.startCloudRecord(serial, channelId);
         RecordStartVo vo = new RecordStartVo();
         vo.setRecordId(record.getRecordId());
         vo.setChannelId(channelId);
