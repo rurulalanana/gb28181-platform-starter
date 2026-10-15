@@ -86,7 +86,7 @@
       @close="closePlay"
     >
       <div class="video-box">
-        <video ref="videoEl" autoplay playsinline muted controls />
+        <div ref="videoContainer" class="video-container" />
       </div>
 
       <div class="play-bar">
@@ -124,6 +124,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { usePlayerStateType } from '@/composables/usePlayerState'
 
 const channels = ref([])
 const records = ref([])
@@ -138,15 +139,12 @@ const proto = ref('wsflv')
 const speed = ref(1)
 const mediaHttpPort = ref(null)
 
-const player = useVideoPlayer()
-const videoEl = player.videoEl
+/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+const videoContainer = ref(null)
+const player = useVideoPlayer(videoContainer)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
-const stateType = computed(() => {
-  if (state.value === '播放中') return 'success'
-  if (state.value.startsWith('失败')) return 'danger'
-  return 'info'
-})
+const stateType = usePlayerStateType(state)
 
 const serial = computed(() => query.channelKey.split('/')[0] || '')
 const code = computed(() => query.channelKey.split('/')[1] || '')
@@ -313,36 +311,6 @@ onUnmounted(() => player.stop())
 </script>
 
 <style scoped>
-.page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.search-form {
-  margin-bottom: 4px;
-}
-
-.table-footer {
-  margin-top: 14px;
-  text-align: right;
-  color: #909399;
-  font-size: 13px;
-}
-
 .play-bar {
   display: flex;
   align-items: center;

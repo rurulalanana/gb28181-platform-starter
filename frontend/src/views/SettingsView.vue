@@ -227,45 +227,14 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
 .full-height {
   height: 100%;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .form-actions {
   display: flex;
   align-items: center;
   margin-top: 8px;
-}
-
-.ml-2 {
-  margin-left: 12px;
-}
-
-.mb-3 {
-  margin-bottom: 14px;
-}
-
-.mt-3 {
-  margin-top: 14px;
 }
 
 .hint-grid {

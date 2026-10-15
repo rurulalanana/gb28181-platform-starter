@@ -202,30 +202,5 @@ onMounted(load)
 </script>
 
 <style scoped>
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.search-form {
-  margin-bottom: 4px;
-}
-
-.table-footer {
-  margin-top: 12px;
-  color: #909399;
-  font-size: 13px;
-}
-
-.mb-3 {
-  margin-bottom: 12px;
-}
+/* .card-header / .search-form / .table-footer 与 .mb-3 由 styles/main.css 统一提供 */
 </style>

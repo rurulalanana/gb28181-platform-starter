@@ -50,8 +50,8 @@
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.deviceOnline ? 'success' : 'info'" size="small" effect="light">
-              {{ row.deviceOnline ? '在线' : '离线' }}
+            <el-tag :type="row.status === 'ON' ? 'success' : 'info'" size="small" effect="light">
+              {{ row.status === 'ON' ? '在线' : '离线' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -109,7 +109,7 @@
     >
       <div class="preview-wrap">
         <div class="video-box preview-video">
-          <video ref="videoEl" autoplay playsinline muted controls />
+          <div ref="videoContainer" class="video-container" />
         </div>
         <div class="preview-side">
           <div class="preview-status">
@@ -159,6 +159,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { usePlayerStateType } from '@/composables/usePlayerState'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
@@ -171,15 +172,12 @@ const previewTarget = ref(null)
 const proto = ref('wsflv')
 const mediaHttpPort = ref(null)
 
-const player = useVideoPlayer()
-const videoEl = player.videoEl
+/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+const videoContainer = ref(null)
+const player = useVideoPlayer(videoContainer)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
-const stateType = computed(() => {
-  if (state.value === '播放中') return 'success'
-  if (state.value.startsWith('失败') || state.value.includes('中断')) return 'danger'
-  return 'info'
-})
+const stateType = usePlayerStateType(state)
 
 const ptzDrawer = ref(false)
 const ptzTarget = ref(null)
@@ -316,36 +314,6 @@ onUnmounted(() => player.stop())
 </script>
 
 <style scoped>
-.page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.card-header span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.search-form {
-  margin-bottom: 4px;
-}
-
-.table-footer {
-  margin-top: 14px;
-  text-align: right;
-  color: #909399;
-  font-size: 13px;
-}
-
 .preview-wrap {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -375,9 +343,5 @@ onUnmounted(() => player.stop())
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 4px;
-}
-
-.mb-3 {
-  margin-bottom: 12px;
 }
 </style>

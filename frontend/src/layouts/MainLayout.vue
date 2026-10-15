@@ -201,10 +201,6 @@ async function onCommand(command) {
   align-items: center;
 }
 
-.mr-2 {
-  margin-right: 10px;
-}
-
 .user {
   display: flex;
   align-items: center;
