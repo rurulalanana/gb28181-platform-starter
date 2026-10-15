@@ -29,6 +29,9 @@ export const deviceApi = {
   remove: (serial) => post('/device/remove', { serial }),
   setName: (params) => post('/device/setname', params),
   setInfo: (params) => post('/device/setinfo', params),
+  /** 切换流传输模式（UDP/TCP，仅影响后续点播）。 */
+  setMediaTransport: (serial, mediaTransport, mode = 'passive') =>
+    post('/device/setmediatransport', { serial, media_transport: mediaTransport, media_transport_mode: mode }),
   setChannelName: (params) => post('/device/setchannelname', params),
   setChannelPtzType: (params) => post('/device/setchannelptztype', params),
   setChannelOnDemand: (params) => post('/device/setchannelondemand', params),

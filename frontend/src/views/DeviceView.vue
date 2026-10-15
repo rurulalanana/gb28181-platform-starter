@@ -41,10 +41,10 @@
     <el-card shadow="never">
 
       <el-table v-loading="loading" :data="devices" stripe>
-        <el-table-column prop="id" label="设备编码" min-width="190" sortable>
+        <el-table-column prop="id" label="设备编码" min-width="170" sortable>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="180" :sort-by="(r) => r.customName || r.name || ''" sortable>
+        <el-table-column label="名称" min-width="150" :sort-by="(r) => r.customName || r.name || ''" sortable>
           <template #default="{ row }">
             <!--
               行内编辑：点即改。设备名常被上报成统一型号名，而改名是高频操作，
@@ -61,58 +61,57 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="厂商 / 型号" min-width="160">
+        <el-table-column label="流传输" width="104" align="center">
           <template #default="{ row }">
-            <span class="text-muted">{{ [row.manufacturer, row.model].filter(Boolean).join(' / ') || '—' }}</span>
+            <!-- 行内切换：对齐 LiveGBS 的流传输模式直接切换，只影响后续点播 -->
+            <el-radio-group
+              :model-value="(row.mediaTransport || 'UDP').toUpperCase()"
+              size="small"
+              class="transport-radio"
+              :disabled="transportPending.has(row.id)"
+              @change="(v) => changeTransport(row, v)"
+            >
+              <el-radio-button value="UDP">UDP</el-radio-button>
+              <el-radio-button value="TCP">TCP</el-radio-button>
+            </el-radio-group>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
+        <el-table-column prop="channelCount" label="通道数" width="76" align="center" sortable>
+          <template #default="{ row }">{{ row.channelCount ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="在线状态" width="88" align="center">
           <template #default="{ row }">
             <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
               {{ row.online ? '在线' : '离线' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="IP 地址" min-width="140">
-          <template #default="{ row }"><span class="mono">{{ row.remoteIp || '—' }}</span></template>
-        </el-table-column>
-        <el-table-column prop="channelCount" label="通道数" width="80" align="center" sortable>
-          <template #default="{ row }">{{ row.channelCount ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="最后注册" min-width="160">
+        <el-table-column label="操作" width="240" align="center">
           <template #default="{ row }">
-            <span class="text-muted">{{ row.lastRegisterAt || '—' }}</span>
+            <!--
+              LiveGBS 风格操作组：文字按钮更明确。
+              ＞「更新通道」仅在线设备（离线拉不动目录）；
+              ＞「删除」仅离线设备（防误删在线设备，对齐 LiveGBS）。
+            -->
+            <div class="row-actions">
+              <el-button link type="primary" @click="viewChannels(row)">查看通道</el-button>
+              <el-button v-if="row.online" link :loading="busy === row.id" @click="collect(row)">更新通道</el-button>
+              <el-button link class="act-edit" @click="openEdit(row)">编辑</el-button>
+              <el-button v-if="!row.online" link type="danger" @click="remove(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right" align="center">
+        <el-table-column label="厂商 / 型号" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">
-            <div class="row-actions">
-            <el-tooltip content="查看该设备的通道">
-              <el-button link type="primary" @click="viewChannels(row)">
-                <el-icon><List /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="更新通道（重新拉取目录）">
-              <el-button
-                link
-                type="primary"
-                :loading="busy === row.id"
-                @click="collect(row)"
-              >
-                <el-icon><Download /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="编辑设备">
-              <el-button link type="primary" @click="openEdit(row)">
-                <el-icon><Edit /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="删除设备">
-              <el-button link type="danger" @click="remove(row)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-tooltip>
-            </div>
+            <span class="text-muted">{{ [row.manufacturer, row.model].filter(Boolean).join(' / ') || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="IP 地址" min-width="130" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ row.remoteIp || '—' }}</span></template>
+        </el-table-column>
+        <el-table-column label="最后注册" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.lastRegisterAt || '—' }}</span>
           </template>
         </el-table-column>
         <template #empty>
@@ -216,6 +215,9 @@ function resetQuery() {
 /** 正在保存名称的设备编号集合（防重复提交）。 */
 const namePending = reactive(new Set())
 
+/** 正在切换流传输模式的设备编号集合。 */
+const transportPending = reactive(new Set())
+
 const editDialog = ref(false)
 const editTarget = ref(null)
 const form = reactive({
@@ -269,6 +271,23 @@ function search() {
 /** 查看该设备的通道（跳转通道管理页并带上设备筛选）。 */
 function viewChannels(row) {
   router.push({ path: '/channels', query: { serial: row.id } })
+}
+
+/** 行内切换流传输模式（UDP/TCP，只影响后续点播发流方式）。 */
+async function changeTransport(row, value) {
+  const old = row.mediaTransport || 'UDP'
+  if (value === old) return
+  transportPending.add(row.id)
+  try {
+    await deviceApi.setMediaTransport(row.id, value)
+    row.mediaTransport = value
+    ElMessage.success(`已切换为 ${value}（对下次点播生效）`)
+  } catch (e) {
+    row.mediaTransport = old
+    ElMessage.error(e.message || '切换失败')
+  } finally {
+    transportPending.delete(row.id)
+  }
 }
 
 async function collect(row) {
@@ -392,5 +411,35 @@ onMounted(load)
 /* .card-header / .search-form / .empty-cell 由 styles/main.css 统一提供 */
 .edit-form :deep(.el-form-item) {
   margin-bottom: 18px;
+}
+
+/* 操作组：文字按钮紧凑排列，编辑按钮用警示橙（对齐 LiveGBS 的操作语义色） */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+.row-actions .el-button + .el-button {
+  margin-left: 0;
+}
+.row-actions .act-edit {
+  color: var(--warning-500, #e6a23c);
+}
+.row-actions .act-edit:hover {
+  color: var(--warning-600, #d48806);
+}
+
+/* 行内流传输切换：紧凑分段按钮（比下拉在窄列里更清晰、可见当前值） */
+.transport-radio :deep(.el-radio-button__inner) {
+  padding: 3px 8px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.transport-radio :deep(.el-radio-button:first-child .el-radio-button__inner) {
+  border-radius: 5px 0 0 5px;
+}
+.transport-radio :deep(.el-radio-button:last-child .el-radio-button__inner) {
+  border-radius: 0 5px 5px 0;
 }
 </style>

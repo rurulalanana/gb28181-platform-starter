@@ -31,16 +31,22 @@ public class OpLogController {
 
     private final OperationLogService operationLogService;
 
-    /** 分页查询。 */
+    /** 分页查询。begin/end 为可选时间范围（yyyy-MM-dd HH:mm:ss）。 */
     @GetMapping("/list")
     public ApiResponse<OpLogListVo> list(@RequestParam(defaultValue = "0") int start,
                                          @RequestParam(defaultValue = "100") int limit,
                                          @RequestParam(required = false) String method,
-                                         @RequestParam(required = false) String keyword) {
+                                         @RequestParam(required = false) String keyword,
+                                         @RequestParam(required = false)
+                                         @org.springframework.format.annotation.DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+                                         java.time.LocalDateTime begin,
+                                         @RequestParam(required = false)
+                                         @org.springframework.format.annotation.DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+                                         java.time.LocalDateTime end) {
         StpUtil.checkLogin();
         OpLogListVo vo = new OpLogListVo();
-        vo.setOpLogCount(operationLogService.count(method, keyword));
-        vo.setOpLogList(operationLogService.list(method, keyword, start, limit));
+        vo.setOpLogCount(operationLogService.count(method, keyword, begin, end));
+        vo.setOpLogList(operationLogService.list(method, keyword, begin, end, start, limit));
         return ApiResponse.ok(vo);
     }
 

@@ -1,6 +1,8 @@
 package io.github.rurulalanana.starter.config;
 
+import io.github.rurulalanana.starter.entity.GbUser;
 import io.github.rurulalanana.starter.service.OperationLogService;
+import io.github.rurulalanana.starter.service.UserService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -8,7 +10,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 操作日志拦截器：记录 {@code /api/v1/**} 的接口调用。
@@ -46,6 +50,10 @@ public class OperationLogInterceptor implements HandlerInterceptor {
     );
 
     private final OperationLogService operationLogService;
+    private final UserService userService;
+
+    /** 登录 ID → 用户名缓存（日志落库用用户名，避免每条日志查库）。 */
+    private final Map<Long, String> userNames = new ConcurrentHashMap<>();
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
@@ -70,10 +78,27 @@ public class OperationLogInterceptor implements HandlerInterceptor {
                     ? String.valueOf(response.getStatus())
                     : ex.getClass().getSimpleName();
 
-            operationLogService.record(method, resource, remoteAddr, result, duration);
+            operationLogService.record(method, resource, remoteAddr, result, duration, operator());
         } catch (Exception e) {
             // 日志失败绝不影响请求
             log.debug("操作日志记录异常：{}", e.toString());
+        }
+    }
+
+    /** 取操作人（用户名；未登录接口如 /login 返回 null）。 */
+    private String operator() {
+        try {
+            long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
+            return userNames.computeIfAbsent(userId, id -> {
+                try {
+                    GbUser user = userService.findById(id);
+                    return user != null ? user.getUsername() : String.valueOf(id);
+                } catch (Exception e) {
+                    return String.valueOf(id);
+                }
+            });
+        } catch (Exception e) {
+            return null;
         }
     }
 

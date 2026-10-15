@@ -38,5 +38,8 @@ public class GbOperationLog implements Serializable {
     /** 用时（毫秒）。 */
     private Integer durationMs;
 
+    /** 操作人（登录用户名；未登录/登录前接口为空）。 */
+    private String operator;
+
     private LocalDateTime createTime;
 }
