@@ -40,6 +40,9 @@ public class Gb28181PlatformConfiguration {
         if (!isBlank(props.getMediaIp())) {
             builder.mediaIp(props.getMediaIp());
         }
+        if (!isBlank(props.getRtcExternIp())) {
+            builder.rtcExternIp(props.getRtcExternIp());
+        }
         MediaServerProperties mediaProps = builder.build();
 
         Gb28181MediaPlatform platform = new Gb28181MediaPlatform(mediaProps);

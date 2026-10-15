@@ -46,6 +46,14 @@ public class Gb28181Properties {
     private int rtspPort = 18554;
     private int rtcPort = 18000;
 
+    /**
+     * WebRTC 对外通告 IP（ZLM {@code rtc.externIP}）；留空回退 {@link #mediaIp}。
+     *
+     * <p>服务器在 NAT 后时必须填公网 IP：ZLM 默认只下发本机网卡地址当 ICE 候选，
+     * 浏览器拿到内网地址连不上，表现为 SDP 协商成功但画面始终 0x0。
+     */
+    private String rtcExternIp = "";
+
     /** ZLM 应用名（播放 URL 第一段）。 */
     private String app = "rtp";
 
