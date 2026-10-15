@@ -28,7 +28,7 @@
           <el-input v-model="query.serial" placeholder="设备编码" clearable style="width: 200px" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="load">查询</el-button>
+          <el-button type="primary" @click="search">查询</el-button>
         </el-form-item>
       </el-form>
 
@@ -67,7 +67,12 @@
         </template>
       </el-table>
 
-      <div class="table-footer">共 {{ total }} 条报警</div>
+      <TablePager
+        :pager="pager"
+        unit="条报警"
+        @page-change="onPageChange"
+        @size-change="onSizeChange"
+      />
     </el-card>
   </div>
 </template>
@@ -76,9 +81,10 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alarmApi } from '@/api'
+import { usePagination } from '@/composables/usePagination'
+import TablePager from '@/components/TablePager.vue'
 
 const alarms = ref([])
-const total = ref(0)
 const loading = ref(false)
 const query = reactive({ priority: null, serial: '' })
 
@@ -93,20 +99,31 @@ function priorityColor(p) {
   return PRIORITY_COLOR[p] || 'info'
 }
 
+const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
+})
+
 async function load() {
   loading.value = true
   try {
-    const params = { start: 0, limit: 500 }
+    const params = { start: offset.value, limit: pager.size }
     if (query.priority) params.priority = query.priority
     if (query.serial) params.serial = query.serial
     const data = await alarmApi.list(params)
     alarms.value = data?.alarmList || []
-    total.value = data?.alarmCount ?? alarms.value.length
+    setTotal(data?.alarmCount ?? alarms.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载报警失败')
   } finally {
     loading.value = false
   }
+}
+
+/** 条件变化后回到第一页再查，否则会停在越界页上看到空列表。 */
+function search() {
+  reset()
+  load()
 }
 
 async function removeOne(row) {
@@ -142,5 +159,5 @@ onMounted(load)
 </script>
 
 <style scoped>
-/* .card-header / .search-form / .table-footer 由 styles/main.css 统一提供 */
+/* .card-header / .search-form / .empty-cell 由 styles/main.css 统一提供 */
 </style>

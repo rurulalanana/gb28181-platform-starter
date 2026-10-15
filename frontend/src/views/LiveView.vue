@@ -84,7 +84,12 @@
               <el-icon><VideoPlay /></el-icon>
             </el-button>
             <template v-else>
-              <el-button size="small" title="云台控制" @click="openPtz(tile)">
+              <el-button
+                v-if="supportsPtz(tile.ptzType)"
+                size="small"
+                title="云台控制"
+                @click="openPtz(tile)"
+              >
                 <el-icon><Aim /></el-icon>
               </el-button>
               <el-button type="danger" size="small" @click="stopTile(tile)">
@@ -183,10 +188,22 @@ const tiles = ref(
     serial: '',
     code: '',
     channelName: '',
+    /** 通道的云台类型，用于决定格子工具条是否出现云台按钮。 */
+    ptzType: 0,
     state: '未选择通道',
     playing: false
   }))
 )
+
+/**
+ * 该类型是否支持云台控制。
+ *
+ * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
+ * 与 {@code ChannelView.vue} 保持一致；类型可在通道管理列表里直接下拉修改。
+ */
+function supportsPtz(type) {
+  return type === 1 || type === 2 || type === 4
+}
 
 const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
 
@@ -271,6 +288,7 @@ function onChannelChange(tile) {
     tile.serial = ''
     tile.code = ''
     tile.channelName = ''
+    tile.ptzType = 0
     tile.state = '未选择通道'
   }
 }
@@ -279,6 +297,7 @@ function applyChannel(tile, channel) {
   tile.serial = channel.deviceId
   tile.code = channel.id
   tile.channelName = channel.customName || channel.name || channel.id
+  tile.ptzType = channel.ptzType || 0
 }
 
 /** 点播 + 播放。 */

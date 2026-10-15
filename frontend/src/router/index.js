@@ -28,12 +28,6 @@ const routes = [
         meta: { title: '实时预览', icon: 'mdi-video' }
       },
       {
-        path: 'control',
-        name: 'control',
-        component: () => import('@/views/ControlView.vue'),
-        meta: { title: '设备控制', icon: 'mdi-gamepad-variant' }
-      },
-      {
         path: 'devices',
         name: 'devices',
         component: () => import('@/views/DeviceView.vue'),

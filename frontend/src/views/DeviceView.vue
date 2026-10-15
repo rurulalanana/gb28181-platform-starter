@@ -18,7 +18,7 @@
             placeholder="设备编码 / 名称"
             clearable
             style="width: 220px"
-            @keyup.enter="load"
+            @keyup.enter="search"
           >
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
@@ -30,7 +30,7 @@
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="load">查询</el-button>
+          <el-button type="primary" @click="search">查询</el-button>
         </el-form-item>
       </el-form>
 
@@ -38,8 +38,22 @@
         <el-table-column prop="id" label="设备编码" min-width="190">
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="120">
-          <template #default="{ row }">{{ row.customName || row.name || '—' }}</template>
+        <el-table-column label="名称" min-width="180">
+          <template #default="{ row }">
+            <!--
+              行内编辑：点即改。设备名常被上报成统一型号名，而改名是高频操作，
+              弹窗多一步没必要。回车或失焦保存。
+            -->
+            <el-input
+              v-model="row.customName"
+              size="small"
+              placeholder="点击修改"
+              :disabled="namePending.has(row.id)"
+              @focus="onNameFocus(row)"
+              @keyup.enter="saveName(row)"
+              @blur="saveName(row)"
+            />
+          </template>
         </el-table-column>
         <el-table-column label="厂商 / 型号" min-width="160">
           <template #default="{ row }">
@@ -64,7 +78,7 @@
             <span class="muted">{{ row.lastRegisterAt || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right" align="center">
+        <el-table-column label="操作" width="150" fixed="right" align="center">
           <template #default="{ row }">
             <el-tooltip content="采集全量数据">
               <el-button
@@ -76,8 +90,8 @@
                 <el-icon><Download /></el-icon>
               </el-button>
             </el-tooltip>
-            <el-tooltip content="重命名">
-              <el-button link type="primary" @click="openRename(row)">
+            <el-tooltip content="编辑设备">
+              <el-button link type="primary" @click="openEdit(row)">
                 <el-icon><Edit /></el-icon>
               </el-button>
             </el-tooltip>
@@ -95,16 +109,63 @@
         </template>
       </el-table>
 
-      <div class="table-footer">共 {{ total }} 台设备</div>
+      <TablePager
+        :pager="pager"
+        unit="台设备"
+        @page-change="onPageChange"
+        @size-change="onSizeChange"
+      />
     </el-card>
 
-    <!-- 重命名对话框 -->
-    <el-dialog v-model="renameDialog" title="重命名设备" width="440px">
-      <div class="mono mb-3">{{ renameTarget?.id }}</div>
-      <el-input v-model="renameValue" placeholder="自定义名称" />
+    <!-- 编辑设备 -->
+    <el-dialog v-model="editDialog" title="编辑设备" width="820px">
+      <el-form :model="form" label-width="130px" class="edit-form">
+        <el-row :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="设备编号">
+              <el-input :model-value="editTarget?.id" disabled />
+            </el-form-item>
+            <el-form-item label="自定义名称">
+              <el-input v-model="form.customName" placeholder="留空则用设备上报名称" />
+            </el-form-item>
+            <el-form-item label="流传输模式">
+              <el-radio-group v-model="form.mediaTransport">
+                <el-radio-button value="TCP">TCP</el-radio-button>
+                <el-radio-button value="UDP">UDP</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="字符集">
+              <el-select v-model="form.charset" placeholder="默认" clearable style="width: 100%">
+                <el-option label="GB2312" value="GB2312" />
+                <el-option label="GBK" value="GBK" />
+                <el-option label="UTF-8" value="UTF-8" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="SIP 密码">
+              <el-input v-model="form.password" placeholder="仅平台侧留存，不参与注册鉴权" show-password />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="目录抓取周期(秒)">
+              <el-input-number v-model="form.catalogInterval" :min="0" :max="86400" controls-position="right" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="订阅周期(秒)">
+              <el-input-number v-model="form.subscribeInterval" :min="0" :max="86400" controls-position="right" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="订阅项目">
+              <el-checkbox v-model="form.catalogSubscribe">目录订阅</el-checkbox>
+              <el-checkbox v-model="form.alarmSubscribe">报警订阅</el-checkbox>
+              <el-checkbox v-model="form.positionSubscribe">位置订阅</el-checkbox>
+            </el-form-item>
+            <el-form-item label="设备录像">
+              <el-checkbox v-model="form.recordCenter">中心检索</el-checkbox>
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
       <template #footer>
-        <el-button @click="renameDialog = false">取消</el-button>
-        <el-button type="primary" :loading="busy === 'rename'" @click="doRename">保存</el-button>
+        <el-button @click="editDialog = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="doSave">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -115,35 +176,68 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deviceApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import { usePagination } from '@/composables/usePagination'
+import TablePager from '@/components/TablePager.vue'
 
 const auth = useAuthStore()
 
 const devices = ref([])
-const total = ref(0)
 const loading = ref(false)
 const busy = ref('')
+const saving = ref(false)
 const query = reactive({ q: '', online: null })
 
-const renameDialog = ref(false)
-const renameTarget = ref(null)
-const renameValue = ref('')
+/** 正在保存名称的设备编号集合（防重复提交）。 */
+const namePending = reactive(new Set())
+
+const editDialog = ref(false)
+const editTarget = ref(null)
+const form = reactive({
+  customName: '',
+  mediaTransport: '',
+  charset: '',
+  catalogInterval: 0,
+  subscribeInterval: 0,
+  catalogSubscribe: false,
+  alarmSubscribe: false,
+  positionSubscribe: false,
+  recordCenter: false,
+  password: ''
+})
 
 const serverSip = computed(() => auth.serverInfo?.sip || '—')
+
+const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
+})
 
 async function load() {
   loading.value = true
   try {
-    const params = { start: 0, limit: 500 }
+    const params = { start: offset.value, limit: pager.size }
     if (query.q) params.q = query.q
     if (query.online !== null && query.online !== undefined) params.online = query.online
     const data = await deviceApi.list(params)
-    devices.value = data?.deviceList || []
-    total.value = data?.deviceCount ?? devices.value.length
+    devices.value = (data?.deviceList || []).map((d) => ({
+      ...d,
+      // 记录上次已保存的值，用于判断是否真的改过
+      _savedName: d.customName || '',
+      // 是否处于「正在编辑」状态：仅此状态下的失焦才触发保存
+      _editing: false
+    }))
+    setTotal(data?.deviceCount ?? devices.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载设备失败')
   } finally {
     loading.value = false
   }
+}
+
+/** 条件变化后回到第一页再查，否则会停在越界页上看到空列表。 */
+function search() {
+  reset()
+  load()
 }
 
 async function collect(row) {
@@ -159,23 +253,85 @@ async function collect(row) {
   }
 }
 
-function openRename(row) {
-  renameTarget.value = row
-  renameValue.value = row.customName || row.name || ''
-  renameDialog.value = true
+/**
+ * 进入编辑态。
+ *
+ * <p><b>必须有这个状态</b>：{@code el-input} 的 blur 在「仅聚焦一下就离开」时
+ * 也会触发。若不区分是否真的编辑过，点一下单元格（或点行内其它按钮导致失焦）
+ * 就会把 customName 当成空值保存，把设备名清掉。
+ */
+function onNameFocus(row) {
+  row._editing = true
 }
 
-async function doRename() {
-  busy.value = 'rename'
+/**
+ * 行内保存名称。
+ *
+ * <p>两个守卫：未进入编辑态不保存；值未变化不保存 ——
+ * 否则表格里点一下别处就会打一次接口。
+ */
+async function saveName(row) {
+  if (!row._editing) {
+    return
+  }
+  row._editing = false
+  const next = (row.customName || '').trim()
+  if (next === (row._savedName || '')) {
+    return
+  }
+  namePending.add(row.id)
   try {
-    await deviceApi.setName({ serial: renameTarget.value.id, custom_name: renameValue.value })
+    await deviceApi.setName({ serial: row.id, custom_name: next })
+    row._savedName = next
+    row.customName = next
+    ElMessage.success('名称已保存')
+  } catch (e) {
+    // 回滚到上次成功的值，避免界面显示与后端不一致
+    row.customName = row._savedName || ''
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    namePending.delete(row.id)
+  }
+}
+
+function openEdit(row) {
+  editTarget.value = row
+  form.customName = row.customName || ''
+  form.mediaTransport = row.mediaTransport || ''
+  form.charset = row.charset || ''
+  form.catalogInterval = row.catalogInterval ?? 0
+  form.subscribeInterval = row.subscribeInterval ?? 0
+  form.catalogSubscribe = !!row.catalogSubscribe
+  form.alarmSubscribe = !!row.alarmSubscribe
+  form.positionSubscribe = !!row.positionSubscribe
+  form.recordCenter = !!row.recordCenter
+  form.password = ''
+  editDialog.value = true
+}
+
+async function doSave() {
+  if (!editTarget.value) return
+  saving.value = true
+  try {
+    const payload = { serial: editTarget.value.id, custom_name: form.customName }
+    // 后端对 null 是「不改」，传空串会真的清空，所以可选字段只在有值时下发
+    if (form.mediaTransport) payload.media_transport = form.mediaTransport
+    if (form.charset) payload.charset = form.charset
+    payload.catalog_interval = form.catalogInterval ?? 0
+    payload.subscribe_interval = form.subscribeInterval ?? 0
+    payload.catalog_subscribe = form.catalogSubscribe
+    payload.alarm_subscribe = form.alarmSubscribe
+    payload.position_subscribe = form.positionSubscribe
+    payload.record_center = form.recordCenter
+    if (form.password) payload.password = form.password
+    await deviceApi.setInfo(payload)
     ElMessage.success('已保存')
-    renameDialog.value = false
+    editDialog.value = false
     load()
   } catch (e) {
     ElMessage.error(e.message || '保存失败')
   } finally {
-    busy.value = ''
+    saving.value = false
   }
 }
 
@@ -202,5 +358,8 @@ onMounted(load)
 </script>
 
 <style scoped>
-/* .card-header / .search-form / .table-footer 与 .mb-3 由 styles/main.css 统一提供 */
+/* .card-header / .search-form / .empty-cell 由 styles/main.css 统一提供 */
+.edit-form :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
 </style>
