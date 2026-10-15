@@ -14,8 +14,7 @@
           <el-select v-model="proto" style="width: 168px" @change="onProtoChange">
             <el-option label="WebSocket-FLV" value="wsflv" />
             <el-option label="WebRTC（低延迟）" value="webrtc" />
-          </el-select>
-        </div>
+          </el-select>        </div>
 
         <div class="toolbar-right">
           <el-input v-model="filterText" placeholder="过滤通道" clearable style="width: 200px">
@@ -36,7 +35,11 @@
       <div class="grid-area" :class="'grid-' + gridSize">
         <div v-for="tile in visibleTiles" :key="tile.id" class="tile">
           <div class="video-box">
-            <video :ref="(el) => setVideoRef(tile.id, el)" autoplay playsinline muted controls />
+            <!--
+              jessibuca 会在容器内自建 canvas 渲染（支持 PCMA/PCMU 音频），
+              所以这里不是 <video> 而是普通容器 div。
+            -->
+            <div :ref="(el) => setContainerRef(tile.id, el)" class="video-container" />
             <div
               v-if="!tile.playing"
               class="tile-overlay"
@@ -128,9 +131,13 @@
       v-model="ptzDrawer"
       :title="'云台控制 · ' + (ptzTile?.channelName || ptzTile?.code || '')"
       size="380px"
+      :destroy-on-close="false"
+      append-to-body
+      :lock-scroll="false"
     >
       <PtzPanel
         v-if="ptzTile"
+        :key="ptzTile.id"
         :serial="ptzTile.serial"
         :code="ptzTile.code"
         :disabled="!ptzTile.playing"
@@ -157,11 +164,11 @@ const mediaHttpPort = ref(null)
  * 每格的播放器实例。
  *
  * 用普通对象（非 reactive）：reactive 会自动解包嵌套 ref，
- * 导致 `api.videoEl` 拿到的是 DOM 元素而非 ref，无法再赋值绑定。
+ * 导致取 DOM 元素时拿到的是解包后的值而非 ref，无法再赋值绑定。
  */
 const players = {}
-/** 每格的视频元素引用（DOM 引用，无需响应式）。 */
-const videoRefs = {}
+/** 每格的容器 DOM 引用（jessibuca 在容器内自建 canvas）。 */
+const containerRefs = {}
 /** 播放器状态监听停止句柄。 */
 const stoppers = {}
 
@@ -199,15 +206,17 @@ const channelOptions = computed(() =>
   }))
 )
 
-function setVideoRef(id, el) {
-  if (el) videoRefs[id] = el
+function setContainerRef(id, el) {
+  if (el) containerRefs[id] = el
 }
 
 /** 获取（或创建）某格的播放器，并绑定当前 DOM 元素与状态监听。 */
 function playerOf(tile) {
   if (!players[tile.id]) {
-    const api = useVideoPlayer()
-    players[tile.id] = { api, tile }
+    // jessibuca 渲染到容器 div 内，传入容器 ref 供播放器创建 canvas
+    const containerRef = ref(containerRefs[tile.id])
+    const api = useVideoPlayer(containerRef)
+    players[tile.id] = { api, tile, containerRef }
     // 播放器状态同步到格子（替代轮询）
     stoppers[tile.id] = watch(
       [api.state, api.playing],
@@ -218,7 +227,8 @@ function playerOf(tile) {
       { immediate: true }
     )
   }
-  players[tile.id].api.videoEl.value = videoRefs[tile.id]
+  // 格子可能被重建（如切换分屏数），同步最新 DOM
+  players[tile.id].containerRef.value = containerRefs[tile.id]
   return players[tile.id].api
 }
 
@@ -441,11 +451,22 @@ onUnmounted(() => {
   aspect-ratio: 16 / 9;
 }
 
-.tile video {
+/*
+ * jessibuca 容器：播放器会在内部创建 canvas（软解渲染）或 video（WebRTC 通路）。
+ *
+ * ⚠️ 不要在这里对 canvas / video 施加 width/height —— jessibuca 内部按容器尺寸
+ * 计算缩放并设置 canvas 的 inline style（含 transform: scale），若被外部样式覆盖
+ * 会导致双重缩放，画面缩成小块并偏移到容器外（表现为「跑在左上角」）。
+ * 播放器自身的 DOM 全部隔离在 .jessibuca-host 内，样式由它自己管理。
+ */
+.tile .video-container {
+  position: absolute;
+  inset: 0;
+}
+
+.tile .video-container :deep(.jessibuca-host) {
   width: 100%;
   height: 100%;
-  display: block;
-  object-fit: contain;
 }
 
 .tile-overlay {
