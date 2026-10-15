@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS sa_token_store (
 CREATE INDEX IF NOT EXISTS idx_sa_token_store_expire ON sa_token_store (expire_at);
 
 -- -------------------- gb_operation_log --------------------
--- 操作日志（管理接口调用记录）：记录调用方式/资源路径/远端地址/结果/用时，
+-- 操作日志（管理接口调用记录）：记录调用方式/资源路径/远端地址/结果/用时/操作人，
 -- 由 OperationLogInterceptor 写入，定期清理（默认保留 7 天）。
 CREATE TABLE IF NOT EXISTS gb_operation_log (
     id          BIGSERIAL PRIMARY KEY,
@@ -391,8 +391,12 @@ CREATE TABLE IF NOT EXISTS gb_operation_log (
     remote_addr VARCHAR(64),
     result      VARCHAR(128),
     duration_ms INTEGER,
+    operator    VARCHAR(64),
     create_time TIMESTAMP DEFAULT now()
 );
+
+-- 老库升级：补充「操作人」列（CREATE TABLE IF NOT EXISTS 不会修改已存在的表）
+ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS operator VARCHAR(64);
 
 CREATE INDEX IF NOT EXISTS idx_gb_operation_log_time ON gb_operation_log (create_time DESC);
 

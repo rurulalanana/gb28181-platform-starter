@@ -160,11 +160,11 @@
       <!-- 通道列表 -->
       <aside class="channel-panel">
         <div class="panel-head">
-          <span class="panel-title">通道列表</span>
+          <span class="panel-title">{{ panelTab === 'ptz' ? '云台控制' : '通道列表' }}</span>
           <span class="count-pill">{{ filteredChannels.length }}</span>
         </div>
 
-        <!-- 视图切换：平铺列表 / 按设备分组 -->
+        <!-- 视图切换：平铺列表 / 按设备分组 / 云台 -->
         <div class="panel-tabs">
           <button class="ptab" :class="{ 'is-on': panelTab === 'list' }" @click="panelTab = 'list'">
             通道列表
@@ -172,15 +172,38 @@
           <button class="ptab" :class="{ 'is-on': panelTab === 'group' }" @click="panelTab = 'group'">
             按设备分组
           </button>
+          <button class="ptab" :class="{ 'is-on': panelTab === 'ptz' }" @click="panelTab = 'ptz'">
+            云台
+          </button>
         </div>
 
-        <div class="panel-search">
+        <div v-if="panelTab !== 'ptz'" class="panel-search">
           <el-input v-model="filterText" placeholder="搜索名称或编码" clearable size="small">
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
         </div>
 
-        <div v-if="!filteredChannels.length" class="panel-empty">
+        <!-- 云台面板（常驻，对齐 LiveGBS：绑定当前选中画面格）） -->
+        <div v-if="panelTab === 'ptz'" class="ptz-tab dark-scroll">
+          <template v-if="activeTile && activeTile.channelKey">
+            <div class="ptz-target">
+              <span class="ch-dot" :class="activeTile.playing ? 'is-online' : 'is-offline'" />
+              <span class="ellipsis">{{ activeTile.channelName || activeTile.code }}</span>
+              <span class="ptz-target-cell">画面 {{ activeTile.id }}</span>
+            </div>
+            <PtzPanel
+              :key="activeTile.id"
+              :serial="activeTile.serial"
+              :code="activeTile.code"
+              :disabled="!activeTile.playing"
+            />
+          </template>
+          <div v-else class="panel-empty">
+            <el-empty description="先上屏一个通道，再使用云台控制" :image-size="64" />
+          </div>
+        </div>
+
+        <div v-else-if="!filteredChannels.length" class="panel-empty">
           <el-empty :description="channels.length ? '无匹配通道' : '暂无通道'" :image-size="64" />
         </div>
 
@@ -277,24 +300,6 @@
         </el-button>
       </template>
     </el-dialog>
-
-    <!-- 云台控制抽屉 -->
-    <el-drawer
-      v-model="ptzDrawer"
-      :title="'云台控制 · ' + (ptzTile?.channelName || ptzTile?.code || '')"
-      size="380px"
-      :destroy-on-close="false"
-      append-to-body
-      :lock-scroll="false"
-    >
-      <PtzPanel
-        v-if="ptzTile"
-        :key="ptzTile.id"
-        :serial="ptzTile.serial"
-        :code="ptzTile.code"
-        :disabled="!ptzTile.playing"
-      />
-    </el-drawer>
   </div>
 </template>
 
@@ -328,6 +333,14 @@ const stoppers = {}
 
 /** 当前选中的画面格（加 2px 强调描边，方便看清操作的是哪一格）。 */
 const activeTileId = ref(1)
+
+/** 当前选中的画面格（云台面板绑定它的通道）。 */
+const activeTile = computed(
+  () =>
+    visibleTiles.value.find((t) => t.id === activeTileId.value) ||
+    visibleTiles.value[0] ||
+    null
+)
 /** 视频墙容器（整体全屏用）。 */
 const wallRef = ref(null)
 /** 是否在画面上显示通道名（工具栏可关）。 */
@@ -356,10 +369,6 @@ const rotatePicked = ref([])
 /** 已确认的轮巡集合（空 = 全部在线通道）。 */
 const rotateKeys = ref([])
 const rotateSeconds = ref(15)
-
-const ptzDrawer = ref(false)
-const ptzTile = ref(null)
-
 /** 画面格子（最多 16 格，对应 16 分屏）。 */
 const tiles = ref(
   Array.from({ length: 16 }, (_, i) => ({
@@ -744,8 +753,9 @@ async function onProtoChange() {
 }
 
 function openPtz(tile) {
-  ptzTile.value = tile
-  ptzDrawer.value = true
+  /* 不再弹抽屉：切到右侧「云台」常驻面板并选中该格（对齐 LiveGBS 布局）。 */
+  activeTileId.value = tile.id
+  panelTab.value = 'ptz'
 }
 
 const route = useRoute()
@@ -1017,6 +1027,34 @@ onUnmounted(() => {
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   overflow: hidden;
+}
+
+/* 云台常驻面板：目标通道条 + PtzPanel */
+.ptz-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 2px 8px;
+}
+.ptz-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line-soft, #ebeef5);
+  border-radius: 8px;
+  font-size: 12.5px;
+  background: var(--bg-sunken, #f8fafc);
+}
+.ptz-target .ellipsis {
+  flex: 1;
+  min-width: 0;
+}
+.ptz-target-cell {
+  flex-shrink: 0;
+  color: var(--ink-400, #909399);
+  font-size: 11.5px;
 }
 
 .panel-head {

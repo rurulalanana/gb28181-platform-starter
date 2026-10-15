@@ -19,16 +19,26 @@
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
-      <el-select v-model="query.method" placeholder="全部方式" style="width: 150px" @change="search">
+      <el-select v-model="query.method" placeholder="全部方式" style="width: 140px" @change="search">
         <el-option label="全部方式" value="" />
         <el-option label="HTTP GET" value="HTTP_GET" />
         <el-option label="HTTP POST" value="HTTP_POST" />
       </el-select>
+      <el-date-picker
+        v-model="query.dateRange"
+        type="daterange"
+        range-separator="-"
+        start-placeholder="开始日期"
+        end-placeholder="结束日期"
+        value-format="YYYY-MM-DD"
+        style="width: 260px"
+        @change="search"
+      />
       <el-input
         v-model="query.keyword"
-        placeholder="路径 / 远端地址"
+        placeholder="路径 / 远端 / 操作人"
         clearable
-        style="width: 260px"
+        style="width: 240px"
         @keyup.enter="search"
       >
         <template #prefix><el-icon><Search /></el-icon></template>
@@ -40,36 +50,51 @@
 
     <el-card shadow="never">
       <el-table v-loading="loading" :data="rows" stripe>
-        <el-table-column label="调用方式" width="130">
+        <el-table-column label="操作名称" width="110" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.operationName" class="op-name">{{ row.operationName }}</span>
+            <span v-else class="text-dim">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="调用方式" width="120">
           <template #default="{ row }">
             <span class="badge" :class="row.method === 'HTTP_POST' ? 'is-brand' : ''">
               {{ methodLabel(row.method) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="资源路径" min-width="280">
+        <el-table-column label="资源路径" min-width="230" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono">{{ row.resource }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="远端地址" min-width="140">
+        <el-table-column label="远端地址" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono">{{ row.remoteAddr || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="结果" width="110" align="center">
+        <el-table-column label="结果" width="100" align="center">
           <template #default="{ row }">
             <span class="badge" :class="isOk(row.result) ? 'is-online' : 'is-offline'">
               {{ resultLabel(row.result) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="用时" width="100" align="right" sortable :sort-by="(r) => r.durationMs">
+        <el-table-column label="操作人" width="100" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span>{{ row.operator || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="用时" width="90" align="right" sortable :sort-by="(r) => r.durationMs">
           <template #default="{ row }">
             <span class="mono">{{ formatDuration(row.durationMs) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="createTime" label="时间" min-width="170" sortable />
+        <el-table-column prop="createTime" label="操作时间" width="170" sortable>
+          <template #default="{ row }">
+            <span class="mono time-cell">{{ formatTime(row.createTime) }}</span>
+          </template>
+        </el-table-column>
         <template #empty>
           <el-empty image-size="76" description="暂无操作日志" />
         </template>
@@ -94,7 +119,7 @@ import { usePagination } from '@/composables/usePagination'
 
 const rows = ref([])
 const loading = ref(false)
-const query = reactive({ method: '', keyword: '' })
+const query = reactive({ method: '', keyword: '', dateRange: null })
 /** 保留天数（与后端 gb28181.starter.oplog-retain-days 对应，仅用于页面提示）。 */
 const retainDays = 7
 
@@ -103,6 +128,18 @@ const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagina
   load: () => load()
 })
 
+/** 日期范围 → 后端 begin/end（含首尾整天）。 */
+function timeRangeParams() {
+  const r = query.dateRange
+  if (!r || !r.length) return {}
+  return { begin: `${r[0]} 00:00:00`, end: `${r[1]} 23:59:59` }
+}
+
+/** 时间串截到秒（后端带微秒，表格里只展示到秒更清爽）。 */
+function formatTime(v) {
+  return v ? String(v).slice(0, 19) : '—'
+}
+
 async function load() {
   loading.value = true
   try {
@@ -110,7 +147,8 @@ async function load() {
       start: offset.value,
       limit: pager.size,
       method: query.method || undefined,
-      keyword: query.keyword || undefined
+      keyword: query.keyword || undefined,
+      ...timeRangeParams()
     })
     rows.value = data?.opLogList || []
     setTotal(data?.opLogCount ?? 0)
@@ -171,3 +209,16 @@ function formatDuration(ms) {
 
 onMounted(load)
 </script>
+
+<style scoped>
+/* 操作名称：加粗引导阅读（对齐 LiveGBS 的「操作名称」列） */
+.op-name {
+  font-weight: 600;
+  color: var(--ink-800, #303133);
+}
+
+/* 时间列：整行显示，避免换行撑高 */
+.time-cell {
+  white-space: nowrap;
+}
+</style>
