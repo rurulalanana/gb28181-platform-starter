@@ -63,28 +63,26 @@
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="云端录像" width="100" align="center">
+        <el-table-column label="云端录像" width="110" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.cloudRecord ? 'success' : 'info'" size="small" effect="plain">
-              {{ row.cloudRecord ? '已开启' : '未开启' }}
-            </el-tag>
+            <el-switch
+              v-model="row.cloudRecord"
+              :loading="recordPending.has(row.id)"
+              :disabled="recordPending.has(row.id)"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
+              @change="(val) => toggleCloudRecord(row, val)"
+            />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250" fixed="right" align="center">
+        <el-table-column label="操作" width="200" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="preview(row)">
               <el-icon><VideoPlay /></el-icon> 预览
             </el-button>
             <el-button link type="primary" :disabled="!row.ptzType" @click="openPtz(row)">
               <el-icon><Aim /></el-icon> 云台
-            </el-button>
-            <el-button
-              link
-              :type="row.cloudRecord ? 'danger' : 'primary'"
-              @click="toggleCloudRecord(row)"
-            >
-              <el-icon><VideoCamera /></el-icon>
-              {{ row.cloudRecord ? '关录像' : '开录像' }}
             </el-button>
             <el-button link type="primary" @click="openRename(row)">
               <el-icon><Edit /></el-icon>
@@ -166,6 +164,9 @@ const channels = ref([])
 const total = ref(0)
 const loading = ref(false)
 const query = reactive({ q: '', online: null })
+
+/** 正在切换云端录像开关的通道编码集合（用于开关 loading / 防重复点击）。 */
+const recordPending = reactive(new Set())
 
 const previewDialog = ref(false)
 const previewTarget = ref(null)
@@ -275,14 +276,19 @@ function openPtz(row) {
   ptzDrawer.value = true
 }
 
-async function toggleCloudRecord(row) {
-  const enable = !row.cloudRecord
+async function toggleCloudRecord(row, enable) {
+  // v-model 已先行改值：失败时必须回滚，否则开关状态与后端不一致
+  recordPending.add(row.id)
   try {
-    await deviceApi.setChannelCloudRecord({ serial: row.deviceId, code: row.id, enable })
-    row.cloudRecord = enable
+    // 参数名必须是 cloudrecord（后端 @RequestParam Boolean cloudrecord），
+    // 传 enable 会被忽略并落到默认值 false，开关看似生效实则永远关着
+    await deviceApi.setChannelCloudRecord({ serial: row.deviceId, code: row.id, cloudrecord: enable })
     ElMessage.success(enable ? '已开启云端录像' : '已关闭云端录像')
   } catch (e) {
+    row.cloudRecord = !enable
     ElMessage.error(e.message || '操作失败')
+  } finally {
+    recordPending.delete(row.id)
   }
 }
 
