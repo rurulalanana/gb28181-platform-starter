@@ -1,4 +1,4 @@
-import { get, post } from './http'
+import http, { get, post } from './http'
 
 /**
  * 系统与用户接口（`/api/v1/*`）。
@@ -140,7 +140,19 @@ export const userApi = {
 
 /** WebRTC 接口（`/api/v1/webrtc/*`，免登录）。 */
 export const webrtcApi = {
+  /**
+   * 交换 SDP。
+   *
+   * 后端是 `@RequestBody String offerSdp`，期望 body 就是**纯文本 SDP**。
+   * axios 对字符串 body 默认发 `application/x-www-form-urlencoded`，
+   * 且会做表单转义（SDP 里的 `=`、`\r\n` 会被破坏），因此必须显式指定
+   * `Content-Type: application/sdp` 并禁止 axios 做任何变换。
+   */
   play: (stream, peerId, offerSdp) =>
-    post('/webrtc/play', { stream, peerId }, offerSdp),
+    http.post('/webrtc/play', offerSdp, {
+      params: { stream, peerId },
+      headers: { 'Content-Type': 'application/sdp' },
+      transformRequest: [(data) => data]
+    }),
   config: () => get('/webrtc/config')
 }
