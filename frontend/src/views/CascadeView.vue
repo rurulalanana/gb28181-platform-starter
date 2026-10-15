@@ -45,9 +45,9 @@
         </el-table-column>
         <el-table-column label="在线" width="80" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.online ? 'success' : 'info'" size="small" effect="light">
+            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
               {{ row.online ? '在线' : '离线' }}
-            </el-tag>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="共享全部通道" width="120" align="center">

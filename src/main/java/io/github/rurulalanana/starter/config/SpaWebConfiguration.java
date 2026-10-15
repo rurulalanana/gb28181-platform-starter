@@ -30,7 +30,7 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         // 一级路由（前端菜单路径）
         String[] routes = {
                 "dashboard", "live", "control", "devices", "channels", "playback",
-                "cloud", "alarms", "cascade", "users", "settings"
+                "cloud", "alarms", "cascade", "users", "oplogs", "settings"
         };
         for (String route : routes) {
             registry.addViewController("/" + route).setViewName("forward:/index.html");

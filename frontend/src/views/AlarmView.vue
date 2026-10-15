@@ -34,10 +34,10 @@
       </el-form>
 
       <el-table v-loading="loading" :data="alarms" stripe>
-        <el-table-column label="时间" min-width="170">
+        <el-table-column prop="alarmTime" label="时间" min-width="170" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="级别" width="100" align="center">
+        <el-table-column prop="alarmPriority" label="级别" width="100" align="center" sortable>
           <template #default="{ row }">
             <el-tag :type="priorityColor(row.alarmPriority)" size="small" effect="light">
               {{ row.alarmPriorityName || priorityText(row.alarmPriority) }}

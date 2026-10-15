@@ -5,6 +5,12 @@
         <h2 class="page-title">云端录像</h2>
         <p class="page-subtitle">平台侧录制归档与时间轴检索</p>
       </div>
+      <div class="page-actions">
+        <el-radio-group v-model="viewMode" size="small">
+          <el-radio-button value="list">列表视图</el-radio-button>
+          <el-radio-button value="timeline">时间轴视图</el-radio-button>
+        </el-radio-group>
+      </div>
     </header>
 
     <el-card shadow="never">
@@ -68,16 +74,16 @@
         </el-button>
       </div>
 
-      <el-table v-loading="loadingDaily" :data="records" stripe>
-        <el-table-column label="开始时间" min-width="160">
-          <template #default="{ row }"><span class="mono">{{ row.startAt || '—' }}</span></template>
+      <el-table v-if="viewMode === 'list'" v-loading="loadingDaily" :data="records" stripe>
+        <el-table-column prop="startAt" label="开始时间" min-width="160" sortable>
+          <template #default="{ row }"><span class="mono">{{ fmtTs(row.startAt) }}</span></template>
         </el-table-column>
-        <el-table-column label="时长" width="100" align="center">
+        <el-table-column prop="duration" label="时长" width="100" align="center" sortable>
           <template #default="{ row }">
             {{ row.duration != null ? row.duration + ' 秒' : '—' }}
           </template>
         </el-table-column>
-        <el-table-column label="大小" width="110" align="center">
+        <el-table-column prop="fileSize" label="大小" width="110" align="center" sortable>
           <template #default="{ row }">{{ formatSize(row.fileSize) }}</template>
         </el-table-column>
         <el-table-column label="存储" width="110" align="center">
@@ -134,6 +140,67 @@
           <el-empty :image-size="76" description="当日无云端录像。可在「通道管理」开启云端录像开关，或设备推流时手动开始录像" />
         </template>
       </el-table>
+
+      <!-- 时间轴视图：24 小时轨道 + 录像段色条（点击即点播），交互对齐 LiveGBS -->
+      <div v-else v-loading="loadingDaily" class="timeline-wrap">
+        <div class="timeline-head">
+          <span class="text-muted">当日录像分布（点击色条点播）</span>
+          <span class="timeline-legend">
+            <i class="lg-dot is-rec" /> 录像段
+            <i class="lg-dot is-important" /> 重要
+            <i class="lg-dot is-playing" /> 播放中
+          </span>
+        </div>
+
+        <div class="timeline">
+          <!-- 小时刻度 -->
+          <div class="tl-scale">
+            <span
+              v-for="h in 24"
+              :key="h"
+              class="tl-hour"
+              :style="{ left: ((h - 1) / 24 * 100) + '%' }"
+            >
+              {{ String(h - 1).padStart(2, '0') }}
+            </span>
+          </div>
+
+          <!-- 轨道 -->
+          <div class="tl-track">
+            <el-tooltip
+              v-for="seg in timelineSegments"
+              :key="seg.record.recordId"
+              :content="segTitle(seg)"
+              placement="top"
+              :show-after="120"
+            >
+              <div
+                class="tl-seg"
+                :class="{
+                  'is-playing': playingRecord?.recordId === seg.record.recordId,
+                  'is-important': seg.record.important
+                }"
+                :style="{ left: seg.left + '%', width: seg.width + '%' }"
+                @click="play(seg.record)"
+              />
+            </el-tooltip>
+
+            <!-- 当前时间游标（仅当查询当天时显示） -->
+            <div v-if="nowPercent != null" class="tl-now" :style="{ left: nowPercent + '%' }">
+              <span class="tl-now-label">{{ nowText }}</span>
+            </div>
+
+            <!-- 无录像时轨道内提示 -->
+            <span v-if="!records.length" class="tl-track-empty">当日无云端录像</span>
+          </div>
+
+          <div class="timeline-foot">
+            <span v-if="records.length">共 <b>{{ records.length }}</b> 段录像</span>
+            <span v-else class="text-muted">当日无云端录像</span>
+            <span class="text-muted">{{ timelineSummary }}</span>
+          </div>
+        </div>
+      </div>
     </el-card>
 
     <!-- 点播播放器 -->
@@ -142,7 +209,7 @@
         <div class="card-header">
           <span>
             <el-icon><VideoPlay /></el-icon>
-            录像点播 · <span class="mono">{{ playingRecord.startAt }}</span>
+            录像点播 · <span class="mono">{{ fmtTs(playingRecord.startAt) }}</span>
           </span>
           <div class="header-actions">
             <el-select v-model="proto" size="small" style="width: 168px" @change="switchProto">
@@ -211,6 +278,99 @@ function todayString() {
   const d = new Date()
   const pad = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/* ==================== 视图切换与时间轴（对齐 LiveGBS） ==================== */
+
+/** 视图模式：list=列表视图，timeline=时间轴视图。 */
+const viewMode = ref('list')
+
+/** 当前时间在一天中的百分比（仅查询当天时显示游标）。 */
+const nowPercent = ref(null)
+const nowText = ref('')
+let nowTimer = null
+
+/** 刷新当前时间游标。 */
+function updateNow() {
+  if (period.value === todayString()) {
+    const d = new Date()
+    const secs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()
+    nowPercent.value = (secs / 86400) * 100
+    nowText.value = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  } else {
+    nowPercent.value = null
+    nowText.value = ''
+  }
+}
+
+/** 解析 14 位紧凑时间（YYYYMMDDHHmmss）为本地 Date。 */
+function parseCompactTs(v) {
+  const t = String(v || '').trim()
+  if (!/^\d{14}$/.test(t)) return null
+  return new Date(
+    +t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8),
+    +t.slice(8, 10), +t.slice(10, 12), +t.slice(12, 14)
+  )
+}
+
+/** 时间轴上的录像段（left / width 均为相对 24h 的百分比）。 */
+const timelineSegments = computed(() => {
+  const out = []
+  for (const r of records.value) {
+    const start = parseCompactTs(r.startAt)
+    if (!start) continue
+    const secs = start.getHours() * 3600 + start.getMinutes() * 60 + start.getSeconds()
+    let duration = r.duration
+    if (!duration && r.endTime) {
+      const end = parseCompactTs(r.endTime)
+      if (end && end > start) duration = Math.round((end - start) / 1000)
+    }
+    if (!duration || duration <= 0) duration = 30
+    out.push({
+      record: r,
+      left: (secs / 86400) * 100,
+      // 最小宽度 0.22%（约 3 分钟），保证极短的录像段也能点到
+      width: Math.max((duration / 86400) * 100, 0.22)
+    })
+  }
+  return out
+})
+
+/** 单个录像段的悬停提示。 */
+function segTitle(seg) {
+  const r = seg.record
+  const bits = [fmtTs(r.startAt)]
+  if (r.endTime) bits.push('至 ' + fmtTs(r.endTime))
+  if (r.duration != null) bits.push(r.duration + ' 秒')
+  if (r.fileSize) bits.push(formatSize(r.fileSize))
+  bits.push('点击点播')
+  return bits.join(' · ')
+}
+
+/** 底部汇总：当日录像总时长。 */
+const timelineSummary = computed(() => {
+  let secs = 0
+  for (const r of records.value) {
+    if (r.duration) {
+      secs += r.duration
+      continue
+    }
+    const s = parseCompactTs(r.startAt)
+    const e = parseCompactTs(r.endTime)
+    if (s && e && e > s) secs += Math.round((e - s) / 1000)
+  }
+  if (!secs) return ''
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  return `合计约 ${h ? h + ' 小时 ' : ''}${m} 分钟`
+})
+
+/** 紧凑时间（YYYYMMDDHHmmss，GBS 云端录像接口格式）→ 展示用 YYYY-MM-DD HH:mm:ss */
+function fmtTs(v) {
+  if (!v) return '—'
+  const t = String(v).trim()
+  if (t.length !== 14 || !/^\d{14}$/.test(t)) return t
+  return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)} ${t.slice(8, 10)}:${t.slice(10, 12)}:${t.slice(12, 14)}`
 }
 
 function formatSize(size) {
@@ -290,6 +450,7 @@ async function loadDaily() {
     ElMessage.error(e.message || '查询失败')
   } finally {
     loadingDaily.value = false
+    updateNow()
   }
 }
 
@@ -394,7 +555,7 @@ async function toggleImportant(record) {
 async function removeOne(record) {
   try {
     await ElMessageBox.confirm(
-      `确定删除该录像（${record.startAt}）？文件将同时删除。`,
+      `确定删除该录像（${fmtTs(record.startAt)}）？文件将同时删除。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
@@ -459,10 +620,14 @@ onMounted(async () => {
     await loadDaily()
     await loadMonthFlags()
   }
+  updateNow()
+  // 时间轴游标每 30 秒刷新一次
+  nowTimer = setInterval(updateNow, 30000)
 })
 
 onUnmounted(() => {
   player.stop()
+  if (nowTimer) clearInterval(nowTimer)
 })
 </script>
 
@@ -491,6 +656,157 @@ onUnmounted(() => {
   margin-top: 12px;
   display: flex;
   gap: 8px;
+}
+
+/* ==================== 时间轴视图 ==================== */
+
+.timeline-wrap {
+  margin-top: 4px;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.timeline-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.lg-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+.lg-dot.is-rec {
+  background: var(--brand-400);
+}
+
+.lg-dot.is-important {
+  background: var(--warning-500);
+}
+
+.lg-dot.is-playing {
+  background: var(--online-500);
+}
+
+.timeline {
+  padding: 4px 2px 0;
+  user-select: none;
+}
+
+/* 小时刻度：00 ~ 23 的标签（每小时起点） */
+.tl-scale {
+  position: relative;
+  height: 20px;
+  margin: 0 8px;
+}
+
+.tl-hour {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+}
+
+/* 轨道：默认浅底 + 每小时分隔线 */
+.tl-track {
+  position: relative;
+  height: 52px;
+  margin: 0 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--line-soft) 0 1px,
+    transparent 1px calc(100% / 24)
+  );
+  overflow: visible;
+}
+
+/* 录像段：绝对定位色条，点击点播 */
+.tl-seg {
+  position: absolute;
+  top: 9px;
+  height: 32px;
+  background: var(--brand-400);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+
+.tl-seg:hover {
+  filter: brightness(1.12);
+  box-shadow: 0 2px 8px rgba(31, 76, 176, 0.35);
+}
+
+.tl-seg.is-important {
+  background: var(--warning-500);
+}
+
+.tl-seg.is-playing {
+  background: var(--online-500);
+  box-shadow: 0 0 0 2px rgba(23, 145, 79, 0.28);
+}
+
+/* 无录像时轨道内的居中提示 */
+.tl-track-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+/* 当前时间游标（仅查询当天时出现） */
+.tl-now {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  background: var(--danger-500);
+  pointer-events: none;
+}
+
+.tl-now-label {
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--danger-500);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.timeline-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 8px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .star {

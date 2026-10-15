@@ -31,29 +31,36 @@
             <el-option label="离线" :value="false" />
           </el-select>
         </el-form-item>
+        <el-form-item v-if="query.serial" label="设备">
+          <el-tag closable type="info" @close="clearSerialFilter">
+            <span class="mono">{{ query.serial }}</span>
+          </el-tag>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="search">查询</el-button>
         </el-form-item>
       </el-form>
 
       <el-table v-loading="loading" :data="channels" stripe>
-        <el-table-column prop="id" label="通道编码" min-width="190">
+        <el-table-column prop="id" label="通道编码" min-width="190" sortable>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="140">
+        <el-table-column label="名称" min-width="140" :sort-by="(r) => r.customName || r.name || ''" sortable>
           <template #default="{ row }">{{ row.customName || row.name || '—' }}</template>
         </el-table-column>
-        <el-table-column label="所属设备" min-width="200">
+        <el-table-column label="所属设备" min-width="230">
           <template #default="{ row }">
-            <div class="mono">{{ row.deviceId }}</div>
-            <div class="text-muted">{{ row.deviceCustomName || row.deviceName || '—' }}</div>
+            <span class="device-ref">
+              <span class="mono">{{ row.deviceId }}</span>
+              <span class="text-dim">{{ row.deviceCustomName || row.deviceName || '—' }}</span>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'ON' ? 'success' : 'info'" size="small" effect="light">
+            <span class="badge" :class="row.status === 'ON' ? 'is-online' : 'is-offline'">
               {{ row.status === 'ON' ? '在线' : '离线' }}
-            </el-tag>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="云台" width="120" align="center">
@@ -93,10 +100,18 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right" align="center">
+        <el-table-column label="操作" width="200" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="preview(row)">
               <el-icon><VideoPlay /></el-icon> 预览
+            </el-button>
+            <el-button
+              link
+              type="primary"
+              title="上屏到实时预览（自动播放）"
+              @click="playOnWall(row)"
+            >
+              <el-icon><VideoCamera /></el-icon> 上屏
             </el-button>
             <el-button link type="primary" @click="openRename(row)">
               <el-icon><Edit /></el-icon>
@@ -182,6 +197,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
@@ -189,9 +205,14 @@ import { usePagination } from '@/composables/usePagination'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TablePager from '@/components/TablePager.vue'
 
+
+/** 上屏预览需要跳转路由。 */
+const router = useRouter()
+const route = useRoute()
+
 const channels = ref([])
 const loading = ref(false)
-const query = reactive({ q: '', online: null })
+const query = reactive({ q: '', online: null, serial: '' })
 
 /** 正在切换云端录像开关的通道编码集合（用于开关 loading / 防重复点击）。 */
 const recordPending = reactive(new Set())
@@ -242,6 +263,8 @@ async function load() {
     const params = { start: offset.value, limit: pager.size }
     if (query.q) params.q = query.q
     if (query.online !== null && query.online !== undefined) params.online = query.online
+    // 设备筛选（从设备列表「查看通道」跳转而来，或由页面筛选保持）
+    if (query.serial) params.serial = query.serial
     const data = await deviceApi.channelList(params)
     channels.value = data?.channelList || []
     setTotal(data?.channelCount ?? channels.value.length)
@@ -250,6 +273,12 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+/** 清除设备筛选（回到全部通道）。 */
+function clearSerialFilter() {
+  query.serial = ''
+  search()
 }
 
 /** 条件变化后回到第一页再查，否则会停在越界页上看到空列表。 */
@@ -266,6 +295,14 @@ async function ensureMediaPort() {
   } catch (e) {
     // 忽略
   }
+}
+
+/**
+ * 上屏到实时预览：跳转过去并带上 ?play=<设备编码>/<通道编码>，
+ * 预览页挂载后会自动把这个通道铺到第一个空闲画面格。
+ */
+function playOnWall(row) {
+  router.push({ path: '/live', query: { play: `${row.deviceId}/${row.id}` } })
 }
 
 /** 打开预览并自动播放。 */
@@ -384,11 +421,27 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-onMounted(load)
+onMounted(() => {
+  // 支持 /channels?serial=<设备编码> 直接带筛选进入（设备列表「查看通道」入口）
+  const serial = String(route.query.serial || '').trim()
+  if (serial) query.serial = serial
+  load()
+})
 onUnmounted(() => player.stop())
 </script>
 
 <style scoped>
+/* 所属设备：编码（等宽）+ 名称（灰），压成一行避免行高翻倍 */
+.device-ref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.device-ref .text-dim {
+  font-size: 12px;
+}
+
 .preview-wrap {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;

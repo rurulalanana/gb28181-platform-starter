@@ -51,24 +51,23 @@
       <header class="topbar">
         <div class="topbar-left">
           <button class="icon-btn" :title="collapsed ? '展开侧栏' : '收起侧栏'" @click="collapsed = !collapsed">
-            <el-icon :size="17"><Fold v-if="!collapsed" /><Expand v-else /></el-icon>
+            <el-icon :size="18"><Fold v-if="!collapsed" /><Expand v-else /></el-icon>
           </button>
-          <div class="crumbs">
-            <h1 class="crumb-title">{{ route.meta.title || '总览' }}</h1>
-          </div>
         </div>
 
         <div class="topbar-right">
-          <!-- 在线设备概览 -->
-          <div class="pill" :title="`在线设备 ${online}/${total}`">
-            <span class="pill-dot" :class="online > 0 ? 'is-live' : ''" />
-            <span class="pill-text">设备</span>
-            <b class="pill-value">{{ online }}<i>/{{ total }}</i></b>
+          <!-- 状态读数：形如参考站的「接收 8.7 Mbps」，这里放设备/通道/推流 -->
+          <div class="top-readout" :title="`在线设备 ${online} / 设备总数 ${total}`">
+            <span>设备</span>
+            <span class="val">{{ online }}<i>/{{ total }}</i></span>
           </div>
-
-          <!-- 当前平台编码 -->
-          <div class="pill pill-quiet mono" :title="`平台编码 ${auth.serverInfo?.platformId ?? '-'}`">
-            {{ auth.serverInfo?.platformId ?? '—' }}
+          <div class="top-readout" :title="`在线通道 ${channelOnline} / 通道总数 ${channelTotal}`">
+            <span>通道</span>
+            <span class="val">{{ channelOnline }}<i>/{{ channelTotal }}</i></span>
+          </div>
+          <div class="top-readout" :title="`当前推流 ${streamCount} 路`">
+            <span>推流</span>
+            <span class="val">{{ streamCount }}</span>
           </div>
 
           <el-tooltip content="刷新服务器信息" placement="bottom">
@@ -81,11 +80,8 @@
 
           <el-dropdown trigger="click" @command="onCommand">
             <div class="user">
-              <div class="user-avatar">{{ initial }}</div>
-              <div class="user-meta">
-                <span class="user-name">{{ displayName }}</span>
-                <span class="user-role">{{ isAdmin ? '管理员' : '普通用户' }}</span>
-              </div>
+              <span class="user-welcome">欢迎,</span>
+              <span class="user-name">{{ displayName }}</span>
               <el-icon class="user-caret" :size="12"><ArrowDown /></el-icon>
             </div>
             <template #dropdown>
@@ -102,6 +98,16 @@
         </div>
       </header>
 
+      <!-- 内容页签条：参考站是「页签 + 关闭」，这里页签跟随当前路由 -->
+      <div class="content-tabs">
+        <div class="ctab">
+          <span>{{ route.meta.title || '总览' }}</span>
+          <button class="ctab-close" title="关闭并返回总览" @click="router.push('/dashboard')">
+            <el-icon :size="11"><Close /></el-icon>
+          </button>
+        </div>
+      </div>
+
       <!-- 内容区 -->
       <main class="content">
         <router-view v-slot="{ Component }">
@@ -109,6 +115,11 @@
             <component :is="Component" />
           </transition>
         </router-view>
+
+        <footer class="app-footer">
+          GB/T 28181—2022 视频监控平台 ·
+          <span class="mono">{{ auth.serverInfo?.platformId ?? '—' }}</span>
+        </footer>
       </main>
     </div>
   </div>
@@ -144,6 +155,7 @@ const allItems = [
   { path: '/alarms', title: '报警管理', icon: 'Bell', group: '运维' },
   { path: '/cascade', title: '级联配置', icon: 'Share', group: '运维' },
   { path: '/users', title: '用户管理', icon: 'User', group: '系统', admin: true },
+  { path: '/oplogs', title: '操作日志', icon: 'Document', group: '系统' },
   { path: '/settings', title: '系统设置', icon: 'Setting', group: '系统' }
 ]
 
@@ -162,6 +174,9 @@ const menuGroups = computed(() => {
 
 const online = computed(() => auth.serverInfo?.deviceOnline ?? 0)
 const total = computed(() => auth.serverInfo?.deviceTotal ?? 0)
+const channelOnline = computed(() => auth.serverInfo?.channelOnline ?? 0)
+const channelTotal = computed(() => auth.serverInfo?.channelTotal ?? 0)
+const streamCount = computed(() => auth.serverInfo?.streamCount ?? 0)
 
 const healthText = computed(() => {
   if (!auth.serverInfo) return '服务未就绪'
@@ -242,42 +257,45 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 14px;
+  padding: 0 12px;
   flex-shrink: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .brand-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-md);
+  background: var(--brand-500);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
   flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(47, 109, 246, 0.4);
 }
 
 .brand-text {
   display: flex;
-  flex-direction: column;
-  line-height: 1.15;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 1;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .brand-name {
-  font-size: 14px;
+  font-family: var(--mono);
+  font-size: 13.5px;
   font-weight: 700;
   color: #fff;
-  letter-spacing: 0.3px;
+  letter-spacing: -0.2px;
+  flex-shrink: 0;
 }
 
 .brand-sub {
-  font-size: 10.5px;
-  color: rgba(255, 255, 255, 0.42);
-  letter-spacing: 0.5px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  white-space: nowrap;
 }
 
 /* 导航 */
@@ -285,17 +303,16 @@ onMounted(async () => {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px 8px 16px;
+  padding: 12px 8px 16px;
 }
 
 .nav-group-label {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 1px;
-  color: rgba(255, 255, 255, 0.3);
-  padding: 14px 10px 6px;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.32);
+  padding: 15px 10px 5px;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .nav-item {
@@ -303,45 +320,49 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 38px;
+  height: 34px;
   padding: 0 10px;
-  margin-bottom: 2px;
-  border-radius: 8px;
-  color: rgba(255, 255, 255, 0.68);
+  margin-bottom: 1px;
+  border-radius: var(--r-md);
+  color: rgba(255, 255, 255, 0.62);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 12.5px;
   white-space: nowrap;
   transition: background 0.14s ease, color 0.14s ease;
 }
 
 .nav-item:hover {
   background: var(--bg-sidebar-hover);
-  color: #fff;
+  color: rgba(255, 255, 255, 0.95);
 }
 
 .nav-item.is-active {
   background: var(--bg-sidebar-active);
   color: #fff;
   font-weight: 500;
-  box-shadow: 0 2px 10px rgba(30, 84, 212, 0.35);
 }
 
-/* 激活态左侧高亮条 */
+/* 激活态：左侧 2px 强调条（整条贯穿，比圆点/整块填充更"仪表"） */
 .nav-item.is-active::before {
   content: '';
   position: absolute;
-  left: -8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 18px;
-  border-radius: 0 3px 3px 0;
-  background: #fff;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--brand-400);
 }
 
 .nav-icon {
-  font-size: 16px;
+  font-size: 15px;
   flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.nav-item:hover .nav-icon,
+.nav-item.is-active .nav-icon {
+  color: inherit;
 }
 
 .nav-label {
@@ -375,7 +396,6 @@ onMounted(async () => {
   height: 30px;
   padding: 0 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -388,11 +408,11 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
-.health.is-ok .health-dot { background: var(--success-500); box-shadow: 0 0 0 3px rgba(18, 161, 80, 0.18); }
-.health.is-warn .health-dot { background: var(--warning-500); box-shadow: 0 0 0 3px rgba(224, 140, 0, 0.18); }
+.health.is-ok .health-dot { background: var(--online-500); }
+.health.is-warn .health-dot { background: var(--warning-500); }
 .health.is-idle .health-dot { background: var(--info-500); }
 
-.health.is-ok .health-text { color: rgba(255, 255, 255, 0.7); }
+.health.is-ok .health-text { color: rgba(255, 255, 255, 0.75); }
 .health.is-warn .health-text { color: #f0b357; }
 .health.is-idle .health-text { color: rgba(255, 255, 255, 0.4); }
 
@@ -412,9 +432,9 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: 0 var(--sp-5);
+  padding: 0 var(--sp-3);
   background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--line);
 }
 
 .topbar-left {
@@ -432,10 +452,9 @@ onMounted(async () => {
 
 .crumb-title {
   margin: 0;
-  font-size: 15.5px;
-  font-weight: 650;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-primary);
-  letter-spacing: -0.2px;
   white-space: nowrap;
 }
 
@@ -454,20 +473,20 @@ onMounted(async () => {
 }
 
 .icon-btn:hover {
-  background: var(--ink-100);
-  color: var(--brand-600);
+  background: var(--ink-50);
+  color: var(--accent-ink);
 }
 
-/* 状态胶囊 */
+/* 顶栏读数标签：发丝线方角，不是圆润胶囊 */
 .pill {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-radius: var(--r-full);
-  background: var(--ink-50);
-  border: 1px solid var(--ink-100);
+  height: 26px;
+  padding: 0 9px;
+  border-radius: var(--r-md);
+  background: var(--white);
+  border: 1px solid var(--line);
   font-size: 12px;
   color: var(--ink-600);
   white-space: nowrap;
@@ -481,12 +500,15 @@ onMounted(async () => {
 }
 
 .pill-dot.is-live {
-  background: var(--success-500);
+  background: var(--online-500);
   animation: pulse 2s ease-in-out infinite;
 }
 
 .pill-value {
-  font-weight: 650;
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: -0.3px;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
@@ -498,8 +520,9 @@ onMounted(async () => {
 }
 
 .pill-quiet {
-  color: var(--text-secondary);
-  max-width: 190px;
+  color: var(--ink-500);
+  font-size: 11.5px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -507,7 +530,7 @@ onMounted(async () => {
 .divider {
   width: 1px;
   height: 20px;
-  background: var(--border-color);
+  background: var(--line);
 }
 
 /* 用户菜单 */
@@ -515,8 +538,9 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 8px 3px 3px;
-  border-radius: var(--r-full);
+  height: 30px;
+  padding: 0 8px 0 3px;
+  border-radius: var(--r-md);
   cursor: pointer;
   outline: none;
   transition: background 0.14s ease;
@@ -526,16 +550,21 @@ onMounted(async () => {
   background: var(--ink-50);
 }
 
+.user-welcome {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
 .user-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-md);
+  background: var(--brand-600);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -548,13 +577,8 @@ onMounted(async () => {
 
 .user-name {
   font-size: 12.5px;
-  font-weight: 550;
+  font-weight: 600;
   color: var(--text-primary);
-}
-
-.user-role {
-  font-size: 10.5px;
-  color: var(--text-tertiary);
 }
 
 .user-caret {
@@ -564,8 +588,18 @@ onMounted(async () => {
 /* 内容区 */
 .content {
   flex: 1;
+  /* 关键：没有 min-height:0，flex 子项的默认 min-height:auto 会让
+     内容撑破容器，视频墙这类「要吃满剩余高度」的页面就失效了 */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
-  padding: var(--sp-5) var(--sp-6) var(--sp-8);
+  padding: var(--sp-4) var(--sp-5) var(--sp-6);
+}
+
+/* router-view 的过渡组件需要能撑满 */
+.content > * {
+  flex-shrink: 0;
 }
 
 /* ============ 过渡 ============ */
