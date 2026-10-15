@@ -1,12 +1,13 @@
 <template>
   <div class="page">
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><Film /></el-icon> 设备录像</span>
-        </div>
-      </template>
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">设备录像</h2>
+        <p class="page-subtitle">选择通道后按时间段检索设备侧录像，支持回放与下载</p>
+      </div>
+    </header>
 
+    <el-card shadow="never">
       <el-form :inline="true" class="search-form">
         <el-form-item label="通道">
           <el-select

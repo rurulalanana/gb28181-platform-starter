@@ -1,38 +1,44 @@
 <template>
-  <div>
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><Monitor /></el-icon> 设备管理</span>
-          <el-button size="small" :loading="loading" @click="load">
-            <el-icon><Refresh /></el-icon> 刷新
-          </el-button>
-        </div>
-      </template>
+  <div class="page">
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">设备管理</h2>
+        <p class="page-subtitle">
+          已接入 {{ totalCount }} 台设备，其中
+          <b class="text-success">{{ onlineCount }}</b> 台在线
+        </p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+      </div>
+    </header>
 
-      <!-- 查询条件 -->
-      <el-form :inline="true" class="search-form">
-        <el-form-item label="搜索">
-          <el-input
-            v-model="query.q"
-            placeholder="设备编码 / 名称"
-            clearable
-            style="width: 220px"
-            @keyup.enter="search"
-          >
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-        </el-form-item>
-        <el-form-item label="状态">
-          <el-select v-model="query.online" placeholder="全部" clearable style="width: 120px">
-            <el-option label="在线" :value="true" />
-            <el-option label="离线" :value="false" />
-          </el-select>
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="search">查询</el-button>
-        </el-form-item>
-      </el-form>
+    <!-- 筛选栏 -->
+    <div class="filter-bar">
+      <el-input
+        v-model="query.q"
+        placeholder="设备编码 / 名称"
+        clearable
+        style="width: 240px"
+        @keyup.enter="search"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-select v-model="query.online" placeholder="全部状态" clearable style="width: 128px">
+        <el-option label="在线" :value="true" />
+        <el-option label="离线" :value="false" />
+      </el-select>
+      <el-button type="primary" @click="search">
+        <el-icon><Search /></el-icon> 查询
+      </el-button>
+      <el-button @click="resetQuery">重置</el-button>
+      <span class="filter-bar-spacer" />
+      <span class="text-dim">设备编码可直接点击名称行内编辑</span>
+    </div>
+
+    <el-card shadow="never">
 
       <el-table v-loading="loading" :data="devices" stripe>
         <el-table-column prop="id" label="设备编码" min-width="190">
@@ -57,14 +63,14 @@
         </el-table-column>
         <el-table-column label="厂商 / 型号" min-width="160">
           <template #default="{ row }">
-            <span class="muted">{{ [row.manufacturer, row.model].filter(Boolean).join(' / ') || '—' }}</span>
+            <span class="text-muted">{{ [row.manufacturer, row.model].filter(Boolean).join(' / ') || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.online ? 'success' : 'info'" size="small" effect="light">
+            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
               {{ row.online ? '在线' : '离线' }}
-            </el-tag>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="IP 地址" min-width="140">
@@ -75,11 +81,12 @@
         </el-table-column>
         <el-table-column label="最后注册" min-width="160">
           <template #default="{ row }">
-            <span class="muted">{{ row.lastRegisterAt || '—' }}</span>
+            <span class="text-muted">{{ row.lastRegisterAt || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right" align="center">
           <template #default="{ row }">
+            <div class="row-actions">
             <el-tooltip content="采集全量数据">
               <el-button
                 link
@@ -100,12 +107,11 @@
                 <el-icon><Delete /></el-icon>
               </el-button>
             </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <template #empty>
-          <div class="empty-cell">
-            暂无设备。请确认设备已注册到平台（SIP {{ serverSip }}）
-          </div>
+          <el-empty :image-size="76" :description="`暂无设备。请确认设备已注册到平台（SIP ${serverSip}）`" />
         </template>
       </el-table>
 
@@ -186,6 +192,19 @@ const loading = ref(false)
 const busy = ref('')
 const saving = ref(false)
 const query = reactive({ q: '', online: null })
+
+/** 设备总数（来自分页器，全量口径）。 */
+const totalCount = computed(() => pager.total ?? 0)
+
+/** 当前页在线设备数。 */
+const onlineCount = computed(() => devices.value.filter((d) => d.online).length)
+
+/** 重置筛选条件并重新查询。 */
+function resetQuery() {
+  query.q = ''
+  query.online = null
+  search()
+}
 
 /** 正在保存名称的设备编号集合（防重复提交）。 */
 const namePending = reactive(new Set())

@@ -1,5 +1,17 @@
 <template>
   <div class="page">
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">系统设置</h2>
+        <p class="page-subtitle">平台运行参数、服务端口与账号安全配置</p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" @click="loadServer">
+          <el-icon><Refresh /></el-icon> 刷新信息
+        </el-button>
+      </div>
+    </header>
+
     <el-row :gutter="18">
       <!-- 服务器信息 -->
       <el-col :xs="24" :lg="14">
@@ -246,9 +258,9 @@ onMounted(() => {
 
 .hint-item {
   padding: 16px 18px;
-  background: #f8f9fb;
+  background: var(--bg-sunken);
   border-radius: 8px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--border-color);
 }
 
 .hint-title {
@@ -257,13 +269,13 @@ onMounted(() => {
   gap: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: var(--ink-900);
   margin-bottom: 8px;
 }
 
 .hint-desc {
   font-size: 12px;
-  color: #909399;
+  color: var(--text-secondary);
   line-height: 1.7;
 }
 </style>

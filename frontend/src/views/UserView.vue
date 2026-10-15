@@ -1,20 +1,21 @@
 <template>
   <div>
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><User /></el-icon> 用户管理</span>
-          <div>
-            <el-button size="small" :loading="loading" @click="load">
-              <el-icon><Refresh /></el-icon> 刷新
-            </el-button>
-            <el-button size="small" type="primary" @click="openEdit(null)">
-              <el-icon><Plus /></el-icon> 新增用户
-            </el-button>
-          </div>
-        </div>
-      </template>
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">用户管理</h2>
+        <p class="page-subtitle">平台账号、角色与密码管理</p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+        <el-button size="small" type="primary" @click="openEdit(null)">
+        <el-icon><Plus /></el-icon> 新增用户
+        </el-button>
+      </div>
+    </header>
 
+    <el-card shadow="never">
       <el-table v-loading="loading" :data="users" stripe>
         <el-table-column label="用户名" min-width="140">
           <template #default="{ row }"><span class="mono">{{ row.username }}</span></template>
@@ -38,12 +39,12 @@
         </el-table-column>
         <el-table-column label="最后登录" min-width="170">
           <template #default="{ row }">
-            <span class="muted">{{ row.lastLoginAt || '—' }}</span>
+            <span class="text-muted">{{ row.lastLoginAt || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="170">
           <template #default="{ row }">
-            <span class="muted">{{ row.createdAt || '—' }}</span>
+            <span class="text-muted">{{ row.createdAt || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="180" align="center" fixed="right">

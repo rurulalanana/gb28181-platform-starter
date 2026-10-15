@@ -359,7 +359,7 @@ async function toggleTalk() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f5f7fa;
+  background: var(--ink-50);
   border-radius: 6px;
 }
 
@@ -374,14 +374,14 @@ async function toggleTalk() {
 }
 
 .ptz-section {
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--border-color);
   padding-top: 14px;
 }
 
 .section-title {
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: var(--ink-900);
   margin-bottom: 10px;
 }
 

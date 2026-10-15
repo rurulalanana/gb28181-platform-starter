@@ -1,20 +1,21 @@
 <template>
-  <div>
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span><el-icon><Bell /></el-icon> 报警管理</span>
-          <div>
-            <el-button size="small" :loading="loading" @click="load">
-              <el-icon><Refresh /></el-icon> 刷新
-            </el-button>
-            <el-button size="small" type="danger" plain @click="clearAll">
-              <el-icon><Delete /></el-icon> 清空报警
-            </el-button>
-          </div>
-        </div>
-      </template>
+  <div class="page">
+    <header class="page-header">
+      <div class="page-title-group">
+        <h2 class="page-title">报警管理</h2>
+        <p class="page-subtitle">设备上报的告警事件，按级别与时间检索处理</p>
+      </div>
+      <div class="page-actions">
+        <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+        <el-button size="small" type="danger" plain @click="clearAll">
+        <el-icon><Delete /></el-icon> 清空报警
+        </el-button>
+      </div>
+    </header>
 
+    <el-card shadow="never">
       <el-form :inline="true" class="search-form">
         <el-form-item label="报警级别">
           <el-select v-model="query.priority" placeholder="全部级别" clearable style="width: 160px">
