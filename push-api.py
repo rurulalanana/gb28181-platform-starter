@@ -15,6 +15,7 @@ token 需要 Contents: Read and write 权限（fine-grained token）。
 import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -24,12 +25,13 @@ import urllib.request
 API = "https://api.github.com"
 TOKEN = ""
 DRY = False
+REPO_DIR = None
 
 
 def run_git(*args, cwd=None):
     """执行 git 命令并返回标准输出（去尾换行）。"""
     out = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        ["git", *args], cwd=cwd or REPO_DIR, capture_output=True, text=True, check=True
     )
     return out.stdout.rstrip("\n")
 
@@ -90,7 +92,7 @@ def upload_blob(repo, sha):
     if kind != "blob":
         raise RuntimeError(f"{sha} 不是 blob（{kind}）")
     content = subprocess.run(
-        ["git", "cat-file", "blob", sha], capture_output=True, check=True
+        ["git", "cat-file", "blob", sha], cwd=REPO_DIR, capture_output=True, check=True
     ).stdout
     payload = {
         "content": base64.b64encode(content).decode(),
@@ -168,17 +170,31 @@ def push_commit(repo, sha, parents_map):
 
 
 def main():
-    global TOKEN, DRY
+    global TOKEN, DRY, REPO_DIR
     ap = argparse.ArgumentParser(description="通过 Git Data API 推送提交")
-    ap.add_argument("token", help="GitHub PAT（需 Contents: Read and write）")
+    ap.add_argument("token", nargs="?", default=None,
+                    help="GitHub PAT（需 Contents: Read and write）；也可用 --token-file / GH_TOKEN")
+    ap.add_argument("--token-file", default=None, help="从文件读取 PAT（推荐，避免进入进程列表）")
     ap.add_argument("--repo", default="rurulalanana/gb28181-platform-starter")
     ap.add_argument("--branch", default="main")
+    ap.add_argument("--dir", default=None, help="git 仓库目录（默认脚本所在目录）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    TOKEN = args.token
+    token = args.token
+    if not token and args.token_file:
+        with open(args.token_file, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+    if not token:
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        print("✗ 未提供 token（位置参数 / --token-file / GH_TOKEN）", file=sys.stderr)
+        return 1
+
+    TOKEN = token
     DRY = args.dry_run
     repo, branch = args.repo, args.branch
+    REPO_DIR = args.dir or os.path.dirname(os.path.abspath(__file__))
 
     # 1. 校验 token 与仓库
     print("==> 校验 token…")
@@ -222,7 +238,12 @@ def main():
     )
 
     # 5. 让本地 origin/main 跟上（避免后续 push 分叉）
-    run_git("update-ref", f"refs/remotes/origin/{branch}", new_head)
+    # 注意：GitHub 端 commit 是重新生成的 SHA，本地无该对象，
+    # 只能等下次 fetch 时同步；这里失败不影响推送结果。
+    try:
+        run_git("update-ref", f"refs/remotes/origin/{branch}", new_head)
+    except Exception as e:
+        print(f"  (本地 origin/{branch} 暂未同步，下次 fetch 时会自动跟上：{e})")
     print(f"\n✓ 推送完成：{info.get('html_url')}/tree/{branch}")
     return 0
 
