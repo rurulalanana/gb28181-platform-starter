@@ -16,43 +16,34 @@
       <div class="ptz-center" :style="{ gridArea: 'c' }">
         <el-icon :size="20" color="#909399"><Aim /></el-icon>
       </div>
-
-      <el-button
-        class="ptz-btn"
-        style="grid-area: zin"
-        :disabled="inactive"
-        @pointerdown="beginMove('zoomin', $event)"
-      >
-        <el-icon :size="18"><ZoomIn /></el-icon>
-      </el-button>
-      <el-button
-        class="ptz-btn"
-        style="grid-area: zout"
-        :disabled="inactive"
-        @pointerdown="beginMove('zoomout', $event)"
-      >
-        <el-icon :size="18"><ZoomOut /></el-icon>
-      </el-button>
     </div>
 
-    <!-- 速度 -->
-    <div class="ptz-speed">
-      <span class="label">速度</span>
-      <el-slider v-model="speed" :min="1" :max="255" :show-tooltip="false" size="small" />
-      <span class="mono value">{{ speed }}</span>
-    </div>
+    <!--
+      变倍与光圈。
 
-    <!-- 焦点光圈 -->
+      变倍曾有两处入口：方向盘下方两个放大镜按钮 + 这里的「近焦 / 远焦」。
+      但两者最终下发的 PTZ 指令逐字节相同（都走 PtzEncoder.ZOOM_IN/ZOOM_OUT），
+      且方向盘下那两个按钮的 grid-area 名（zin/zout）在 grid-template-areas
+      里并不存在，被浏览器自动排到 3×3 网格之外，看起来像游离的怪按钮。
+      现合并为一对 +/−，与方向键统一为「按住持续、松开停止」。
+    -->
     <div class="ptz-row">
       <el-button-group>
-        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'focusnear' })">
-          近焦
+        <el-button
+          size="small"
+          :disabled="inactive"
+          title="放大"
+          @pointerdown="beginMove('zoomin', $event)"
+        >
+          <el-icon><Plus /></el-icon>
         </el-button>
-        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'focusfar' })">
-          远焦
-        </el-button>
-        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'stop' })">
-          停
+        <el-button
+          size="small"
+          :disabled="inactive"
+          title="缩小"
+          @pointerdown="beginMove('zoomout', $event)"
+        >
+          <el-icon><Minus /></el-icon>
         </el-button>
       </el-button-group>
       <el-button-group>
@@ -180,7 +171,15 @@ const props = defineProps({
  */
 const inactive = computed(() => props.disabled || !props.serial)
 
-const speed = ref(129)
+/**
+ * 云台速度（0~255）。
+ *
+ * <p>固定值，界面上不提供调节：速度对云台是调试参数而非日常操作项。
+ * 接口 {@code /control/ptz} 的 {@code speed} 参数保持不变，后端仍做 0~255 夹取，
+ * 日后需要时可随时改为可配置。
+ */
+const SPEED = 129
+
 const presetNo = ref(1)
 const talking = ref(false)
 
@@ -233,7 +232,7 @@ function beginMove(command, event) {
     }
   }
   moving.value = true
-  send('ptz', { command, speed: speed.value }, null, true)
+  send('ptz', { command, speed: SPEED }, null, true)
 }
 
 /**
@@ -362,28 +361,6 @@ async function toggleTalk() {
   justify-content: center;
   background: #f5f7fa;
   border-radius: 6px;
-}
-
-.ptz-speed {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.ptz-speed .label {
-  color: #606266;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.ptz-speed :deep(.el-slider) {
-  flex: 1;
-}
-
-.ptz-speed .value {
-  width: 32px;
-  text-align: right;
-  color: #909399;
 }
 
 .ptz-row {

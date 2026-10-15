@@ -86,7 +86,6 @@ const collapsed = ref(false)
 const allItems = [
   { path: '/dashboard', title: '总览', icon: 'Odometer' },
   { path: '/live', title: '实时预览', icon: 'VideoCamera' },
-  { path: '/control', title: '设备控制', icon: 'Aim' },
   { path: '/devices', title: '设备管理', icon: 'Monitor' },
   { path: '/channels', title: '通道管理', icon: 'List' },
   { path: '/playback', title: '设备录像', icon: 'Film' },

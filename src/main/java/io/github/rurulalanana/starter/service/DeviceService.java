@@ -475,7 +475,16 @@ public class DeviceService {
         channel.setSecrecy(item.getSecrecy());
         channel.setIpAddress(item.getIpAddress());
         channel.setPort(item.getPort());
-        channel.setPtzType(item.getPtzType());
+        // 云台类型：设备普遍不报或恒报 0（未知），而现场可能已手工在通道列表里改成
+        // 球机/半球以便开启云台控制。若每次目录同步都无条件写入，
+        // 手工值会在设备下一次注册（实测约 5 分钟）时被冲回 0，
+        // 表现为「改完一会儿又自己变回去了」。故只在设备报出非 0 值时采纳。
+        if (item.getPtzType() != null && item.getPtzType() != 0) {
+            channel.setPtzType(item.getPtzType());
+        } else if (channel.getId() == null) {
+            // 新建通道且设备未报类型：落 0，避免 NULL 让前端判空逻辑分支变多
+            channel.setPtzType(item.getPtzType() == null ? 0 : item.getPtzType());
+        }
         channel.setLongitude(item.getLongitude() == null ? null : BigDecimal.valueOf(item.getLongitude()));
         channel.setLatitude(item.getLatitude() == null ? null : BigDecimal.valueOf(item.getLatitude()));
         channel.setResolution(item.getResolution());
@@ -513,7 +522,8 @@ public class DeviceService {
         if (item.getAddress() != null) {
             device.setAddress(CharsetFix.repair(item.getAddress()));
         }
-        if (item.getPtzType() != null) {
+        // 与通道同理：设备常恒报 0（未知），不要用它覆盖手工设置的类型
+        if (item.getPtzType() != null && item.getPtzType() != 0) {
             device.setPtzType(item.getPtzType());
         }
         if (item.getLongitude() != null) {

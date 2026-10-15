@@ -79,6 +79,13 @@
           <div class="empty-cell">暂无用户</div>
         </template>
       </el-table>
+
+      <TablePager
+        :pager="pager"
+        unit="个用户"
+        @page-change="onPageChange"
+        @size-change="onSizeChange"
+      />
     </el-card>
 
     <!-- 编辑用户 -->
@@ -121,6 +128,8 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { userApi } from '@/api'
+import { usePagination } from '@/composables/usePagination'
+import TablePager from '@/components/TablePager.vue'
 
 const users = ref([])
 const loading = ref(false)
@@ -133,11 +142,17 @@ const resetDialog = ref(false)
 const resetTarget = ref(null)
 const newPassword = ref('')
 
+const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
+})
+
 async function load() {
   loading.value = true
   try {
-    const data = await userApi.list({ start: 0, limit: 200 })
+    const data = await userApi.list({ start: offset.value, limit: pager.size })
     users.value = data?.userList || []
+    setTotal(data?.userCount ?? users.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载用户失败（需管理员权限）')
   } finally {

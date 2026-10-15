@@ -19,7 +19,7 @@
             placeholder="通道编码 / 名称"
             clearable
             style="width: 220px"
-            @keyup.enter="load"
+            @keyup.enter="search"
           >
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
@@ -31,7 +31,7 @@
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="load">查询</el-button>
+          <el-button type="primary" @click="search">查询</el-button>
         </el-form-item>
       </el-form>
 
@@ -55,12 +55,28 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="云台" width="100" align="center">
+        <el-table-column label="云台" width="120" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.ptzType" type="warning" size="small" effect="plain">
-              {{ ptzTypeText(row.ptzType) }}
-            </el-tag>
-            <span v-else class="muted">—</span>
+            <!--
+              可直接在列表里改：设备普遍不报或恒报 0（未知），
+              而现场实际支持云台时需要在预览弹窗里用云台面板，
+              所以把这里做成可编辑入口（改完立刻影响预览弹窗是否显示云台）。
+            -->
+            <el-select
+              v-model="row.ptzType"
+              :loading="ptzPending.has(row.id)"
+              :disabled="ptzPending.has(row.id)"
+              size="small"
+              style="width: 104px"
+              @change="(val) => changePtzType(row, val)"
+            >
+              <el-option
+                v-for="(label, value) in PTZ_TYPES"
+                :key="value"
+                :label="label"
+                :value="Number(value)"
+              />
+            </el-select>
           </template>
         </el-table-column>
         <el-table-column label="云端录像" width="110" align="center">
@@ -76,13 +92,10 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right" align="center">
+        <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link type="primary" @click="preview(row)">
               <el-icon><VideoPlay /></el-icon> 预览
-            </el-button>
-            <el-button link type="primary" :disabled="!row.ptzType" @click="openPtz(row)">
-              <el-icon><Aim /></el-icon> 云台
             </el-button>
             <el-button link type="primary" @click="openRename(row)">
               <el-icon><Edit /></el-icon>
@@ -94,7 +107,12 @@
         </template>
       </el-table>
 
-      <div class="table-footer">共 {{ total }} 个通道</div>
+      <TablePager
+        :pager="pager"
+        unit="个通道"
+        @page-change="onPageChange"
+        @size-change="onSizeChange"
+      />
     </el-card>
 
     <!-- 预览对话框 -->
@@ -106,8 +124,15 @@
       @close="closePreview"
     >
       <div class="preview-wrap">
-        <div class="video-box preview-video">
-          <div ref="videoContainer" class="video-container" />
+        <!--
+          视频外层负责撑满栏高并居中；.video-box 自身保持 16:9，
+          因此在宽而矮的弹窗里会上下留白、在窄而高的弹窗里左右留白，
+          不会拉伸变形。
+        -->
+        <div class="preview-stage">
+          <div class="video-box">
+            <div ref="videoContainer" class="video-container" />
+          </div>
         </div>
         <div class="preview-side">
           <div class="preview-status">
@@ -118,11 +143,21 @@
             </el-select>
           </div>
           <el-divider />
+          <!--
+            云台面板只在通道被标为可云台（球机 / 半球 / 遥控枪机）时提供。
+            类型未知或固定枪机时不显示 —— 面板里的方向键对固定枪机无效，
+            摆在那里只会让人反复点而怀疑平台坏了。
+          -->
           <PtzPanel
-            v-if="previewTarget"
+            v-if="previewTarget && supportsPtz(previewTarget.ptzType)"
             :serial="previewTarget.deviceId"
             :code="previewTarget.id"
             :disabled="!playing"
+          />
+          <el-empty
+            v-else-if="previewTarget"
+            description="该通道未标记云台类型，无法云台控制"
+            :image-size="60"
           />
         </div>
       </div>
@@ -130,15 +165,6 @@
         <el-button @click="closePreview">关闭</el-button>
       </template>
     </el-dialog>
-
-    <!-- 云台抽屉（不预览直接控制） -->
-    <el-drawer
-      v-model="ptzDrawer"
-      :title="'云台控制 · ' + (ptzTarget?.customName || ptzTarget?.name || ptzTarget?.id || '')"
-      size="380px"
-    >
-      <PtzPanel v-if="ptzTarget" :serial="ptzTarget.deviceId" :code="ptzTarget.id" />
-    </el-drawer>
 
     <!-- 重命名对话框 -->
     <el-dialog v-model="renameDialog" title="重命名通道" width="460px">
@@ -158,15 +184,19 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
+import { usePagination } from '@/composables/usePagination'
 import PtzPanel from '@/components/PtzPanel.vue'
+import TablePager from '@/components/TablePager.vue'
 
 const channels = ref([])
-const total = ref(0)
 const loading = ref(false)
 const query = reactive({ q: '', online: null })
 
 /** 正在切换云端录像开关的通道编码集合（用于开关 loading / 防重复点击）。 */
 const recordPending = reactive(new Set())
+
+/** 正在修改云台类型的通道编码集合（用于下拉 loading / 防重复点击）。 */
+const ptzPending = reactive(new Set())
 
 const previewDialog = ref(false)
 const previewTarget = ref(null)
@@ -180,33 +210,51 @@ const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)
 
-const ptzDrawer = ref(false)
-const ptzTarget = ref(null)
-
 const renameDialog = ref(false)
 const renameTarget = ref(null)
 const renameValue = ref('')
 
+/**
+ * 云台类型：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机。
+ *
+ * <p>与后端 {@code gb_channel.ptz_type} 的取值一致。
+ */
 const PTZ_TYPES = { 0: '未知', 1: '球机', 2: '半球', 3: '固定枪机', 4: '遥控枪机' }
 
-function ptzTypeText(type) {
-  return PTZ_TYPES[type] ?? '—'
+/**
+ * 该类型是否支持云台控制。
+ *
+ * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
+ */
+function supportsPtz(type) {
+  return type === 1 || type === 2 || type === 4
 }
+
+const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
+})
 
 async function load() {
   loading.value = true
   try {
-    const params = { start: 0, limit: 1000 }
+    const params = { start: offset.value, limit: pager.size }
     if (query.q) params.q = query.q
     if (query.online !== null && query.online !== undefined) params.online = query.online
     const data = await deviceApi.channelList(params)
     channels.value = data?.channelList || []
-    total.value = data?.channelCount ?? channels.value.length
+    setTotal(data?.channelCount ?? channels.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载通道失败')
   } finally {
     loading.value = false
   }
+}
+
+/** 条件变化后回到第一页再查，否则会停在越界页上看到空列表。 */
+function search() {
+  reset()
+  load()
 }
 
 async function ensureMediaPort() {
@@ -271,9 +319,29 @@ function closePreview() {
   previewTarget.value = null
 }
 
-function openPtz(row) {
-  ptzTarget.value = row
-  ptzDrawer.value = true
+/**
+ * 修改通道的云台类型。
+ *
+ * <p>{@code v-model} 已先行改值：失败时必须回滚，否则下拉显示与后端不一致。
+ * 另外后端已改为「目录同步时设备报 0 不覆盖」，所以这里改的值不会被设备
+ * 下一次注册冲回未知。
+ */
+async function changePtzType(row, type) {
+  const previous = row.ptzType
+  ptzPending.add(row.id)
+  try {
+    await deviceApi.setChannelPtzType({
+      serial: row.deviceId,
+      code: row.id,
+      ptz_type: type
+    })
+    ElMessage.success(`云台类型已改为「${PTZ_TYPES[type] ?? type}」`)
+  } catch (e) {
+    row.ptzType = previous
+    ElMessage.error(e.message || '修改失败')
+  } finally {
+    ptzPending.delete(row.id)
+  }
 }
 
 async function toggleCloudRecord(row, enable) {
@@ -324,23 +392,77 @@ onUnmounted(() => player.stop())
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
   gap: 20px;
+  /*
+   * 本行高度的唯一持有者。
+   *
+   * 之前左栏高度由宽度决定（.video-box 的 aspect-ratio: 16/9），
+   * 右栏由视口决定（max-height: 62vh），两个来源互不相关 ——
+   * 1080p 下左栏约 293px、右栏上限约 670px，差近 380px，永远对不上。
+   * 现在两栏都拉伸到这里的高度，视频改由栏内居中满足 16:9。
+   */
+  height: 62vh;
 }
 
-@media (max-width: 900px) {
-  .preview-wrap {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/*
+ * 左栏是「舞台」：撑满行高，内部把 16:9 的视频按 contain 方式居中。
+ *
+ * container-type: size 让下面能用 cqw/cqh 表达「舞台自身的宽高」。
+ * 纯百分比做不到：只写 height:100% + width:auto 时宽度由 16:9 推出，
+ * 超出栏宽被 max-width 夹取后浏览器不会回算高度，画面会被压扁
+ * （实测 528×558 的栏里视频变成 0.946 而非 1.778）；
+ * 只写 width:100% + max-height 则在「宽而矮」的栏里同样压扁。
+ * 用 min(100cqw, 100cqh*16/9) 一次选出受限的那一边，两种情形都正确。
+ */
+.preview-stage {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  container-type: size;
 }
 
-.preview-video {
-  align-self: start;
+.preview-stage .video-box {
+  width: min(100cqw, calc(100cqh * 16 / 9));
+  aspect-ratio: 16 / 9;
 }
 
 .preview-side {
   border-left: 1px solid #ebeef5;
   padding-left: 18px;
-  max-height: 62vh;
+  height: 100%;
   overflow-y: auto;
+}
+
+/*
+ * 窄视口：改为单列堆叠，行高不再由 .preview-wrap 持有（height: auto），
+ * 因此两栏都要退回按内容自然高度 —— 否则 height: 100% 在 auto 高度的父级里
+ * 会塌成 0，视频和云台面板都会消失。此时舞台也不需要容器尺寸，
+ * 直接用全局 .video-box 的「宽 100% + 16:9」。
+ */
+@media (max-width: 900px) {
+  .preview-wrap {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .preview-stage {
+    height: auto;
+    display: block;
+    container-type: normal;
+  }
+
+  .preview-stage .video-box {
+    width: 100%;
+  }
+
+  .preview-side {
+    height: auto;
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid #ebeef5;
+    padding-top: 14px;
+  }
 }
 
 .preview-status {

@@ -181,7 +181,6 @@ const cards = computed(() => {
 
 const quickLinks = [
   { path: '/live', title: '实时预览', desc: '多分屏观看实时画面', icon: 'VideoCamera', color: '#409eff' },
-  { path: '/control', title: '设备控制', desc: '云台、预置位、喊话', icon: 'Aim', color: '#67c23a' },
   { path: '/playback', title: '设备录像', desc: '检索并回放设备侧录像', icon: 'Film', color: '#e6a23c' },
   { path: '/cloud', title: '云端录像', desc: '平台录制与下载归档', icon: 'Cloudy', color: '#909399' }
 ]

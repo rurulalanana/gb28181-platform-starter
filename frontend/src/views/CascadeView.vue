@@ -81,6 +81,13 @@
           </div>
         </template>
       </el-table>
+
+      <TablePager
+        :pager="pager"
+        unit="条级联"
+        @page-change="onPageChange"
+        @size-change="onSizeChange"
+      />
     </el-card>
 
     <!-- 编辑对话框 -->
@@ -174,6 +181,8 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cascadeApi } from '@/api'
+import { usePagination } from '@/composables/usePagination'
+import TablePager from '@/components/TablePager.vue'
 
 const list = ref([])
 const loading = ref(false)
@@ -199,11 +208,20 @@ const emptyForm = () => ({
 
 const form = reactive(emptyForm())
 
+const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
+})
+
 async function load() {
   loading.value = true
   try {
-    const data = await cascadeApi.list({ start: 0, limit: 200 })
-    list.value = data?.cascadeList || []
+    const data = await cascadeApi.list({ start: offset.value, limit: pager.size })
+    // 后端 CascadeListVo 的字段名拼成了 casecadeList / casecadeCount（少了 s 后多打 a）。
+    // 这里两种拼写都读，避免后端日后修正拼写时前端静默变成空列表。
+    const rows = data?.casecadeList || data?.cascadeList || []
+    list.value = rows
+    setTotal(data?.casecadeCount ?? data?.cascadeCount ?? rows.length)
   } catch (e) {
     ElMessage.error(e.message || '加载级联失败')
   } finally {
