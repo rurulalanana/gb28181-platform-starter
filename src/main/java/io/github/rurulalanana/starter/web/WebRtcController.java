@@ -60,6 +60,13 @@ public class WebRtcController {
      * <p>ZLM 媒体源标识是 {@code app/stream}，本平台约定 {@code app = 设备编码}、
      * {@code stream = 通道编码}（通道编码跨设备可重复，必须带上设备编码）。
      *
+     * <p><b>入参是业务坐标，不是 ZLM 坐标</b>：单端口收流模式下 ZLM 的 app 固定为
+     * {@code rtp}、stream 为 {@code <设备编码>_<通道编码>}（见
+     * {@code RtpSession#getZlmApp()}），与业务坐标不一致。协商用的 {@code rtc://}
+     * 地址必须与已注册的媒体源完全一致，否则 ZLM 回调直接报
+     * {@code stream not found}。故此处先用业务坐标取会话，再拿会话里的
+     * ZLM 坐标去协商。
+     *
      * @param stream {@code <设备编码>/<通道编码>}；设备直连（设备编码即通道编码）
      *               时可只传一个编码
      */
@@ -70,39 +77,44 @@ public class WebRtcController {
         if (platform.webRtcService() == null || platform.mediaServer() == null) {
             throw BizException.badRequest("媒体服务未启动，无法进行 WebRTC 交换");
         }
-        String app;
-        String channel;
+        String deviceId;
+        String channelId;
         if (stream != null && stream.contains("/")) {
             String[] parts = stream.split("/", 2);
-            app = parts[0];
-            channel = parts[1];
+            deviceId = parts[0];
+            channelId = parts[1];
         } else {
             // 单个编码 = 设备直连（设备编码即通道编码）
-            app = stream;
-            channel = stream;
+            deviceId = stream;
+            channelId = stream;
         }
         // 若流尚未建立，自动点播（避免浏览器拿到空流）
-        RtpSession session = platform.sessionManager().getByChannel(app, channel);
+        RtpSession session = platform.sessionManager().getByChannel(deviceId, channelId);
         if (session == null) {
             try {
-                streamService.startLive(app, channel);
+                streamService.startLive(deviceId, channelId);
             } catch (Exception e) {
-                log.warn("WebRTC 播放前自动点播失败: app={} channel={} err={}",
-                        app, channel, e.getMessage());
+                log.warn("WebRTC 播放前自动点播失败: device={} channel={} err={}",
+                        deviceId, channelId, e.getMessage());
             }
+            session = platform.sessionManager().getByChannel(deviceId, channelId);
         }
+        // 用 ZLM 的实际 app/stream 协商；会话还没建好时退回业务坐标
+        // （此时 ZLM 侧也还没有源，报错信息更贴近实际）
+        String zlmApp = session == null ? deviceId : session.getZlmApp();
+        String zlmStream = session == null ? channelId : session.getStream();
         String peer = peerId == null || peerId.isBlank()
                 ? platform.webRtcService().nextPeerId() : peerId;
         try {
-            String answer = platform.webRtcService().exchange(peer, app, channel, offerSdp, 5);
+            String answer = platform.webRtcService().exchange(peer, zlmApp, zlmStream, offerSdp, 5);
             if (answer == null || answer.isBlank()) {
                 throw BizException.badRequest("WebRTC 协商失败：媒体服务未返回 SDP，请确认流已建立");
             }
             WebrtcPlayVo vo = new WebrtcPlayVo();
             vo.setPeerId(peer);
             vo.setSdp(answer);
-            vo.setStreamId(app + "/" + channel);
-            vo.setWebrtc(platform.mediaServer().playUrls(app, channel).getWebrtc());
+            vo.setStreamId(deviceId + "/" + channelId);
+            vo.setWebrtc(platform.mediaServer().playUrls(zlmApp, zlmStream).getWebrtc());
             return ApiResponse.ok(vo);
         } catch (BizException e) {
             throw e;
