@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.common;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -16,6 +17,7 @@ import java.util.Date;
  *   <li>{@code YYYY-MM-DDTHH:mm:ss}（查询类接口、SIP MANSCDP）</li>
  *   <li>{@code YYYYMMDDHHmmss}（云端录像类接口、文件名）</li>
  *   <li>{@code YYYY-MM-DD HH:mm:ss}（展示用）</li>
+ *   <li>{@code YYYYMM}（云端录像按月统计）</li>
  * </ul>
  */
 public final class TimeFormats {
@@ -35,7 +37,11 @@ public final class TimeFormats {
     }
 
     /**
-     * 宽松解析：依次尝试 ISO、紧凑、展示、日期格式。
+     * 宽松解析：依次尝试 ISO、紧凑、展示、日期、月份格式。
+     *
+     * <p>包含 {@code YYYYMM}（月）是因为云端录像的 {@code querymonthly} /
+     * {@code queryflags} 以月份为参数，而 {@code DATE}（{@code YYYYMMDD}）
+     * 无法匹配 6 位串——缺了它这两类接口会一律报「月份格式应为 YYYYMM」。
      *
      * @return 解析失败返回 {@code null}
      */
@@ -44,10 +50,13 @@ public final class TimeFormats {
             return null;
         }
         String t = text.trim();
-        for (DateTimeFormatter f : new DateTimeFormatter[]{ISO, COMPACT, DISPLAY, DATE}) {
+        for (DateTimeFormatter f : new DateTimeFormatter[]{ISO, COMPACT, DISPLAY, DATE, MONTH}) {
             try {
                 if (f == DATE) {
                     return LocalDate.parse(t, f).atStartOfDay();
+                }
+                if (f == MONTH) {
+                    return YearMonth.parse(t, f).atDay(1).atStartOfDay();
                 }
                 return LocalDateTime.parse(t, f);
             } catch (DateTimeParseException ignore) {
