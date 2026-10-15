@@ -1,10 +1,10 @@
 <template>
   <div class="page">
-    <!-- 页头 -->
+    <!-- 页头（动作区；页面名在页签条上，与参考站一致） -->
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">总览</h2>
-        <p class="page-subtitle">平台运行状态与快捷入口，数据每 10 秒自动刷新</p>
+        <p class="page-subtitle">平台运行状态与关键资源读数，数据每 10 秒自动刷新</p>
       </div>
       <div class="page-actions">
         <span v-if="lastSync" class="text-dim">最近同步 {{ lastSync }}</span>
@@ -17,66 +17,73 @@
       </div>
     </header>
 
-    <!-- 核心指标 -->
-    <div class="stat-grid">
-      <article v-for="c in cards" :key="c.label" class="stat-card">
-        <div class="stat-icon" :class="c.tone"><el-icon><component :is="c.icon" /></el-icon></div>
-        <div class="stat-body">
-          <div class="stat-value">{{ c.value }}</div>
-          <div class="stat-label">{{ c.label }}</div>
-          <div v-if="c.extra" class="stat-extra" :class="c.extraTone">{{ c.extra }}</div>
+    <!-- 第一屏：三栏 box（标题居中，与参考站「通道信息 / 负载信息 / …」同构） -->
+    <section class="box-grid">
+      <el-card shadow="never" class="box-centered">
+        <template #header>
+          <span class="card-title">通道信息</span>
+        </template>
+        <div class="gauge-row">
+          <div v-for="g in gauges" :key="g.label" class="gauge">
+            <div class="gauge-ring">
+              <svg viewBox="0 0 108 108">
+                <circle class="track" cx="54" cy="54" r="46" />
+                <circle
+                  class="fill"
+                  :class="{ 'is-low': g.pct > 0 && g.pct < 25, 'is-critical': g.pct === 0 }"
+                  cx="54"
+                  cy="54"
+                  r="46"
+                  :stroke-dasharray="g.circ"
+                  :stroke-dashoffset="g.circ * (1 - g.pct / 100)"
+                />
+              </svg>
+              <div class="gauge-value">{{ g.pct }}%</div>
+            </div>
+            <div class="gauge-caption">
+              在线数：<b>{{ g.online }}</b><br />
+              总{{ g.label }}：<b>{{ g.total }}</b>
+            </div>
+          </div>
         </div>
-      </article>
-    </div>
+      </el-card>
 
-    <!-- 在线率进度条：把比例可视化，比纯数字更快读懂 -->
-    <div class="rate-row">
-      <div class="rate-block">
-        <div class="rate-head">
-          <span class="rate-label">设备在线率</span>
-          <span class="rate-value">{{ deviceRateText }}</span>
+      <el-card shadow="never" class="box-centered">
+        <template #header>
+          <span class="card-title">资源概览</span>
+        </template>
+        <div class="mini-bars">
+          <div v-for="b in bars" :key="b.label" class="mini-bar">
+            <span class="bar-val">{{ b.value }}</span>
+            <div
+              class="bar"
+              :class="{ 'is-zero': !b.value }"
+              :style="{ height: barHeight(b.value) }"
+            />
+            <span class="bar-label">{{ b.label }}</span>
+          </div>
         </div>
-        <el-progress
-          :percentage="deviceRate"
-          :stroke-width="7"
-          :show-text="false"
-          :color="rateColor(deviceRate)"
-        />
-      </div>
-      <div class="rate-block">
-        <div class="rate-head">
-          <span class="rate-label">通道在线率</span>
-          <span class="rate-value">{{ channelRateText }}</span>
-        </div>
-        <el-progress
-          :percentage="channelRate"
-          :stroke-width="7"
-          :show-text="false"
-          :color="rateColor(channelRate)"
-        />
-      </div>
-    </div>
+      </el-card>
 
-    <!-- 快捷入口 -->
-    <section class="quick-grid">
-      <button v-for="q in quickLinks" :key="q.path" class="quick-card" @click="$router.push(q.path)">
-        <div class="quick-icon" :class="q.tone">
-          <el-icon><component :is="q.icon" /></el-icon>
-        </div>
-        <div class="quick-text">
-          <div class="quick-title">{{ q.title }}</div>
-          <div class="quick-desc">{{ q.desc }}</div>
-        </div>
-        <el-icon class="quick-arrow"><ArrowRight /></el-icon>
-      </button>
+      <el-card shadow="never" class="box-centered">
+        <template #header>
+          <span class="card-title">服务器信息</span>
+        </template>
+        <dl class="kv">
+          <div v-for="row in serverRows" :key="row.label" class="kv-row">
+            <dt>{{ row.label }}</dt>
+            <dd class="mono ellipsis" :title="row.value">{{ row.value }}</dd>
+          </div>
+        </dl>
+      </el-card>
     </section>
 
-    <!-- 设备状态 + 服务器信息 -->
+    <!-- 设备状态 -->
     <div class="split">
-      <el-card shadow="never" class="col-main">
+      <el-card shadow="never" class="col-main box-centered">
         <template #header>
           <div class="card-header">
-            <span class="card-title"><el-icon><Monitor /></el-icon> 设备状态</span>
+            <span class="card-title">设备状态</span>
             <el-button link type="primary" @click="$router.push('/devices')">
               全部设备 <el-icon><ArrowRight /></el-icon>
             </el-button>
@@ -104,19 +111,6 @@
         </el-table>
       </el-card>
 
-      <el-card shadow="never" class="col-side">
-        <template #header>
-          <div class="card-header">
-            <span class="card-title"><el-icon><Cpu /></el-icon> 服务器信息</span>
-          </div>
-        </template>
-        <dl class="kv">
-          <div v-for="row in serverRows" :key="row.label" class="kv-row">
-            <dt>{{ row.label }}</dt>
-            <dd class="mono ellipsis" :title="row.value">{{ row.value }}</dd>
-          </div>
-        </dl>
-      </el-card>
     </div>
 
     <!-- 进行中的直播流 -->
@@ -124,7 +118,7 @@
       <template #header>
         <div class="card-header">
           <span class="card-title">
-            <el-icon><Connection /></el-icon> 进行中的直播流
+            进行中的直播流
             <span v-if="streams.length" class="count-pill">{{ streams.length }}</span>
           </span>
           <el-button link type="primary" @click="$router.push('/live')">
@@ -188,85 +182,50 @@ const channelRate = computed(() => rate(stats.value?.channelOnline ?? 0, stats.v
 const deviceRateText = computed(() => `${deviceRate.value}%`)
 const channelRateText = computed(() => `${channelRate.value}%`)
 
-/** 在线率越高越绿，低于 50% 转黄，低于 20% 转红 */
+/** 在线率配色：正常（>=50%）用强调色，偏低转黄、极低转红 */
 function rateColor(pct) {
-  if (pct >= 80) return 'var(--success-500)'
-  if (pct >= 50) return 'var(--warning-500)'
+  if (pct >= 50) return 'var(--accent)'
+  if (pct >= 20) return 'var(--warning-500)'
   return 'var(--danger-500)'
 }
 
-const cards = computed(() => {
-  const s = stats.value || {}
-  const total = s.deviceTotal ?? 0
-  const online = s.deviceOnline ?? 0
-  const chTotal = s.channelTotal ?? 0
-  const chOnline = s.channelOnline ?? 0
+const gauges = computed(() => {
+  const s0 = stats.value || {}
+  const circ = Math.round(2 * Math.PI * 46)
   return [
     {
-      label: '设备总数',
-      value: total,
-      extra: total ? `在线 ${online} 台` : '尚未接入',
-      icon: 'Monitor',
-      tone: 'is-brand',
-      extraTone: total && online === 0 ? 'text-warning' : 'text-muted'
+      label: '设备',
+      pct: deviceRate.value,
+      online: s0.deviceOnline ?? 0,
+      total: s0.deviceTotal ?? 0,
+      circ
     },
     {
-      label: '在线设备',
-      value: online,
-      extra: total ? `在线率 ${rate(online, total)}%` : '—',
-      icon: 'CircleCheckFilled',
-      tone: 'is-success',
-      extraTone: 'text-success'
-    },
-    {
-      label: '通道总数',
-      value: chTotal,
-      extra: chTotal ? `在线 ${chOnline} 路` : '未同步目录',
-      icon: 'List',
-      tone: 'is-warning',
-      extraTone: 'text-muted'
-    },
-    {
-      label: '进行中推流',
-      value: streams.value.length,
-      extra: streams.value.length ? '正在传输媒体' : '当前空闲',
-      icon: 'VideoCameraFilled',
-      tone: 'is-info',
-      extraTone: streams.value.length ? 'text-brand' : 'text-muted'
+      label: '通道',
+      pct: channelRate.value,
+      online: s0.channelOnline ?? 0,
+      total: s0.channelTotal ?? 0,
+      circ
     }
   ]
 })
 
-const quickLinks = [
-  {
-    path: '/live',
-    title: '实时预览',
-    desc: '1~16 分屏，WebSocket-FLV / WebRTC',
-    icon: 'VideoCamera',
-    tone: 'is-brand'
-  },
-  {
-    path: '/playback',
-    title: '设备录像',
-    desc: '检索设备录像并回放、下载',
-    icon: 'Film',
-    tone: 'is-warning'
-  },
-  {
-    path: '/cloud',
-    title: '云端录像',
-    desc: '平台侧录制归档与检索',
-    icon: 'Cloudy',
-    tone: 'is-info'
-  },
-  {
-    path: '/cascade',
-    title: '级联配置',
-    desc: '上下级平台互联与目录共享',
-    icon: 'Share',
-    tone: 'is-success'
-  }
-]
+/** 资源概览柱：四个关键计数，柱高按最大值归一 */
+const bars = computed(() => {
+  const s0 = stats.value || {}
+  return [
+    { label: '设备总数', value: s0.deviceTotal ?? 0 },
+    { label: '在线设备', value: s0.deviceOnline ?? 0 },
+    { label: '通道总数', value: s0.channelTotal ?? 0 },
+    { label: '在线通道', value: s0.channelOnline ?? 0 }
+  ]
+})
+
+const barMax = computed(() => Math.max(1, ...bars.value.map((b) => b.value)))
+
+function barHeight(v) {
+  return `${Math.max(2, Math.round((v / barMax.value) * 100))}%`
+}
 
 const serverRows = computed(() => {
   const info = auth.serverInfo || {}
@@ -313,209 +272,38 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.stat-extra {
-  font-size: 11.5px;
-  margin-top: 3px;
-  color: var(--text-secondary);
-}
-
-/* ---------- 在线率进度 ---------- */
-
-.rate-row {
+/* 第一屏三栏 box：宽屏三列，窄屏降为两列/单列 */
+.box-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--sp-5);
-  padding: var(--sp-4) var(--sp-5);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--r-lg);
-  box-shadow: var(--sh-xs);
-}
-
-.rate-block {
-  min-width: 0;
-}
-
-.rate-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: var(--sp-2);
-}
-
-.rate-label {
-  font-size: 12.5px;
-  color: var(--text-secondary);
-}
-
-.rate-value {
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- 快捷入口 ---------- */
-
-.quick-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
-  gap: var(--sp-3);
-}
-
-.quick-card {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-4);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--r-lg);
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  box-shadow: var(--sh-xs);
-  transition: box-shadow 0.16s ease, transform 0.16s ease, border-color 0.16s ease;
-}
-
-.quick-card:hover {
-  box-shadow: var(--sh-md);
-  transform: translateY(-2px);
-  border-color: var(--brand-200);
-}
-
-.quick-card:hover .quick-arrow {
-  opacity: 1;
-  transform: translateX(0);
-}
-
-.quick-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--r-lg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 19px;
-  color: #fff;
-  flex-shrink: 0;
-}
-
-.quick-icon.is-brand { background: linear-gradient(135deg, var(--brand-400), var(--brand-600)); }
-.quick-icon.is-warning { background: linear-gradient(135deg, #f5b344, var(--warning-500)); }
-.quick-icon.is-info { background: linear-gradient(135deg, #9aa7b8, var(--info-500)); }
-.quick-icon.is-success { background: linear-gradient(135deg, #2bc776, var(--success-500)); }
-
-.quick-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.quick-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 2px;
-}
-
-.quick-desc {
-  font-size: 11.5px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-arrow {
-  color: var(--ink-300);
-  opacity: 0;
-  transform: translateX(-4px);
-  transition: opacity 0.16s ease, transform 0.16s ease;
-  flex-shrink: 0;
-}
-
-/* ---------- 双栏 ---------- */
-
-.split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
-  gap: var(--sp-4);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
   align-items: stretch;
 }
 
-.col-main,
-.col-side {
+.box-grid > .el-card {
   min-width: 0;
 }
 
-/* ---------- 服务器信息键值表 ---------- */
-
-.kv {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
+/* 设备状态：占满整行（参考站的列表 box 也是整行） */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
 }
 
-.kv-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  padding: 10px 0;
-  border-bottom: 1px dashed var(--ink-100);
-}
-
-.kv-row:last-child {
-  border-bottom: none;
-}
-
-.kv-row dt {
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.kv-row dd {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-primary);
-  text-align: right;
+.col-main {
   min-width: 0;
 }
 
-/* ---------- 杂项 ---------- */
-
-.count-pill {
-  display: inline-flex;
-  align-items: center;
-  height: 19px;
-  padding: 0 7px;
-  border-radius: var(--r-full);
-  background: var(--brand-50);
-  color: var(--brand-600);
-  font-size: 11.5px;
-  font-weight: 600;
+@media (max-width: 1280px) {
+  .box-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
 }
 
-.text-xs {
-  font-size: 11.5px;
-}
-
-/* ---------- 响应式 ---------- */
-
-@media (max-width: 1100px) {
-  .split {
+@media (max-width: 900px) {
+  .box-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 768px) {
-  .quick-grid {
-    grid-template-columns: repeat(auto-fit, minmax(100%, 1fr));
-  }
-  .rate-row {
-    gap: var(--sp-4);
-    padding: var(--sp-3) var(--sp-4);
   }
 }
 </style>

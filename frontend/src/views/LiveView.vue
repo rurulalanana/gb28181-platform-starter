@@ -1,5 +1,5 @@
 <template>
-  <div class="page live-page">
+  <div class="page live-page is-fill">
     <!-- 页头 -->
     <header class="page-header">
       <div class="page-title-group">
@@ -21,10 +21,23 @@
           <el-option label="WebSocket-FLV" value="wsflv" />
           <el-option label="WebRTC（低延迟）" value="webrtc" />
         </el-select>
+        <el-checkbox v-model="showName" size="small" class="tool-check">显示名称</el-checkbox>
+        <el-button
+          size="small"
+          class="rotate-btn"
+          :class="{ 'is-on': rotating }"
+          title="选择轮巡播放通道"
+          @click="rotating ? stopRotate() : openRotateDialog()"
+        >
+          <el-icon><RefreshRight /></el-icon> {{ rotating ? '停止轮播' : '轮播' }}
+        </el-button>
+        <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
+          <el-icon><FullScreen /></el-icon> 全屏
+        </el-button>
         <el-button size="small" :loading="loading" @click="loadChannels">
           <el-icon><Refresh /></el-icon> 刷新通道
         </el-button>
-        <el-button size="small" type="danger" plain :disabled="!playingCount" @click="stopAll">
+        <el-button size="small" class="stop-all" :disabled="!playingCount" @click="stopAll">
           <el-icon><SwitchButton /></el-icon> 全部停止
         </el-button>
       </div>
@@ -33,9 +46,18 @@
     <!-- 主体：视频墙 + 通道列表 -->
     <div class="live-body">
       <!-- 视频墙 -->
-      <div class="wall" :class="'wall-' + gridSize">
-        <div v-for="tile in visibleTiles" :key="tile.id" class="tile">
-          <div class="video-box">
+      <div ref="wallRef" class="wall" :class="'wall-' + gridSize">
+        <div
+          v-for="tile in visibleTiles"
+          :key="tile.id"
+          class="tile"
+          :class="{ 'is-active': tile.id === activeTileId }"
+        >
+          <!--
+            注意：不要用 @dblclick —— 播放器（jessibuca）在 canvas 上吞掉了 dblclick，
+            冒泡与捕获都收不到；这里用 click 自己判定"双击"（间隔 320ms 内点同一格）。
+          -->
+          <div class="video-box" @click="onTileClick(tile)">
             <!--
               jessibuca 会在容器内自建 canvas 渲染（支持 PCMA/PCMU 音频），
               所以这里不是 <video> 而是普通容器 div。
@@ -57,8 +79,8 @@
               @click="playTile(tile)"
             />
 
-            <!-- 左上角：通道名 + 序号 -->
-            <div v-if="tile.playing" class="tile-tag">
+            <!-- 左上角：通道名 + 序号（可用工具栏「显示名称」关掉） -->
+            <div v-if="tile.playing && showName" class="tile-tag">
               <span class="tile-index">{{ tile.id }}</span>
               <span class="ellipsis">{{ tile.channelName || tile.code }}</span>
             </div>
@@ -66,6 +88,19 @@
             <!-- 右上角：状态灯 -->
             <div v-if="tile.playing" class="tile-state" :title="tile.state">
               <span class="pulse-dot" />
+            </div>
+
+            <!-- 悬浮工具条：全屏 / 抓图 / 停止（双击画面格同样可全屏） -->
+            <div v-if="tile.playing" class="tile-tools">
+              <button class="tt-btn" title="全屏（双击画面亦可）" @click.stop="toggleFullscreen(tile)">
+                <el-icon><FullScreen /></el-icon>
+              </button>
+              <button class="tt-btn" title="抓图并下载" @click.stop="snapshot(tile)">
+                <el-icon><Camera /></el-icon>
+              </button>
+              <button class="tt-btn" title="停止播放" @click.stop="stopTile(tile)">
+                <el-icon><Close /></el-icon>
+              </button>
             </div>
           </div>
 
@@ -92,6 +127,7 @@
               v-if="!tile.playing"
               type="primary"
               size="small"
+              class="tile-btn tile-btn-play"
               :disabled="!tile.channelKey"
               @click="playTile(tile)"
             >
@@ -101,12 +137,19 @@
               <el-button
                 v-if="supportsPtz(tile.ptzType)"
                 size="small"
+                class="tile-btn"
                 title="云台控制"
                 @click="openPtz(tile)"
               >
                 <el-icon><Aim /></el-icon>
               </el-button>
-              <el-button type="danger" size="small" title="停止" @click="stopTile(tile)">
+              <el-button
+                type="danger"
+                size="small"
+                class="tile-btn tile-btn-stop"
+                title="停止"
+                @click="stopTile(tile)"
+              >
                 <el-icon><VideoPause /></el-icon>
               </el-button>
             </template>
@@ -121,6 +164,16 @@
           <span class="count-pill">{{ filteredChannels.length }}</span>
         </div>
 
+        <!-- 视图切换：平铺列表 / 按设备分组 -->
+        <div class="panel-tabs">
+          <button class="ptab" :class="{ 'is-on': panelTab === 'list' }" @click="panelTab = 'list'">
+            通道列表
+          </button>
+          <button class="ptab" :class="{ 'is-on': panelTab === 'group' }" @click="panelTab = 'group'">
+            按设备分组
+          </button>
+        </div>
+
         <div class="panel-search">
           <el-input v-model="filterText" placeholder="搜索名称或编码" clearable size="small">
             <template #prefix><el-icon><Search /></el-icon></template>
@@ -131,13 +184,16 @@
           <el-empty :description="channels.length ? '无匹配通道' : '暂无通道'" :image-size="64" />
         </div>
 
-        <div v-else class="channel-list dark-scroll">
+        <!-- 平铺列表 -->
+        <div v-else-if="panelTab === 'list'" class="channel-list dark-scroll">
           <button
             v-for="c in filteredChannels"
             :key="c.deviceId + '/' + c.id"
             class="channel-item"
             :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
+            title="单击上屏到空位，双击上屏到选中格"
             @click="pickChannel(c)"
+            @dblclick="playOnActiveTile(c)"
           >
             <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
             <span class="ch-main">
@@ -150,8 +206,77 @@
             <span v-else-if="!c.deviceOnline" class="ch-offline">离线</span>
           </button>
         </div>
+
+        <!-- 按设备分组（同一台设备下的通道折叠在一起） -->
+        <div v-else class="channel-list dark-scroll">
+          <div v-for="g in channelGroups" :key="g.deviceId" class="ch-group">
+            <button class="ch-group-head" @click="toggleGroup(g.deviceId)">
+              <el-icon :size="11">
+                <ArrowDown v-if="expandedDevices.has(g.deviceId)" />
+                <ArrowRight v-else />
+              </el-icon>
+              <span class="ch-dot" :class="g.online ? 'is-online' : 'is-offline'" />
+              <span class="ch-group-main">
+                <span class="ch-group-name ellipsis">{{ g.deviceName }}</span>
+                <span class="ch-group-code mono ellipsis">{{ g.deviceId }}</span>
+              </span>
+              <span class="ch-group-count">{{ g.channels.length }}</span>
+            </button>
+            <div v-show="expandedDevices.has(g.deviceId)" class="ch-group-body">
+              <button
+                v-for="c in g.channels"
+                :key="c.id"
+                class="channel-item"
+                :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
+                title="单击上屏到空位，双击上屏到选中格"
+                @click="pickChannel(c)"
+                @dblclick="playOnActiveTile(c)"
+              >
+                <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
+                <span class="ch-main">
+                  <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
+                  <span class="ch-code mono ellipsis">{{ c.id }}</span>
+                </span>
+                <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
+                  <span class="pulse-dot" />
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
       </aside>
     </div>
+
+    <!-- 轮播设置：选择轮巡通道 + 间隔（参考站的「轮播」是弹窗多选，不是直接开跑） -->
+    <el-dialog v-model="rotateDialog" title="选择轮巡播放通道" width="520px" append-to-body>
+      <div class="rotate-tip">
+        勾选参与轮巡的在线通道，按当前分屏格数分批轮换；不勾选则轮巡全部在线通道。
+      </div>
+      <div class="rotate-list dark-scroll">
+        <el-checkbox-group v-model="rotatePicked">
+          <el-checkbox
+            v-for="c in onlineChannels"
+            :key="c.deviceId + '/' + c.id"
+            :value="c.deviceId + '/' + c.id"
+          >
+            {{ c.customName || c.name || c.id }}
+            <span class="mono text-dim">{{ c.id }}</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <div v-if="!onlineChannels.length" class="rotate-empty">当前没有在线通道</div>
+      </div>
+      <div class="rotate-sec">
+        轮巡间隔
+        <el-input-number v-model="rotateSeconds" :min="5" :max="300" :step="5" size="small" />
+        秒
+      </div>
+      <template #footer>
+        <el-button @click="rotateDialog = false">取消</el-button>
+        <el-button type="primary" :disabled="!onlineChannels.length" @click="confirmRotate">
+          开始轮巡
+        </el-button>
+      </template>
+    </el-dialog>
 
     <!-- 云台控制抽屉 -->
     <el-drawer
@@ -177,6 +302,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
@@ -200,12 +326,43 @@ const containerRefs = {}
 /** 播放器状态监听停止句柄。 */
 const stoppers = {}
 
+/** 当前选中的画面格（加 2px 强调描边，方便看清操作的是哪一格）。 */
+const activeTileId = ref(1)
+/** 视频墙容器（整体全屏用）。 */
+const wallRef = ref(null)
+/** 是否在画面上显示通道名（工具栏可关）。 */
+const showName = ref(true)
+/** 通道面板视图：list=平铺列表，group=按设备分组。 */
+const panelTab = ref('list')
+/** 已展开的设备（分组视图）。 */
+const expandedDevices = ref(new Set())
+
+/** 轮播状态（间隔由弹窗里的 rotateSeconds 决定）。 */
+const rotating = ref(false)
+let rotateTimer = null
+let rotateIndex = 0
+
+/** 真正参与轮巡的通道：勾选过就只轮这些，否则轮全部在线通道。 */
+const rotatePool = computed(() => {
+  const all = onlineChannels.value
+  if (!rotateKeys.value.length) return all
+  const set = new Set(rotateKeys.value)
+  return all.filter((c) => set.has(`${c.deviceId}/${c.id}`))
+})
+
+/** 轮播设置弹窗（先选通道再开跑）。 */
+const rotateDialog = ref(false)
+const rotatePicked = ref([])
+/** 已确认的轮巡集合（空 = 全部在线通道）。 */
+const rotateKeys = ref([])
+const rotateSeconds = ref(15)
+
 const ptzDrawer = ref(false)
 const ptzTile = ref(null)
 
-/** 画面格子。 */
+/** 画面格子（最多 16 格，对应 16 分屏）。 */
 const tiles = ref(
-  Array.from({ length: 9 }, (_, i) => ({
+  Array.from({ length: 16 }, (_, i) => ({
     id: i + 1,
     channelKey: '',
     serial: '',
@@ -237,6 +394,184 @@ const playingCount = computed(() => tiles.value.filter((t) => t.playing).length)
 const usedKeys = computed(
   () => new Set(tiles.value.filter((t) => t.channelKey).map((t) => t.channelKey))
 )
+
+/** 在线通道（轮播数据源）。 */
+const onlineChannels = computed(() => channels.value.filter((c) => c.deviceOnline))
+
+/** 分组视图：按设备归拢通道，设备在线状态取该设备下任一通道。 */
+const channelGroups = computed(() => {
+  const map = new Map()
+  for (const c of filteredChannels.value) {
+    if (!map.has(c.deviceId)) {
+      map.set(c.deviceId, {
+        deviceId: c.deviceId,
+        deviceName: c.deviceName || c.deviceCustomName || c.deviceId,
+        online: false,
+        channels: []
+      })
+    }
+    const g = map.get(c.deviceId)
+    g.channels.push(c)
+    if (c.deviceOnline) g.online = true
+  }
+  return [...map.values()]
+})
+
+function toggleGroup(deviceId) {
+  const set = expandedDevices.value
+  if (set.has(deviceId)) set.delete(deviceId)
+  else set.add(deviceId)
+}
+
+/** 轮播一次：把「格数」个轮巡通道按顺序铺到当前可见的格子上。 */
+function rotateOnce() {
+  const list = rotatePool.value
+  const cells = visibleTiles.value
+  if (!list.length || !cells.length) return
+  cells.forEach((tile, i) => {
+    const ch = list[(rotateIndex + i) % list.length]
+    if (tile.playing) stopTile(tile)
+    tile.channelKey = `${ch.deviceId}/${ch.id}`
+    applyChannel(tile, ch)
+    playTile(tile)
+  })
+  rotateIndex = (rotateIndex + cells.length) % list.length
+}
+
+function openRotateDialog() {
+  // 默认全选在线通道，方便直接开跑
+  rotatePicked.value = rotateKeys.value.length
+    ? [...rotateKeys.value]
+    : onlineChannels.value.map((c) => `${c.deviceId}/${c.id}`)
+  rotateDialog.value = true
+}
+
+function confirmRotate() {
+  rotateKeys.value = [...rotatePicked.value]
+  rotateDialog.value = false
+  rotateIndex = 0
+  startRotate()
+}
+
+function startRotate() {
+  if (rotatePool.value.length < 2) {
+    ElMessage.warning('参与轮巡的通道不足 2 路，无法轮播')
+    return
+  }
+  rotating.value = true
+  rotateOnce()
+  rotateTimer = setInterval(rotateOnce, Math.max(5, rotateSeconds.value) * 1000)
+}
+
+function stopRotate() {
+  rotating.value = false
+  if (rotateTimer) {
+    clearInterval(rotateTimer)
+    rotateTimer = null
+  }
+}
+
+/** 双击通道：直接上屏到当前选中的画面格。 */
+function playOnActiveTile(channel) {
+  const tile =
+    visibleTiles.value.find((t) => t.id === activeTileId.value) || visibleTiles.value[0]
+  if (!tile) return
+  if (tile.playing) stopTile(tile)
+  tile.channelKey = `${channel.deviceId}/${channel.id}`
+  applyChannel(tile, channel)
+  playTile(tile)
+}
+
+/** 画面格点击：单选该格；320ms 内再次点击同一格视为双击 → 切换全屏。 */
+const tileClick = { id: 0, ts: 0 }
+
+function onTileClick(tile) {
+  activeTileId.value = tile.id
+  const now = Date.now()
+  if (tileClick.id === tile.id && now - tileClick.ts < 320) {
+    tileClick.ts = 0
+    toggleFullscreen(tile)
+    return
+  }
+  tileClick.id = tile.id
+  tileClick.ts = now
+}
+
+/** 双击画面格 / 工具条按钮：进入或退出全屏。 */
+function toggleFullscreen(tile) {
+  const host = containerRefs[tile.id]
+  const box = host?.closest?.('.video-box')
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.()
+    return
+  }
+  if (box?.requestFullscreen) {
+    box.requestFullscreen().catch(() => ElMessage.warning('当前浏览器不允许全屏'))
+  }
+}
+
+/** 视频墙整体全屏（工具栏「全屏」按钮）。 */
+function toggleWallFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.()
+    return
+  }
+  const el = wallRef.value
+  if (el?.requestFullscreen) {
+    el.requestFullscreen().catch(() => ElMessage.warning('当前浏览器不允许全屏'))
+  }
+}
+
+/** 抓图：jessibuca 渲染在 canvas 上，WebRTC 走 video，两条路都支持。 */
+function snapshot(tile) {
+  const host = containerRefs[tile.id]
+  let url = null
+  const canvas = host?.querySelector('canvas')
+  if (canvas && canvas.width) {
+    url = canvas.toDataURL('image/png')
+  } else {
+    const video = host?.querySelector('video')
+    if (video && video.videoWidth) {
+      const c = document.createElement('canvas')
+      c.width = video.videoWidth
+      c.height = video.videoHeight
+      c.getContext('2d').drawImage(video, 0, 0, c.width, c.height)
+      url = c.toDataURL('image/png')
+    }
+  }
+  if (!url) {
+    ElMessage.warning('当前画面还取不到图像，稍后再试')
+    return
+  }
+  const name = tile.channelName || tile.code || tile.id
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${name}-${Date.now()}.png`
+  a.click()
+  ElMessage.success('已保存抓图')
+}
+
+/**
+ * 地址栏带 ?play=<设备编码>/<通道编码>（可逗号分隔多个）时自动上屏，
+ * 供设备/通道列表的「上屏预览」直接跳过来播放。
+ */
+async function applyQueryPlay() {
+  const raw = String(route.query.play || '').trim()
+  if (!raw) return
+  const keys = raw.split(',').map((x) => x.trim()).filter(Boolean)
+  const cells = visibleTiles.value
+  keys.slice(0, cells.length).forEach((key, i) => {
+    const ch = channels.value.find((c) => `${c.deviceId}/${c.id}` === key)
+    const tile = cells[i]
+    if (!ch || !tile) return
+    if (tile.playing) stopTile(tile)
+    tile.channelKey = key
+    applyChannel(tile, ch)
+    playTile(tile)
+  })
+  // 清掉 query，避免刷新页面重复上屏
+  router.replace({ path: '/live' })
+}
 
 const filteredChannels = computed(() => {
   const needle = (filterText.value || '').trim().toLowerCase()
@@ -413,9 +748,16 @@ function openPtz(tile) {
   ptzDrawer.value = true
 }
 
-onMounted(loadChannels)
+const route = useRoute()
+const router = useRouter()
+
+onMounted(async () => {
+  await loadChannels()
+  await applyQueryPlay()
+})
 
 onUnmounted(() => {
+  stopRotate()
   for (const id of Object.keys(players)) {
     players[id].api.stop()
   }
@@ -429,8 +771,11 @@ onUnmounted(() => {
 /* ============ 布局 ============ */
 
 .live-page {
-  /* 视频墙要吃掉剩余高度，不随内容滚动 */
+  /* 视频墙要吃掉内容区的剩余高度，不随内容滚动。
+     注意：.page 是 flex 列容器但没有高度，需要从 .content（flex:1）
+     一路继承下来，这里用 min-height:0 + flex 允许子项收缩。 */
   height: 100%;
+  min-height: 0;
 }
 
 .live-body {
@@ -447,10 +792,19 @@ onUnmounted(() => {
   display: grid;
   gap: var(--sp-3);
   min-width: 0;
-  align-content: start;
+  min-height: 0;
+  /* 格子按可用高度均分，避免底部留白 */
+  align-content: stretch;
+  grid-auto-rows: minmax(0, 1fr);
 }
 
-.wall-1 { grid-template-columns: minmax(0, 1fr); }
+/* 单画面：宽度铺满且限制最大宽度，避免超宽屏上画面变形过大 */
+.wall-1 {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
 .wall-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .wall-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .wall-9 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -465,14 +819,13 @@ onUnmounted(() => {
 
 /* ============ 画面格 ============ */
 
+/* 画面格：靠 1px 内描边区分边界，不用投影（投影会让视频墙显得"漂浮"） */
 .tile .video-box {
-  border-radius: var(--r-lg);
-  box-shadow: var(--sh-sm);
-  transition: box-shadow 0.18s ease;
+  border-radius: var(--r-md);
 }
 
 .tile:hover .video-box {
-  box-shadow: var(--sh-md);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
 /* 空闲遮罩 */
@@ -483,21 +836,26 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  color: rgba(255, 255, 255, 0.42);
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.22);
   pointer-events: none;
   text-align: center;
   padding: var(--sp-3);
 }
 
+.tile-overlay .el-icon {
+  font-size: 24px;
+  margin-bottom: 2px;
+}
+
 .overlay-text {
-  font-size: 12.5px;
-  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
 }
 
 .overlay-hint {
-  font-size: 11.5px;
-  color: rgba(255, 255, 255, 0.32);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.28);
 }
 
 /* 整块可点层（避免与遮罩的 pointer-events 冲突） */
@@ -530,12 +888,13 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 15px;
-  height: 15px;
+  min-width: 14px;
+  height: 14px;
   padding: 0 3px;
-  border-radius: 3px;
-  background: var(--brand-500);
-  color: #fff;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.9);
+  font-family: var(--mono);
   font-size: 10px;
   font-weight: 600;
   flex-shrink: 0;
@@ -551,16 +910,101 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* 格内工具条 */
+/* 格内工具条：与画面同宽的一条窄带，按钮压到 26px 与输入框等高 */
 .tile-bar {
   display: flex;
   align-items: center;
   gap: 5px;
+  height: var(--control-h);
 }
 
 .tile-select {
   flex: 1;
   min-width: 0;
+}
+
+.tile-btn {
+  width: 30px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+/* 播放：实色主按钮；停止：只在图标上着红，不做整块红色按钮 */
+.tile-btn-stop {
+  background: var(--white);
+  border-color: var(--line);
+  color: var(--danger-500);
+}
+
+.tile-btn-stop:hover {
+  background: var(--danger-50);
+  border-color: var(--danger-500);
+  color: var(--danger-500);
+}
+
+/* 播放按钮：默认描边幽灵态——视频墙上不该有 4 个实心蓝块抢视线 */
+.tile-btn-play {
+  background: var(--white);
+  border-color: var(--line);
+  color: var(--accent);
+}
+
+.tile-btn-play:hover:not(.is-disabled) {
+  background: var(--brand-50);
+  border-color: var(--brand-300);
+  color: var(--accent-ink);
+}
+
+.tile-btn-play.is-disabled {
+  background: var(--white);
+  border-color: var(--line);
+  color: var(--ink-300);
+}
+
+/* 格内下拉：不聚焦/不悬停时无边框（视频墙不是表单），避免每格都像输入框 */
+.tile-select :deep(.el-select__wrapper) {
+  background: transparent;
+  box-shadow: 0 0 0 1px transparent inset;
+}
+
+.tile-select :deep(.el-select__wrapper:hover) {
+  background: var(--white);
+  box-shadow: 0 0 0 1px var(--line) inset;
+}
+
+.tile-select :deep(.el-select__wrapper.is-focused) {
+  background: var(--white);
+}
+
+/* 顶部"全部停止"：默认态朴素，hover 才提示危险 */
+.stop-all {
+  color: var(--danger-500);
+}
+
+.stop-all:hover:not(.is-disabled) {
+  border-color: var(--danger-500);
+  color: var(--danger-500);
+  background: var(--danger-50);
+}
+
+/* 分屏切换（1/4/6/9/16）压到与其它控件同高，避免顶栏高低不齐 */
+.page-actions :deep(.el-radio-button__inner) {
+  height: 26px;
+  line-height: 24px;
+  min-width: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  font-weight: 600;
+  border-color: var(--line);
+}
+
+.page-actions :deep(.el-radio-button:first-child .el-radio-button__inner) {
+  border-radius: var(--r-md) 0 0 var(--r-md);
+}
+
+.page-actions :deep(.el-radio-button:last-child .el-radio-button__inner) {
+  border-radius: 0 var(--r-md) var(--r-md) 0;
 }
 
 /* ============ 通道列表面板 ============ */
@@ -570,9 +1014,8 @@ onUnmounted(() => {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-surface);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  box-shadow: var(--sh-xs);
   overflow: hidden;
 }
 
@@ -589,18 +1032,6 @@ onUnmounted(() => {
   font-size: 13.5px;
   font-weight: 600;
   color: var(--text-primary);
-}
-
-.count-pill {
-  display: inline-flex;
-  align-items: center;
-  height: 19px;
-  padding: 0 7px;
-  border-radius: var(--r-full);
-  background: var(--brand-50);
-  color: var(--brand-600);
-  font-size: 11.5px;
-  font-weight: 600;
 }
 
 .panel-search {
@@ -622,14 +1053,15 @@ onUnmounted(() => {
 }
 
 .channel-item {
+  position: relative;
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  margin-bottom: 2px;
+  padding: 5px 8px;
+  margin-bottom: 1px;
   border: none;
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   background: transparent;
   cursor: pointer;
   text-align: left;
@@ -641,17 +1073,29 @@ onUnmounted(() => {
   background: var(--ink-50);
 }
 
+/* 已上屏：浅底 + 左侧强调条（和侧栏选中态同一套语言） */
 .channel-item.is-used {
   background: var(--brand-50);
 }
 
-/* 离线通道整体降透明度 */
+.channel-item.is-used::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+/* 离线通道降透明度，但仍可读（运维需要看得到离线设备） */
 .channel-item.is-offline {
-  opacity: 0.55;
+  opacity: 0.62;
 }
 
 .channel-item.is-offline:hover {
-  opacity: 0.8;
+  opacity: 0.85;
 }
 
 .ch-dot {
@@ -662,7 +1106,7 @@ onUnmounted(() => {
 }
 
 .ch-dot.is-online {
-  background: var(--success-500);
+  background: var(--online-500);
 }
 
 .ch-dot.is-offline {
@@ -684,8 +1128,9 @@ onUnmounted(() => {
 }
 
 .ch-code {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-tertiary);
+  letter-spacing: -0.2px;
 }
 
 .ch-playing {
@@ -698,6 +1143,195 @@ onUnmounted(() => {
   font-size: 11px;
   color: var(--text-tertiary);
   flex-shrink: 0;
+}
+
+/* 画面格悬浮工具条：默认透明，鼠标移入才出现（不干扰看画面） */
+.tile-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tile:hover .tile-tools,
+.tile.is-active .tile-tools {
+  opacity: 1;
+}
+
+.tt-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--r-sm);
+  background: rgba(8, 12, 18, 0.62);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tt-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 画面格右上角状态灯与工具条不要叠在一起 */
+.tile-state {
+  right: 10px;
+}
+
+.tile:hover .tile-state {
+  display: none;
+}
+
+/* 轮播设置弹窗 */
+.rotate-tip {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-3);
+}
+
+.rotate-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rotate-list :deep(.el-checkbox) {
+  height: 28px;
+  margin-right: 0;
+}
+
+.rotate-list .mono {
+  margin-left: 6px;
+  color: var(--text-tertiary);
+}
+
+.rotate-empty {
+  padding: var(--sp-4) 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+}
+
+.rotate-sec {
+  margin-top: var(--sp-3);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* 选中的画面格：2px 强调描边 */
+.tile.is-active .video-box {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 工具栏里的开关与轮播按钮 */
+.tool-check {
+  height: 26px;
+  margin-right: 2px;
+}
+
+.rotate-btn.is-on {
+  color: var(--accent-ink);
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+
+/* 通道面板：列表/分组 页签 */
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.ptab {
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-500);
+  cursor: pointer;
+}
+
+.ptab:hover {
+  color: var(--ink-700);
+}
+
+.ptab.is-on {
+  color: var(--accent-ink);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* 分组视图 */
+.ch-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-600);
+  cursor: pointer;
+  text-align: left;
+}
+
+.ch-group-head:hover {
+  background: var(--ink-50);
+}
+
+.ch-group-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.ch-group-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-700);
+}
+
+.ch-group-code {
+  font-size: 10.5px;
+  color: var(--ink-400);
+}
+
+.ch-group-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-400);
+}
+
+.ch-group-body {
+  padding-left: 10px;
 }
 
 /* ============ 响应式 ============ */

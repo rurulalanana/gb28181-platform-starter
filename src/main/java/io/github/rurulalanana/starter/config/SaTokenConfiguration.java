@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.config;
 import cn.dev33.satoken.dao.SaTokenDao;
 import cn.dev33.satoken.interceptor.SaInterceptor;
 import cn.dev33.satoken.stp.StpUtil;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -12,7 +13,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import javax.sql.DataSource;
 
 /**
- * Web 层配置：Sa-Token 登录校验 + 会话持久化。
+ * Web 层配置：Sa-Token 登录校验 + 会话持久化 + 操作日志。
  *
  * <p>只对 {@code /api/v1/**} 做鉴权（GBS 风格的平台接口）；
  * 前端静态资源与 {@code /api/v1/webrtc/**}（播放器无法携带登录态）豁免。
@@ -22,7 +23,10 @@ import javax.sql.DataSource;
  */
 @Slf4j
 @Configuration
+@RequiredArgsConstructor
 public class SaTokenConfiguration implements WebMvcConfigurer {
+
+    private final OperationLogInterceptor operationLogInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -34,6 +38,9 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                         // 流地址 / WebRTC 交换（播放器无法携带登录态）
                         "/api/v1/webrtc/**"
                 );
+        // 操作日志：记录 /api/v1/** 的接口调用（排除项在拦截器内部处理）
+        registry.addInterceptor(operationLogInterceptor)
+                .addPathPatterns("/api/v1/**");
     }
 
     /**

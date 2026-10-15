@@ -29,6 +29,23 @@
               <span class="mono">{{ row.value }}</span>
             </el-descriptions-item>
           </el-descriptions>
+
+          <!-- 服务管理：远程重启（对齐 LiveGBS 的「版本信息」页） -->
+          <div class="server-actions">
+            <div class="sa-tip">
+              重启为优雅停机，依赖进程守护自动拉起（约 10 秒恢复）；登录态已持久化，无需重新登录。
+            </div>
+            <el-button
+              type="danger"
+              plain
+              size="small"
+              :loading="restarting"
+              @click="restartServer"
+            >
+              <el-icon><RefreshRight /></el-icon>
+              {{ restarting ? '重启中…' : '重启服务' }}
+            </el-button>
+          </div>
         </el-card>
       </el-col>
 
@@ -148,7 +165,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemApi, webrtcApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
@@ -156,6 +173,7 @@ const auth = useAuthStore()
 const router = useRouter()
 
 const saving = ref(false)
+const restarting = ref(false)
 const pwd = reactive({ oldpassword: '', newpassword: '', confirm: '' })
 const server = computed(() => auth.serverInfo || {})
 const mediaIp = ref('')
@@ -208,6 +226,48 @@ async function loadServer() {
   }
 }
 
+/**
+ * 重启平台服务（需服务由守护进程拉起，否则重启后不会自动恢复）。
+ *
+ * <p>重启后轮询探测恢复：登录态已持久化（sa_token_store），
+ * 服务起来后旧 token 依然有效，无需重新登录。
+ */
+async function restartServer() {
+  try {
+    await ElMessageBox.confirm(
+      '确定重启平台服务？\n\n服务将优雅停机并由守护进程自动拉起（约 10 秒），期间功能暂停。\n若服务没有守护进程（裸 java -jar 启动），重启后不会自动恢复。',
+      '重启确认',
+      { type: 'warning', confirmButtonText: '重启', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  restarting.value = true
+  try {
+    await systemApi.restart(true)
+  } catch (e) {
+    // 请求可能因服务退出而中断，忽略
+  }
+  ElMessage.info('服务重启中，正在等待恢复…')
+
+  const startedAt = Date.now()
+  const timer = setInterval(async () => {
+    try {
+      await systemApi.serverinfo()
+      clearInterval(timer)
+      restarting.value = false
+      ElMessage.success('服务已恢复')
+      loadServer()
+    } catch (e) {
+      if (Date.now() - startedAt > 90000) {
+        clearInterval(timer)
+        restarting.value = false
+        ElMessage.warning('等待恢复超时，请检查服务是否已由守护进程拉起')
+      }
+    }
+  }, 2500)
+}
+
 async function changePassword() {
   if (!pwd.oldpassword || !pwd.newpassword) {
     ElMessage.warning('请填写完整')
@@ -247,6 +307,26 @@ onMounted(() => {
   display: flex;
   align-items: center;
   margin-top: 8px;
+}
+
+/* 服务管理：重启按钮区 */
+.server-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.server-actions .sa-tip {
+  flex: 1;
+  min-width: 220px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
 }
 
 .hint-grid {

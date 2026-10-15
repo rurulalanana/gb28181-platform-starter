@@ -8,7 +8,9 @@ export const systemApi = {
   logout: () => get('/logout'),
   userinfo: () => get('/userinfo'),
   serverinfo: () => get('/getserverinfo'),
-  modifyPassword: (payload) => post('/modifypassword', null, payload)
+  modifyPassword: (payload) => post('/modifypassword', null, payload),
+  /** 远程重启（force=true 确认进程有守护会自动拉起）。 */
+  restart: (force = true) => post('/restart', { force })
 }
 
 /** 设备与通道接口（`/api/v1/device/*`）。 */
@@ -114,6 +116,12 @@ export const alarmApi = {
   info: (id) => get('/alarm/info', { id }),
   remove: (id) => post('/alarm/remove', { id }),
   clear: () => post('/alarm/clear')
+}
+
+/** 操作日志接口（`/api/v1/oplog/*`）。 */
+export const opLogApi = {
+  list: (params) => get('/oplog/list', params),
+  clear: () => post('/oplog/clear')
 }
 
 /** 级联接口（`/api/v1/cascade/*`）。 */

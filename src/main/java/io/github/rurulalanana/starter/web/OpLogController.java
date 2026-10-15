@@ -1,0 +1,57 @@
+package io.github.rurulalanana.starter.web;
+
+import cn.dev33.satoken.stp.StpUtil;
+import io.github.rurulalanana.starter.common.ApiResponse;
+import io.github.rurulalanana.starter.service.OperationLogService;
+import io.github.rurulalanana.starter.vo.DeletedVo;
+import io.github.rurulalanana.starter.vo.OpLogListVo;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * 操作日志接口（对齐 LiveGBS 的「操作日志」页）。
+ *
+ * <pre>
+ * GET  /api/v1/oplog/list    分页查询（method 筛选 + keyword 关键字）
+ * POST /api/v1/oplog/clear   清空全部
+ * </pre>
+ *
+ * <p>日志由 {@code OperationLogInterceptor} 自动记录，本控制器只负责查询与清空。
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/v1/oplog")
+@RequiredArgsConstructor
+public class OpLogController {
+
+    private final OperationLogService operationLogService;
+
+    /** 分页查询。 */
+    @GetMapping("/list")
+    public ApiResponse<OpLogListVo> list(@RequestParam(defaultValue = "0") int start,
+                                         @RequestParam(defaultValue = "100") int limit,
+                                         @RequestParam(required = false) String method,
+                                         @RequestParam(required = false) String keyword) {
+        StpUtil.checkLogin();
+        OpLogListVo vo = new OpLogListVo();
+        vo.setOpLogCount(operationLogService.count(method, keyword));
+        vo.setOpLogList(operationLogService.list(method, keyword, start, limit));
+        return ApiResponse.ok(vo);
+    }
+
+    /** 清空全部日志。 */
+    @PostMapping("/clear")
+    public ApiResponse<DeletedVo> clear() {
+        StpUtil.checkLogin();
+        int deleted = operationLogService.clear();
+        log.info("操作日志已清空：{} 条", deleted);
+        DeletedVo vo = new DeletedVo();
+        vo.setDeleted(deleted);
+        return ApiResponse.ok(vo);
+    }
+}

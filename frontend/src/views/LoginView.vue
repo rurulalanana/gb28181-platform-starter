@@ -1,49 +1,14 @@
 <template>
   <div class="login">
-    <!-- 左侧品牌区：桌面端展示，移动端隐藏 -->
-    <section class="hero">
-      <div class="hero-inner">
-        <div class="hero-brand">
-          <div class="hero-mark"><el-icon :size="22"><VideoCamera /></el-icon></div>
-          <span class="hero-name">GB28181 视频平台</span>
-        </div>
+    <div class="login-box">
+      <!-- 顶部石板灰标题条（参考站同款） -->
+      <div class="login-head">GB28181 视频平台 · 登录</div>
 
-        <h1 class="hero-title">
-          国标视频监控<br />一体化管理平台
-        </h1>
-        <p class="hero-desc">
-          符合 GB/T 28181—2022 信令规范，内置 SIP 信令网关与 ZLMediaKit 流媒体内核，
-          支持设备接入、实时预览、历史回放、云端录像与级联共享。
-        </p>
-
-        <ul class="hero-features">
-          <li v-for="f in features" :key="f.title">
-            <el-icon class="feat-icon"><component :is="f.icon" /></el-icon>
-            <div>
-              <b>{{ f.title }}</b>
-              <span>{{ f.desc }}</span>
-            </div>
-          </li>
-        </ul>
-      </div>
-
-      <!-- 装饰网格 -->
-      <div class="hero-grid" />
-      <div class="hero-glow" />
-    </section>
-
-    <!-- 右侧登录表单 -->
-    <section class="panel">
-      <div class="panel-inner">
-        <header class="panel-head">
-          <h2>登录</h2>
-          <p>请输入您的账号信息以继续</p>
-        </header>
-
+      <div class="login-body">
         <el-form :model="form" @submit.prevent="onSubmit" size="large" class="login-form">
           <el-form-item>
             <el-input v-model="form.username" placeholder="用户名" clearable autocomplete="username">
-              <template #prefix><el-icon><User /></el-icon></template>
+              <template #suffix><el-icon><User /></el-icon></template>
             </el-input>
           </el-form-item>
 
@@ -56,7 +21,7 @@
               autocomplete="current-password"
               @keyup.enter="onSubmit"
             >
-              <template #prefix><el-icon><Lock /></el-icon></template>
+              <template #suffix><el-icon><Lock /></el-icon></template>
             </el-input>
           </el-form-item>
 
@@ -69,23 +34,17 @@
             class="login-alert"
           />
 
-          <el-button
-            type="primary"
-            size="large"
-            class="submit"
-            :loading="loading"
-            @click="onSubmit"
-          >
+          <el-button type="primary" class="submit" :loading="loading" @click="onSubmit">
             {{ loading ? '登录中…' : '登 录' }}
           </el-button>
         </el-form>
-
-        <div class="panel-tip">
-          <el-icon><InfoFilled /></el-icon>
-          <span>默认账号 <b class="mono">admin / admin123</b>，首次部署后请及时修改</span>
-        </div>
       </div>
-    </section>
+
+      <!-- 底部信息条 -->
+      <div class="login-foot">
+        <span>默认账号 <code>admin / admin123</code>，首次部署后请及时修改</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -127,221 +86,89 @@ async function onSubmit() {
 </script>
 
 <style scoped>
+/* 参考站登录页：浅灰底 + 细网格 + 居中白卡（石板灰标题条 + 底部信息条） */
 .login {
-  display: flex;
   min-height: 100vh;
-  background: var(--bg-surface);
-}
-
-/* ============ 左侧品牌区 ============ */
-
-.hero {
-  position: relative;
-  flex: 1.15;
-  display: flex;
-  align-items: center;
-  padding: 0 6vw;
-  overflow: hidden;
-  background: linear-gradient(150deg, #101828 0%, #16233c 45%, #1b3a6b 100%);
-}
-
-.hero-inner {
-  position: relative;
-  z-index: 2;
-  max-width: 460px;
-}
-
-.hero-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 40px;
-}
-
-.hero-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(47, 109, 246, 0.45);
-}
-
-.hero-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
-  letter-spacing: 0.4px;
-}
-
-.hero-title {
-  margin: 0 0 18px;
-  font-size: 38px;
-  font-weight: 700;
-  line-height: 1.28;
-  letter-spacing: -0.8px;
-  color: #fff;
-}
-
-.hero-desc {
-  margin: 0 0 40px;
-  font-size: 14px;
-  line-height: 1.85;
-  color: rgba(255, 255, 255, 0.58);
-}
-
-.hero-features {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.hero-features li {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.feat-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: var(--brand-300);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 15px;
-  flex-shrink: 0;
-}
-
-.hero-features b {
-  display: block;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.92);
-  margin-bottom: 2px;
-}
-
-.hero-features span {
-  font-size: 12.5px;
-  color: rgba(255, 255, 255, 0.45);
-}
-
-/* 装饰 */
-.hero-grid {
-  position: absolute;
-  inset: 0;
+  padding: 24px;
+  background-color: #f0f2f6;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse at 30% 50%, #000 20%, transparent 72%);
-  z-index: 1;
+    linear-gradient(rgba(0, 0, 0, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.028) 1px, transparent 1px);
+  background-size: 26px 26px;
 }
 
-.hero-glow {
-  position: absolute;
-  width: 460px;
-  height: 460px;
-  right: -140px;
-  bottom: -160px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(47, 109, 246, 0.28), transparent 68%);
-  z-index: 1;
+.login-box {
+  width: 380px;
+  max-width: 100%;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow: var(--sh-md);
+  overflow: hidden;
 }
 
-/* ============ 右侧表单 ============ */
-
-.panel {
-  flex: 1;
-  min-width: 420px;
+.login-head {
+  height: 62px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px 5vw;
+  background: var(--bg-sidebar);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
-.panel-inner {
-  width: 100%;
-  max-width: 340px;
-}
-
-.panel-head {
-  margin-bottom: 28px;
-}
-
-.panel-head h2 {
-  margin: 0 0 6px;
-  font-size: 25px;
-  font-weight: 680;
-  letter-spacing: -0.5px;
-  color: var(--text-primary);
-}
-
-.panel-head p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--text-secondary);
+.login-body {
+  padding: 22px 26px 18px;
 }
 
 .login-form :deep(.el-form-item) {
-  margin-bottom: var(--sp-4);
+  margin-bottom: var(--sp-3);
 }
 
 .login-form :deep(.el-input__wrapper) {
-  height: 44px;
-  padding: 0 14px;
+  height: 36px;
+  padding: 0 11px;
+}
+
+/* 输入框内的图标放右侧（参考站同款），灰一点 */
+.login-form :deep(.el-input__suffix .el-icon) {
+  color: var(--ink-400);
+  font-size: 15px;
 }
 
 .login-alert {
-  margin-bottom: var(--sp-4);
-  border-radius: var(--r-md);
+  margin-bottom: var(--sp-3);
+  border-radius: var(--r-sm);
 }
 
 .submit {
   width: 100%;
-  height: 44px;
-  font-size: 14.5px;
+  height: 36px;
+  font-size: 13.5px;
   font-weight: 600;
-  letter-spacing: 3px;
-  border-radius: var(--r-lg);
-  box-shadow: 0 6px 18px rgba(47, 109, 246, 0.28);
+  border-radius: var(--r-sm);
+  letter-spacing: 2px;
 }
 
-.panel-tip {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 26px;
-  padding: 10px 12px;
-  border-radius: var(--r-md);
-  background: var(--brand-50);
-  border: 1px solid var(--brand-100);
+.login-foot {
+  padding: 10px 26px;
+  border-top: 1px solid var(--line);
   font-size: 12px;
-  color: var(--brand-800);
+  color: var(--ink-500);
 }
 
-.panel-tip b {
-  color: var(--brand-700);
-}
-
-/* ============ 响应式 ============ */
-
-@media (max-width: 900px) {
-  .hero {
-    display: none;
-  }
-  .panel {
-    min-width: 0;
-    padding: 32px 20px;
-  }
+.login-foot code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  background: var(--ink-50);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--ink-700);
 }
 </style>

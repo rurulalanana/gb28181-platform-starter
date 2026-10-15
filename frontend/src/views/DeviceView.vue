@@ -41,10 +41,10 @@
     <el-card shadow="never">
 
       <el-table v-loading="loading" :data="devices" stripe>
-        <el-table-column prop="id" label="设备编码" min-width="190">
+        <el-table-column prop="id" label="设备编码" min-width="190" sortable>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="180">
+        <el-table-column label="名称" min-width="180" :sort-by="(r) => r.customName || r.name || ''" sortable>
           <template #default="{ row }">
             <!--
               行内编辑：点即改。设备名常被上报成统一型号名，而改名是高频操作，
@@ -76,7 +76,7 @@
         <el-table-column label="IP 地址" min-width="140">
           <template #default="{ row }"><span class="mono">{{ row.remoteIp || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="通道数" width="80" align="center">
+        <el-table-column prop="channelCount" label="通道数" width="80" align="center" sortable>
           <template #default="{ row }">{{ row.channelCount ?? 0 }}</template>
         </el-table-column>
         <el-table-column label="最后注册" min-width="160">
@@ -87,7 +87,12 @@
         <el-table-column label="操作" width="150" fixed="right" align="center">
           <template #default="{ row }">
             <div class="row-actions">
-            <el-tooltip content="采集全量数据">
+            <el-tooltip content="查看该设备的通道">
+              <el-button link type="primary" @click="viewChannels(row)">
+                <el-icon><List /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="更新通道（重新拉取目录）">
               <el-button
                 link
                 type="primary"
@@ -180,12 +185,14 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { deviceApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
 
 const auth = useAuthStore()
+const router = useRouter()
 
 const devices = ref([])
 const loading = ref(false)
@@ -257,6 +264,11 @@ async function load() {
 function search() {
   reset()
   load()
+}
+
+/** 查看该设备的通道（跳转通道管理页并带上设备筛选）。 */
+function viewChannels(row) {
+  router.push({ path: '/channels', query: { serial: row.id } })
 }
 
 async function collect(row) {

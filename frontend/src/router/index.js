@@ -70,6 +70,12 @@ const routes = [
         meta: { title: '用户管理', icon: 'mdi-account-group', admin: true }
       },
       {
+        path: 'oplogs',
+        name: 'oplogs',
+        component: () => import('@/views/OpLogView.vue'),
+        meta: { title: '操作日志', icon: 'mdi-clipboard-text-clock' }
+      },
+      {
         path: 'settings',
         name: 'settings',
         component: () => import('@/views/SettingsView.vue'),

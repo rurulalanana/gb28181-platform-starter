@@ -17,7 +17,7 @@
 
     <el-card shadow="never">
       <el-table v-loading="loading" :data="users" stripe>
-        <el-table-column label="用户名" min-width="140">
+        <el-table-column prop="username" label="用户名" min-width="140" sortable>
           <template #default="{ row }"><span class="mono">{{ row.username }}</span></template>
         </el-table-column>
         <el-table-column label="昵称" min-width="120">
@@ -37,7 +37,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="最后登录" min-width="170">
+        <el-table-column prop="lastLoginTime" label="最后登录" min-width="170" sortable>
           <template #default="{ row }">
             <span class="text-muted">{{ row.lastLoginAt || '—' }}</span>
           </template>
@@ -47,33 +47,28 @@
             <span class="text-muted">{{ row.createdAt || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" align="center" fixed="right">
+        <el-table-column label="操作" width="170" align="center" fixed="right">
           <template #default="{ row }">
-            <el-tooltip content="编辑">
-              <el-button link type="primary" @click="openEdit(row)">
-                <el-icon><Edit /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="重置密码">
-              <el-button link type="primary" @click="openReset(row)">
-                <el-icon><Key /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip :content="row.enable ? '停用' : '启用'">
-              <el-button link type="primary" @click="toggleEnable(row)">
-                <el-icon><SwitchButton /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="删除">
-              <el-button
-                link
-                type="danger"
-                :disabled="row.username === 'admin'"
-                @click="removeOne(row)"
-              >
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-tooltip>
+            <div class="row-actions">
+              <el-tooltip content="编辑">
+                <el-button @click="openEdit(row)"><el-icon><Edit /></el-icon></el-button>
+              </el-tooltip>
+              <el-tooltip content="重置密码">
+                <el-button @click="openReset(row)"><el-icon><Key /></el-icon></el-button>
+              </el-tooltip>
+              <el-tooltip :content="row.enable ? '停用' : '启用'">
+                <el-button @click="toggleEnable(row)"><el-icon><SwitchButton /></el-icon></el-button>
+              </el-tooltip>
+              <el-tooltip content="删除">
+                <el-button
+                  class="is-danger"
+                  :disabled="row.username === 'admin'"
+                  @click="removeOne(row)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <template #empty>
@@ -249,5 +244,14 @@ onMounted(load)
 </script>
 
 <style scoped>
+/* 操作列：一排图标按钮，不换行 */
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex-wrap: nowrap;
+}
+
 /* .card-header 由 styles/main.css 统一提供 */
 </style>

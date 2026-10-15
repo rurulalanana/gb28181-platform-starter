@@ -381,6 +381,21 @@ CREATE TABLE IF NOT EXISTS sa_token_store (
 
 CREATE INDEX IF NOT EXISTS idx_sa_token_store_expire ON sa_token_store (expire_at);
 
+-- -------------------- gb_operation_log --------------------
+-- 操作日志（管理接口调用记录）：记录调用方式/资源路径/远端地址/结果/用时，
+-- 由 OperationLogInterceptor 写入，定期清理（默认保留 7 天）。
+CREATE TABLE IF NOT EXISTS gb_operation_log (
+    id          BIGSERIAL PRIMARY KEY,
+    method      VARCHAR(32),
+    resource    VARCHAR(512),
+    remote_addr VARCHAR(64),
+    result      VARCHAR(128),
+    duration_ms INTEGER,
+    create_time TIMESTAMP DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gb_operation_log_time ON gb_operation_log (create_time DESC);
+
 
 -- ============================================================
 --  第 1.5 段：结构迁移（老库升级用；全新库上为空操作）
@@ -737,6 +752,15 @@ COMMENT ON COLUMN sa_token_store.k          IS 'Sa-Token 键（如 satoken:login
 COMMENT ON COLUMN sa_token_store.obj        IS 'JDK 序列化的值（String / SaSession 等）';
 COMMENT ON COLUMN sa_token_store.expire_at  IS '过期时间，NULL 表示永不过期';
 COMMENT ON COLUMN sa_token_store.updated_at IS '最近写入时间（排障用）';
+
+-- -------------------- gb_operation_log --------------------
+COMMENT ON TABLE  gb_operation_log IS '操作日志：管理接口调用记录（方式/路径/远端/结果/用时）';
+COMMENT ON COLUMN gb_operation_log.method      IS '调用方式：HTTP_GET / HTTP_POST（SIP_* 预留）';
+COMMENT ON COLUMN gb_operation_log.resource    IS '资源路径（如 /api/v1/device/remove）';
+COMMENT ON COLUMN gb_operation_log.remote_addr IS '远端地址（请求方 IP）';
+COMMENT ON COLUMN gb_operation_log.result      IS '结果：HTTP 状态码或异常类名';
+COMMENT ON COLUMN gb_operation_log.duration_ms IS '用时（毫秒）';
+COMMENT ON COLUMN gb_operation_log.create_time IS '记录时间';
 
 
 -- ============================================================
