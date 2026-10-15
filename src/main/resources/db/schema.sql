@@ -369,6 +369,18 @@ CREATE TABLE IF NOT EXISTS gb_user (
     UNIQUE (username)
 );
 
+-- -------------------- sa_token_store --------------------
+-- Sa-Token 会话存储（登录 token 持久化）：由 SaTokenJdbcDao 读写，
+-- 服务重启后登录态不丢失。值为 JDK 序列化的对象（String / SaSession 等）。
+CREATE TABLE IF NOT EXISTS sa_token_store (
+    k          VARCHAR(512) PRIMARY KEY,
+    obj        BYTEA,
+    expire_at  TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sa_token_store_expire ON sa_token_store (expire_at);
+
 
 -- ============================================================
 --  第 1.5 段：结构迁移（老库升级用；全新库上为空操作）
@@ -718,6 +730,13 @@ COMMENT ON COLUMN gb_user.lock            IS '是否因多次登录失败被锁�
 COMMENT ON COLUMN gb_user.last_login_at   IS '最近登录时间';
 COMMENT ON COLUMN gb_user.create_time     IS '创建时间';
 COMMENT ON COLUMN gb_user.update_time     IS '更新时间';
+
+-- -------------------- sa_token_store --------------------
+COMMENT ON TABLE  sa_token_store IS 'Sa-Token 会话存储：登录 token 持久化，服务重启后登录态保留';
+COMMENT ON COLUMN sa_token_store.k          IS 'Sa-Token 键（如 satoken:login:token:<token>）';
+COMMENT ON COLUMN sa_token_store.obj        IS 'JDK 序列化的值（String / SaSession 等）';
+COMMENT ON COLUMN sa_token_store.expire_at  IS '过期时间，NULL 表示永不过期';
+COMMENT ON COLUMN sa_token_store.updated_at IS '最近写入时间（排障用）';
 
 
 -- ============================================================
