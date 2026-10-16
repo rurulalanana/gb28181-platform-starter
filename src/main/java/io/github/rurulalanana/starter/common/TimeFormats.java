@@ -32,6 +32,8 @@ public final class TimeFormats {
     public static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("yyyyMMdd");
     /** 月份格式。 */
     public static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+    /** 时钟格式（概览页折线图的 X 轴刻度）。 */
+    public static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     private TimeFormats() {
     }

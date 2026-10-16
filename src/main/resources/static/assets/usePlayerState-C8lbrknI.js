@@ -1,0 +1,1 @@
+import{z as n}from"./index-BMW2bABh.js";function t(e){return n(()=>{const r=(e==null?void 0:e.value)||"";return r==="播放中"?"success":r.startsWith("失败")||r.startsWith("异常")||r.includes("中断")||r.includes("超时")||r.includes("异常")?"danger":"info"})}export{t as u};

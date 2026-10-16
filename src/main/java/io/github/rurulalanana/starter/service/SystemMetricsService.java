@@ -1,6 +1,9 @@
 package io.github.rurulalanana.starter.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.github.rurulalanana.gb28181.sip.zlm.MediaType;
+import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.mapper.GbRecordMapper;
 import io.github.rurulalanana.starter.vo.SystemMetricsVo;
@@ -12,7 +15,10 @@ import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,8 +34,9 @@ import java.util.Set;
  *       {@code File.listRoots()}；</li>
  *   <li>网络速率：Linux 读 {@code /proc/net/dev} 求和后差分（请求驱动采样，
  *       两次调用之间计算平均速率；首次调用建立基线返回 null）；</li>
- *   <li>负载计数：直播 = 点播会话数；录像 = {@code gb_record} 中
- *       {@code end_time IS NULL}（录制中）的条数。</li>
+ *   <li>负载计数：按会话类型拆分 —— 直播 = {@code REALTIME} 会话数，
+ *       播放 = {@code PLAYBACK} 会话数（含下载中的 {@code DOWNLOAD}），
+ *       录像 = {@code gb_record} 中 {@code end_time IS NULL}（录制中）的条数。</li>
  * </ul>
  *
  * <p>全部采集都做了兜底：单项失败只导致对应字段为 null，不影响其他指标。
@@ -46,6 +53,22 @@ public class SystemMetricsService {
     /** 磁盘最多展示的分区数（对齐参考站的展示密度）。 */
     private static final int MAX_DISKS = 4;
 
+    /**
+     * 服务端保留的采样点数。
+     *
+     * <p>与前端 {@code MAX_POINTS} 对齐：采样间隔 3 秒 × 60 点 ≈ 3 分钟视窗。
+     */
+    private static final int HISTORY_SIZE = 60;
+
+    /**
+     * 采样间隔（毫秒）。
+     *
+     * <p>由 {@code PlatformScheduler} 定时驱动，与前端轮询间隔一致。
+     * 不靠请求触发是因为：没人开页面时也要积累历史，否则第一个打开页面的人
+     * 看到的仍是一个点。
+     */
+    private static final long SAMPLE_INTERVAL_MS = 3000;
+
     private final StreamService streamService;
     private final GbRecordMapper recordMapper;
 
@@ -54,16 +77,148 @@ public class SystemMetricsService {
     private volatile long lastTxBytes = -1;
     private volatile long lastSampleNanos = -1;
 
-    /** 采集一次全部指标。 */
+    /**
+     * 历史采样环形缓冲（固定容量，满了丢最旧的）。
+     *
+     * <p>每项是一条完整采样：时刻 + CPU + 内存占用率 + 收发速率。
+     * 用 {@link ArrayDeque} + {@code synchronized} 而非 {@code CopyOnWriteArrayList}：
+     * 写入频率固定且低（3 秒一次），读取（组装响应）也只在轮询时发生，
+     * 锁开销可忽略，而 COW 每次写都要复制整个数组。
+     */
+    private final Deque<Sample> history = new ArrayDeque<>(HISTORY_SIZE + 1);
+
+    /** 上一次采样时刻（毫秒），用于限流——避免高频轮询把缓冲冲爆。 */
+    private volatile long lastSampleAt;
+
+    /**
+     * 最近一次采样结果（由 {@link #sample()} 写，读接口只读）。
+     *
+     * <p><b>为什么网络速率必须走这个缓存</b>：速率的算法是「与上次比差分」，
+     * 而基线（{@code lastRxBytes}）只有一个。若定时采样与请求处理都去调
+     * {@code fillNet}，两者会互相把对方的基线顶掉，各自的差分区间被截成
+     * 一半甚至更短，表现为速率为 null 或数值乱跳。
+     * 因此只允许采样线程推进基线，请求侧直接取最近一次结果。
+     */
+    private volatile Sample latest;
+
+    /** 一条历史采样。 */
+    private record Sample(String time, Double cpu, Double memPct, Double rx, Double tx) {
+    }
+
+    /**
+     * 采集一次全部指标（响应请求）。
+     *
+     * <p>CPU / 内存 / 磁盘是瞬时值，每次请求重新读；
+     * 网络速率是区间均值，取最近一次采样结果（见 {@link #latest}）。
+     */
     public SystemMetricsVo metrics() {
         SystemMetricsVo vo = new SystemMetricsVo();
         fillCpuAndMemory(vo);
         vo.setDisks(collectDisks());
-        fillNet(vo);
-        vo.setLive((long) streamService.sessionCount());
-        vo.setPlay(0L);
-        vo.setRecord(countRecording());
+        Sample last = latest;
+        if (last != null) {
+            vo.setNetRxMbps(last.rx());
+            vo.setNetTxMbps(last.tx());
+        } else {
+            // 启动后头几秒还没采过样：退回直采，至少不至于空白
+            fillNet(vo);
+        }
+        fillLoadCounts(vo);
+        vo.setHistory(historySnapshot());
         return vo;
+    }
+
+    /**
+     * 定时采样入口（由 {@code PlatformScheduler} 调用）。
+     *
+     * <p>这是<b>唯一</b>推进网络基线与写历史缓冲的地方。
+     * 恒定频率运行，不依赖是否有人打开页面 —— 否则第一个进概览页的人
+     * 只能看到一个点，要等 3 分钟才成线。
+     */
+    public void sample() {
+        try {
+            SystemMetricsVo vo = new SystemMetricsVo();
+            fillCpuAndMemory(vo);
+            fillNet(vo);
+            recordSample(vo);
+        } catch (Throwable t) {
+            log.debug("定时采样失败：{}", t.toString());
+        }
+    }
+
+    /**
+     * 把本次采样写入环形缓冲与 {@link #latest}。
+     *
+     * <p>带时间限流：限流是为了兼容手动触发（如启动后立即采一次），
+     * 避免同一秒内写入多点把 3 分钟视窗压缩。
+     */
+    private void recordSample(SystemMetricsVo vo) {
+        long now = System.currentTimeMillis();
+        if (now - lastSampleAt < SAMPLE_INTERVAL_MS - 200) {
+            return;
+        }
+        lastSampleAt = now;
+        Double memPct = null;
+        if (vo.getMemTotal() != null && vo.getMemTotal() > 0 && vo.getMemUsed() != null) {
+            memPct = round1(vo.getMemUsed() * 100.0 / vo.getMemTotal());
+        }
+        Sample s = new Sample(
+                LocalDateTime.now().format(TimeFormats.CLOCK),
+                vo.getCpu(), memPct, vo.getNetRxMbps(), vo.getNetTxMbps());
+        latest = s;
+        synchronized (history) {
+            if (history.size() >= HISTORY_SIZE) {
+                history.pollFirst();
+            }
+            history.addLast(s);
+        }
+    }
+
+    /** 历史快照（时间正序）。 */
+    private SystemMetricsVo.History historySnapshot() {
+        SystemMetricsVo.History h = new SystemMetricsVo.History();
+        synchronized (history) {
+            for (Sample s : history) {
+                h.getTime().add(s.time());
+                h.getCpu().add(s.cpu());
+                h.getMem().add(s.memPct());
+                h.getRx().add(s.rx());
+                h.getTx().add(s.tx());
+            }
+        }
+        return h;
+    }
+
+    /**
+     * 负载计数：按会话类型拆分直播与播放。
+     *
+     * <p><b>为什么不能直接用 {@code sessionCount()}</b>：那返回的是全部会话数，
+     * 回放/下载的会话也被算进去，导致「直播」数字虚高而「播放」恒为 0。
+     * 会话自带的 {@link MediaType} 才是区分的依据。
+     *
+     * <p>{@code DOWNLOAD}（录像下载）归入播放：它同样是对历史录像的消费，
+     * 与回放同属一类；单独列一项会让卡片信息过细。
+     */
+    private void fillLoadCounts(SystemMetricsVo vo) {
+        long live = 0;
+        long play = 0;
+        try {
+            for (RtpSession s : streamService.sessions()) {
+                if (s == null) {
+                    continue;
+                }
+                if (s.getType() == MediaType.REALTIME) {
+                    live++;
+                } else {
+                    play++;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("统计会话数失败：{}", e.toString());
+        }
+        vo.setLive(live);
+        vo.setPlay(play);
+        vo.setRecord(countRecording());
     }
 
     /** CPU 与内存（JDK com.sun.management 扩展）。 */
@@ -235,5 +390,9 @@ public class SystemMetricsService {
 
     private static double round2(double v) {
         return Math.round(v * 100) / 100.0;
+    }
+
+    private static double round1(double v) {
+        return Math.round(v * 10) / 10.0;
     }
 }
