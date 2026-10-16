@@ -550,8 +550,15 @@ public class DeviceController {
      * <p><b>开关必须同步内存镜像</b>：流上线回调读的是镜像而不是库表
      * （ZLM 回调线程不能查库），只改库不改镜像的话，开关永远不生效。
      *
-     * <p>开启时若流已在播，立即开录（不等下一次流上线）；
-     * 关闭时若在录，立即停止并归档 —— 否则开关要到「下一次流上下线」
+     * <p><b>开启时若无流则主动拉流</b>：录像必须有流可录（ZLM 的
+     * {@code mk_recorder_start} 按 app/stream 找媒体源，源不存在直接失败）。
+     * 早期实现只在「流已在播」时才开录，于是用户在通道列表打开开关后
+     * 什么都看不到 —— 没有 INVITE、没有流、没有录像，只能手动点一次播放
+     * 才会触发。云端录像的语义就是「平台持续把这段录像存下来」，
+     * 用户不应再手动拉流，故这里直接点播（点播成功后
+     * {@code onSessionOnline} 会按开关自动开录）。
+     *
+     * <p>关闭时若在录，立即停止并归档 —— 否则开关要到「下一次流上下线」
      * 才体现，用户会以为功能坏了。
      */
     @PostMapping("/setchannelcloudrecord")
@@ -565,12 +572,21 @@ public class DeviceController {
         recordPolicy.set(code, Boolean.TRUE.equals(cloudrecord));
         try {
             if (Boolean.TRUE.equals(cloudrecord)) {
-                // 双参精确定位会话：通道编码跨设备可能重复，单参会拿错设备
-                if (streamService.session(serial, code) != null
-                        && !recordService.isRecording(code)) {
-                    recordService.startRecordingDirect(code);
-                    log.info("通道 {} 流已在播，立即开始录像", code);
-                }
+                // 用库里的 device_id 而不是入参 serial：serial 由前端传入，
+                // 可能是平台自身编码（前端 ChannelView 的 row.deviceId 在某些
+                // 视图里就是平台编码）或任意值。拿它去点播会生成错误的流名
+                // （rtp/<错设备>_<通道>），INVITE 失败还会留下僵尸会话，
+                // 使该通道的云端录像长期找不到媒体源。库里的 device_id
+                // 才是通道真正的所属设备。
+                String deviceId = channel.getDeviceId() != null
+                        ? channel.getDeviceId() : serial;
+                // 直接调 startLive 而不是先判断会话是否存在：它内部会区分
+                // 「可复用的活会话」与「已关闭/无流的死会话」，后者会重建会话
+                // 并发起 INVITE —— 这正是开关打开后能真正拉到流的原因。
+                // 已可复用时它是空操作（不重复 INVITE）。
+                streamService.startLive(deviceId, code);
+                log.info("通道 {} 开启云端录像，已确保流在线（device={}，开录由流上线回调触发）",
+                        code, deviceId);
             } else if (recordService.isRecording(code)) {
                 recordService.stopCloudRecord(code);
                 log.info("通道 {} 已关闭录像并归档", code);
