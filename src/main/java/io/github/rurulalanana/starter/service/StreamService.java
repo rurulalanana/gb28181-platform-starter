@@ -7,6 +7,8 @@ import io.github.rurulalanana.gb28181.sip.zlm.MediaType;
 import io.github.rurulalanana.gb28181.sip.zlm.PlayUrls;
 import io.github.rurulalanana.gb28181.sip.zlm.RecordItem;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.gb28181.sip.zlm.RtpSessionManager;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
@@ -56,7 +58,7 @@ public class StreamService {
     public GbStream startLive(String deviceId, String channelId) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
         RtpSession existing = platform.sessionManager().getByChannel(deviceId, channel);
-        if (existing != null && !RtpSession.CLOSED.equals(existing.getState())) {
+        if (existing != null && isReusable(existing)) {
             // 已有点播：直接复用，避免重复 INVITE 造成设备侧抖动
             return toStream(existing, GbStream.TYPE_LIVE);
         }
@@ -73,6 +75,39 @@ public class StreamService {
         save(stream);
         deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
         return stream;
+    }
+
+    /**
+     * 既有会话能否直接复用给新的点播请求。
+     *
+     * <p>判据有三条，缺一不可：
+     * <ol>
+     *   <li><b>类型必须是直播</b>：回放/下载与直播是不同会话（键带类型后缀），
+     *       但若键上残留着历史会话（如旧版本数据），复用会让「点直播」拿到回放的流。
+     *       实测过：重试点播后返回的 {@code filePath} 指向录像文件。</li>
+     *   <li><b>状态不能是 CLOSED</b>：已关闭的会话其端口与媒体源都已释放。</li>
+     *   <li><b>流必须真的在推</b>：流下线只把状态置为 {@code NEGOTIATING}
+     *       （不是 CLOSED，端口保留等待设备恢复），此时复用会拿到一个
+     *       播不出画面的死会话 —— 用户看到「点了播放没反应」。
+     *       必须问 ZLM 是否真的在收 RTP 包。</li>
+     * </ol>
+     *
+     * <p>不可复用时返回 false，调用方会走完整点播流程（重建会话 + INVITE），
+     * 这是恢复死会话的唯一手段。
+     */
+    private boolean isReusable(RtpSession session) {
+        if (session == null || RtpSession.CLOSED.equals(session.getState())) {
+            return false;
+        }
+        if (session.getType() != null && session.getType() != MediaType.REALTIME) {
+            return false;
+        }
+        // 已 ONLINE 说明 ZLM 已解出轨道，可直接复用；NEGOTIATING 需实测是否有流
+        if (RtpSession.ONLINE.equals(session.getState())) {
+            return true;
+        }
+        var media = platform.mediaServer();
+        return media != null && media.isRtpReceiving(session.getZlmApp(), session.getStream());
     }
 
     /**
@@ -105,12 +140,32 @@ public class StreamService {
     /**
      * 开始历史回放（标准 9.8）。
      *
+     * <p><b>必须与直播隔离</b>：回放与直播是独立会话（会话键带 {@code _playback} 后缀，
+     * ZLM 侧流名也带后缀），因此「有人看直播时另一个人点回放」不会互相顶替。
+     * 早先两者共用同一会话键，回放会走 {@code open()} 的「先关闭旧会话」分支，
+     * 把正在观看的直播踢掉（实测日志：{@code 已有会话，先关闭旧会话: type=REALTIME,
+     * state=ONLINE} 紧跟 {@code 打开收流会话: type=PLAYBACK}，观看端画面直接中断）。
+     *
+     * <p><b>同一通道的重复回放</b>：复用已在播的回放会话，避免重复 INVITE
+     * 造成设备侧抖动与重复推流。
+     *
      * @param deviceId  设备编码（SIP 目标）
      * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
      * @param item      录像段（{@link RecordItem#ofFilePath} 可只带 filePath）
      */
     public GbStream startPlayback(String deviceId, String channelId, RecordItem item) {
-        RtpSession session = platform.mediaService().playback(deviceId, channelId, item);
+        String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+        RtpSession existing = platform.sessionManager()
+                .getByChannel(deviceId, channel, MediaType.PLAYBACK);
+        if (existing != null && !RtpSession.CLOSED.equals(existing.getState())) {
+            // 同一段录像已在回放：复用；不同段则重开（下面的 play 会先关旧会话）
+            String want = item == null ? null : item.getFilePath();
+            String have = existing.getMediaUri();
+            if (want == null || want.equals(have)) {
+                return toStream(existing, GbStream.TYPE_PLAYBACK);
+            }
+        }
+        RtpSession session = platform.mediaService().playback(deviceId, channel, item);
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;
@@ -142,6 +197,19 @@ public class StreamService {
     /** 停止某通道的流（设备直连：设备编码即通道编码）。 */
     public boolean stop(String deviceId) {
         return stop(deviceId, deviceId);
+    }
+
+    /**
+     * 停止某通道指定类型的流。
+     *
+     * <p>回放/下载与直播是独立会话（键带类型后缀），停回放必须走本方法，
+     * 否则会去关直播会话或关不到任何会话。
+     *
+     * @param type {@code null} 或 {@link MediaType#REALTIME} 等价于
+     *             {@link #stop(String, String)}
+     */
+    public boolean stop(String deviceId, String channelId, MediaType type) {
+        return platform.mediaService().stop(deviceId, channelId, type);
     }
 
     /** 停止全部流。 */
@@ -353,6 +421,149 @@ public class StreamService {
             record.setUpdateTime(LocalDateTime.now());
             streamMapper.updateById(record);
         }
+    }
+
+    /**
+     * 平台启动时把库里残留的「非 CLOSED」流记录收敛为 CLOSED。
+     *
+     * <p><b>为什么必须做</b>：{@code gb_stream.state} 反映的是「平台内存里的会话状态」，
+     * 而会话是纯内存对象 —— 平台一重启就全没了，可库里还留着上次运行的
+     * {@code ONLINE} / {@code NEGOTIATING}。这些残留会误导用户（界面显示「推流中」
+     * 但实际一路都没有），也会干扰按状态做的统计与判断。
+     *
+     * <p>重启后内存为空是既成事实，所以统一置 CLOSED 是准确的：
+     * 平台此刻确实没有任何会话。之后设备重新推流或被点播时，会话重建会
+     * 把状态改回 ONLINE。
+     *
+     * @return 收敛的记录条数
+     */
+    public int closeStaleStreamsOnStartup() {
+        try {
+            List<GbStream> stale = streamMapper.selectList(
+                    Wrappers.<GbStream>lambdaQuery()
+                            .ne(GbStream::getState, GbStream.STATE_CLOSED));
+            if (stale.isEmpty()) {
+                return 0;
+            }
+            LocalDateTime now = LocalDateTime.now();
+            for (GbStream s : stale) {
+                s.setState(GbStream.STATE_CLOSED);
+                s.setUpdateTime(now);
+                streamMapper.updateById(s);
+            }
+            return stale.size();
+        } catch (Exception e) {
+            log.warn("收敛残留流状态失败（不影响启动）: {}", e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 把「设备仍在推、平台却没有会话」的孤儿流重新纳管。
+     *
+     * <p><b>为什么需要</b>：{@code on_mk_media_publish} 回调只在流<b>首次注册</b>
+     * 时触发一次，而设备（下级平台，实测 LiveGBS）收 BYE 回 200 OK 却不停止推流，
+     * 且我方重启对它毫无影响。于是存在这样的时序竞争：平台启动时设备已经在推，
+     * 回调先到、SSRC 映射后恢复 —— 实测两者相差 1.4 秒，这路流就永久停在
+     * 「未匹配到会话」，表现为「级联那边还在推流、平台这边一路都看不到」，
+     * 白白占用带宽直到设备自己超时。
+     *
+     * <p>做法：枚举 ZLM 里流名仍是 SSRC 十六进制串的媒体源（= 未被纳管的标志），
+     * 逐个交给会话管理器按 SSRC 墓碑重建会话。重建后 ZLM 侧的流名不会变
+     * （{@code stream_replace} 只在注册时生效），但平台已有会话、能出播放地址，
+     * 用户重新点播时也会因会话已存在而直接复用。
+     *
+     * @return 成功纳管的流数
+     */
+    public int adoptOrphanStreams() {
+        ZlmMediaServer mediaServer = platform.mediaServer();
+        RtpSessionManager sessions = platform.sessionManager();
+        if (mediaServer == null || sessions == null) {
+            return 0;
+        }
+        int adopted = 0;
+        for (String name : mediaServer.orphanStreamNames()) {
+            try {
+                // 先看是否已被纳管：认领后的会话其 zlmStream 正是这个十六进制名
+                // （stream_replace 改不动已注册的流），所以「流名是十六进制」
+                // 不再等价于「未纳管」。不排除的话每轮巡检都会把已纳管的流
+                // 再报一次「已重新纳管」，日志与实际不符。
+                RtpSession known = sessions.resolveBySsrcName(name);
+                if (known != null && !RtpSession.CLOSED.equals(known.getState())) {
+                    continue;
+                }
+                if (sessions.reclaimOrphanBySsrc(name) != null) {
+                    adopted++;
+                }
+            } catch (Exception e) {
+                log.debug("纳管孤儿流失败: stream={} {}", name, e.getMessage());
+            }
+        }
+        return adopted;
+    }
+
+    /**
+     * 空闲流巡检：关掉「没有任何观看者」的会话。
+     *
+     * <p><b>为什么不能只靠 ZLM 的无人观看回调</b>：{@code on_mk_media_no_reader}
+     * <b>每个媒体源只触发一次</b>（ZLM 内部 {@code _none_reader} 标志位），
+     * 且只在读者数由非零降为零的那一刻触发。于是存在一段无法覆盖的空窗：
+     * <ol>
+     *   <li>平台重启后设备仍在推流，回调在会话重建<b>之前</b>就已触发过
+     *       （实测相差 2 秒），之后永不重来；</li>
+     *   <li>{@link #adoptOrphanStreams()} 重新纳管时流早已注册，回调不会补发。</li>
+     * </ol>
+     * 结果就是这些流既不会被关掉、也永远不会再触发回调 —— 一直占着带宽和收流端口，
+     * 直到设备自己超时（而实测 LiveGBS 根本不会超时）。必须由平台自己定期主动检测。
+     *
+     * <p><b>判据是 ZLM 的读者数而不是平台自己的观看计数</b>：ZLM 才知道真相 ——
+     * 它把 MP4 录制器也算作读者（{@code protocol.mp4_as_player=1}），
+     * 所以「只开录像没人看」的通道不会被误关；而正在被播放的流读者数必然大于 0。
+     *
+     * <p><b>宽限期</b>：刚建立的会话读者数天然是 0（还没人来得及播放），
+     * 故只处理「已 ONLINE 超过宽限期」的会话。宽限期取 ZLM 的
+     * {@code streamNoneReaderDelayMS}，与回调语义保持一致。
+     *
+     * @return 关闭的会话数
+     */
+    public int reapIdleStreams() {
+        ZlmMediaServer mediaServer = platform.mediaServer();
+        RtpSessionManager sessions = platform.sessionManager();
+        if (mediaServer == null || sessions == null) {
+            return 0;
+        }
+        long graceMs = Math.max(20000L, mediaServer.noneReaderDelayMs());
+        long now = System.currentTimeMillis();
+        int closed = 0;
+        for (RtpSession session : sessions.sessions()) {
+            try {
+                if (session == null || RtpSession.CLOSED.equals(session.getState())) {
+                    continue;
+                }
+                // 未 ONLINE 的会话（NEGOTIATING）由 INVITE 超时机制负责，
+                // 这里不碰：它可能正在等设备回 SDP
+                if (!RtpSession.ONLINE.equals(session.getState())) {
+                    continue;
+                }
+                if (now - session.getCreatedAt() < graceMs) {
+                    continue;
+                }
+                if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
+                    continue;
+                }
+                log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", graceMs / 1000, session.getSessionKey());
+                // 先记冷却再关流：设备不认 BYE 时它会继续推，
+                // 不记冷却就会被孤儿流巡检立刻认领回来，形成无限循环。
+                // 按会话键记（不是 SSRC —— 会话的 ssrc 是 SDP 通告值，
+                // 与设备实际推流用的 RTP SSRC 不同，实测关流 11 秒后又被认领回来）。
+                sessions.markReaped(session.getSessionKey());
+                sessions.closeByKey(session.getSessionKey());
+                closed++;
+            } catch (Exception e) {
+                log.debug("关闭空闲流失败: {}", e.getMessage());
+            }
+        }
+        return closed;
     }
 
     /**

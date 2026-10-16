@@ -171,7 +171,9 @@ public class PlaybackController {
         // 下载模式下文件已由 ZLM 落盘，停止前先取出路径
         String mediaUri = session.getMediaUri();
         String channelId = session.getChannelId();
-        boolean stopped = streamService.stop(session.getDeviceId(), channelId);
+        // 必须按类型停：回放与直播是独立会话，用 stop(device, channel) 只会去关直播
+        boolean stopped = streamService.stop(session.getDeviceId(), channelId,
+                io.github.rurulalanana.gb28181.sip.zlm.MediaType.PLAYBACK);
         StreamStopVo vo = new StreamStopVo();
         vo.setOk(stopped);
         vo.setChannelId(channelId);

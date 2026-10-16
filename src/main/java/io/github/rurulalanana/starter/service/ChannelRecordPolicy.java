@@ -66,6 +66,17 @@ public class ChannelRecordPolicy {
         return channelId != null && enabled.contains(channelId);
     }
 
+    /**
+     * 当前已开启云端录像的全部通道编码（快照）。
+     *
+     * <p>返回副本而不是内部集合：调用方（定时任务）会遍历并可能触发
+     * 拉流/开录，耗时较长，直接遍历 {@link ConcurrentHashMap} 的视图
+     * 会让并发写（用户拨动开关）的语义不明确。副本是一次性的、稳定的。
+     */
+    public Set<String> enabledChannels() {
+        return Set.copyOf(enabled);
+    }
+
     /** 用户拨动开关时同步内存镜像。 */
     public void set(String channelId, boolean on) {
         if (channelId == null) {

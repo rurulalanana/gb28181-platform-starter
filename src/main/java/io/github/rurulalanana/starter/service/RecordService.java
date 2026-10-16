@@ -29,7 +29,9 @@ import java.time.LocalDateTime;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -60,13 +62,41 @@ public class RecordService {
     /** 等待流建立的轮询间隔（毫秒）。 */
     private static final long STREAM_READY_POLL_MS = 300;
 
+    /** 归档时等待 ZLM 写终态的时长（毫秒）：录制停止是异步的，需给回调留时间。 */
+    private static final long ARCHIVE_WAIT_MS = 3000;
+
+    /** 归档等待终态的轮询间隔（毫秒）。 */
+    private static final long ARCHIVE_WAIT_POLL_MS = 100;
+
     private final Gb28181MediaPlatform platform;
     private final GbRecordMapper recordMapper;
     private final GbDeviceRecordMapper deviceRecordMapper;
+    private final io.github.rurulalanana.starter.mapper.GbChannelMapper channelMapper;
     private final ObjectStorageService storage;
     private final io.github.rurulalanana.starter.storage.ObjectStorageProperties storageProps;
     private final StreamService streamService;
     private final Gb28181Properties props;
+
+    /**
+     * 已删除录像的「墓碑」：文件路径 → 删除时刻。
+     *
+     * <p><b>为什么需要</b>：{@link #reconcileAutoRecordings} 是按「磁盘上有文件、
+     * 库里没有记录」来补登记的。而删除接口是「先删文件、再删记录」—— 文件删除
+     * 可能失败（权限、文件被占用、OSS 本地副本策略），此时库里记录已删、
+     * 磁盘文件还在，下一次对账就会把刚删掉的录像<b>重新登记回来</b>，
+     * 表现为「删除后刷新又出现了」。
+     *
+     * <p>用墓碑记住「这个路径是用户主动删的」，对账时跳过。带过期时间，
+     * 避免无限增长：文件最终被清理后墓碑也没有存在意义。
+     *
+     * <p><b>内存实现</b>：重启后墓碑丢失，但对账也只在启动 30 秒后才跑，
+     * 且文件通常已被删掉；重启后仍残留的删除失败文件被重新登记属于可接受的
+     * 降级（用户可再删一次）。用 DB 存墓碑需要建表，收益不成比例。
+     */
+    private final Map<String, Long> deletedPaths = new ConcurrentHashMap<>();
+
+    /** 墓碑保留时长（毫秒）：超过后允许对账重新登记（文件若仍在）。 */
+    private static final long TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000L;
 
     // ==================== 设备侧录像（RecordInfo） ====================
 
@@ -399,6 +429,10 @@ public class RecordService {
                     continue;
                 }
                 String absPath = f.getAbsolutePath();
+                // 用户主动删过的路径不得复活（删除时文件可能没删掉）
+                if (isDeleted(absPath)) {
+                    continue;
+                }
                 Long exists = recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
                         .eq(GbRecord::getFilePath, absPath));
                 if (exists != null && exists > 0) {
@@ -437,7 +471,10 @@ public class RecordService {
         r.setRecordId(java.util.UUID.randomUUID().toString().replace("-", "")
                 .substring(0, 16));
         r.setChannelId(channelId);
-        r.setDeviceId(channelId);
+        // device_id 必须是「设备编码」而不是通道编码：对账只有目录名（= 通道编码），
+        // 需按 gb_channel 反查真实设备。查不到时退回通道编码（设备直连场景二者相同），
+        // 至少保证非空——否则 gb_record.device_id 为 null，按设备过滤的查询会漏掉它。
+        r.setDeviceId(deviceIdOf(channelId));
         r.setName(channelId);
         r.setFilePath(f.getAbsolutePath());
         r.setFileName(f.getName());
@@ -472,6 +509,34 @@ public class RecordService {
         }
     }
 
+    /**
+     * 按通道编码反查设备编码。
+     *
+     * <p>对账只有目录名（= 通道编码），而 {@code gb_record.device_id} 语义是
+     * 设备编码。两者在多通道设备下不同（如通道 {@code 34020000001320000001}
+     * 属于设备 {@code 34020000002000000006}），直接写通道编码会让
+     * 「按设备查录像」漏掉这些记录。
+     *
+     * <p>查不到时退回通道编码：设备直连场景二者相同，且保证字段非空。
+     */
+    private String deviceIdOf(String channelId) {
+        try {
+            io.github.rurulalanana.starter.entity.GbChannel channel =
+                    channelMapper.selectOne(Wrappers
+                            .<io.github.rurulalanana.starter.entity.GbChannel>lambdaQuery()
+                            .eq(io.github.rurulalanana.starter.entity.GbChannel::getChannelId,
+                                    channelId)
+                            .last("limit 1"));
+            if (channel != null && channel.getDeviceId() != null
+                    && !channel.getDeviceId().isBlank()) {
+                return channel.getDeviceId();
+            }
+        } catch (Exception e) {
+            log.debug("反查设备编码失败，退回通道编码: channel={} {}", channelId, e.getMessage());
+        }
+        return channelId;
+    }
+
     /** 解析 ZLM 录像文件名中的时间（{@code yyyy-MM-dd-HH-mm-ss-<idx>.mp4}）。 */
     private LocalDateTime parseZlmFileName(String name) {
         try {
@@ -499,34 +564,162 @@ public class RecordService {
     /**
      * 归档一条已结束的录像（自动录像的收尾）。
      *
+     * <p><b>两条数据来源，索引优先、磁盘兜底</b>：
+     * <ol>
+     *   <li>ZLM 内存索引里「已结束」（{@code endTime > 0}）的条目 —— 元数据最全；</li>
+     *   <li>索引里没有时，<b>扫描该通道的磁盘目录</b>补登记。</li>
+     * </ol>
+     * 必须有兜底：实测停止录像时 ZLM 索引里的条目 {@code endTime} <b>长期为 0</b>
+     * （连续轮询 31 次不变），而文件早已落盘并可播 —— 只认索引会让归档永远拿不到
+     * 东西，录像要等 60 秒对账才出现（这正是线上现象）。磁盘扫描是已被
+     * {@link #reconcileAutoRecordings} 验证可靠的路径。
+     *
      * <p><b>为什么不用 {@link #stopCloudRecord}</b>：那是对外接口（record/stop），
      * 它会再调一次 {@code mk_recorder_stop} —— 而流下线时 ZLM 已自动停录，
      * 再调一次只会拿到 null。这里只做「取条目 → 落库 → 异步上传」。
      *
-     * <p><b>为什么不直接在回调里写库</b>：可以，但上传逻辑（对象存储、删本地文件）
-     * 与手动录像完全一致，收敛到一个方法里两条路径才不会漂移。
-     *
-     * @return 归档成功返回库里的条目；录像不存在或服务未启动返回 null
+     * @return 归档成功返回库里的条目；无可归档内容返回 null
      */
     public GbRecord archiveRecording(String channelId) {
+        return archiveRecording(channelId, 0L);
+    }
+
+    /**
+     * 归档一条已结束的录像，只认「不早于 {@code sinceMillis} 开始」的条目。
+     *
+     * <p><b>为什么必须限定时间窗口</b>：ZLM 的录像索引是<b>累积</b>的，
+     * 已结束的历史条目会一直留着。若不加限制，任意一次归档都会命中
+     * 「第一个已结束条目」——实测回放会话关闭时就拿上一次直播的录像
+     * 重复入库（日志里同一个 recordId 归档两次）。
+     *
+     * @param sinceMillis 只归档开始时间不早于此时刻的条目（毫秒）；
+     *                    {@code 0} 表示不限（对账/手动归档场景）
+     * @return 归档成功返回库里的条目；无可归档内容返回 null
+     */
+    public GbRecord archiveRecording(String channelId, long sinceMillis) {
         if (platform.recordingService() == null) {
             return null;
         }
-        // 此时 ZLM 侧已结束（流下线会自动停录），从内存索引取出终态条目
-        Recording recording = platform.recordingService().recordings(channelId).stream()
-                .filter(r -> r.getEndTime() > 0)
-                .findFirst().orElse(null);
-        if (recording == null) {
+        // 路径一：ZLM 内存索引的终态条目
+        Recording recording = awaitTerminalRecording(channelId, sinceMillis);
+        if (recording != null) {
+            GbRecord record = toRecord(recording);
+            record.setStorageType(storage.type());
+            record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
+            saveRecord(record);
+            if (storage.enabled()) {
+                uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
+            }
+            return record;
+        }
+        // 路径二：索引不可用，扫该通道目录补登记（取最新一个未入库的文件）
+        return archiveFromDisk(channelId, sinceMillis);
+    }
+
+    /**
+     * 从磁盘补登记该通道最新一个尚未入库的录像文件。
+     *
+     * <p>与 {@link #reconcileAutoRecordings} 同一套判据（跳过 {@code .} 前缀的
+     * 写入中分片、跳过墓碑、跳过已入库），但只处理<b>指定通道</b>、
+     * 且只登记<b>最新一个</b>文件 —— 归档场景只关心刚结束的那段录像。
+     *
+     * @param sinceMillis 只登记修改时间不早于此时刻的文件（毫秒）；0 表示不限
+     */
+    private GbRecord archiveFromDisk(String channelId, long sinceMillis) {
+        String root = props.getRecordRoot();
+        if (root == null || root.isBlank()) {
+            root = System.getProperty("user.dir") + "/record";
+        }
+        File channelDir = new File(root, channelId);
+        if (!channelDir.isDirectory()) {
             return null;
         }
-        GbRecord record = toRecord(recording);
-        record.setStorageType(storage.type());
-        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
-        saveRecord(record);
-        if (storage.enabled()) {
-            uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
+        List<File> files = new ArrayList<>();
+        collectMp4s(channelDir, files);
+        // 按修改时间倒序：最新结束的那段就是本次要归档的
+        files.sort((a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (File f : files) {
+            if (f.getName().startsWith(".")) {
+                continue;
+            }
+            // 早于本次会话开始的文件是历史录像，不归本次归档负责
+            if (sinceMillis > 0 && f.lastModified() < sinceMillis) {
+                continue;
+            }
+            String absPath = f.getAbsolutePath();
+            if (isDeleted(absPath)) {
+                continue;
+            }
+            Long exists = recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
+                    .eq(GbRecord::getFilePath, absPath));
+            if (exists != null && exists > 0) {
+                continue;
+            }
+            try {
+                GbRecord record = toDiskRecord(channelId, f);
+                record.setStorageType(storage.type());
+                record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
+                saveRecord(record);
+                if (storage.enabled()) {
+                    uploadAsync(record.getRecordId(), absPath, channelId);
+                }
+                log.info("归档录像（磁盘补登记）: channel={} file={}", channelId, absPath);
+                return record;
+            } catch (Exception e) {
+                log.warn("归档磁盘登记失败: file={} {}", absPath, e.getMessage());
+            }
         }
-        return record;
+        return null;
+    }
+
+    /**
+     * 等待 ZLM 内存索引里出现「已结束」的录像条目。
+     *
+     * <p><b>为什么需要等待</b>：录制停止是 ZLM 回调线程异步做的
+     * （{@code RecordingService.onStreamOffline → stopRecording} 里才写 {@code endTime}），
+     * 而归档在「停止直播」接口的线程上同步执行，两者存在竞态 ——
+     * 归档若跑在前面，索引里的 {@code endTime} 仍是 0，会被过滤掉，
+     * 于是本次归档静默失败、录像要等 60 秒对账才出现（实测现象）。
+     *
+     * <p>等待是有界的：一旦拿到终态条目立即返回；索引里压根没有该通道的条目
+     * （未开启录像）时立刻返回 null，不做无谓等待。
+     *
+     * @param sinceMillis 只认开始时间不早于此时刻的条目（毫秒）；0 表示不限
+     * @return 已结束的录像条目；超时或不存在返回 {@code null}
+     */
+    private Recording awaitTerminalRecording(String channelId, long sinceMillis) {
+        long deadline = System.currentTimeMillis() + ARCHIVE_WAIT_MS;
+        while (true) {
+            List<Recording> list = platform.recordingService().recordings(channelId);
+            for (Recording r : list) {
+                // 必须同时满足「已结束」与「属于本次会话」：
+                // 索引是累积的，只看 endTime>0 会反复归档历史条目
+                if (r.getEndTime() > 0 && r.getStartTime() >= sinceMillis
+                        && !isRegistered(r.getRecordId())) {
+                    return r;
+                }
+            }
+            // 没有条目 = 该通道未在录像，无需等待
+            if (list.isEmpty() || System.currentTimeMillis() >= deadline) {
+                return null;
+            }
+            try {
+                Thread.sleep(ARCHIVE_WAIT_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+    }
+
+    /** 该 ZLM 录像条目是否已入库（避免重复归档同一段录像）。 */
+    private boolean isRegistered(String recordId) {
+        if (recordId == null) {
+            return false;
+        }
+        Long n = recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
+                .eq(GbRecord::getRecordId, recordId));
+        return n != null && n > 0;
     }
 
     /**
@@ -644,6 +837,12 @@ public class RecordService {
         if (record == null) {
             return;
         }
+        // 先立墓碑：无论文件删除成功与否，都表示「这条录像是用户主动删的」，
+        // 对账不得把它重新登记回来（见 deletedPaths 注释）。
+        String tombPath = record.getFilePath();
+        if (tombPath != null && !tombPath.isBlank()) {
+            rememberDeleted(tombPath);
+        }
         if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
                 && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
             storage.delete(record.getObjectKey());
@@ -658,6 +857,31 @@ public class RecordService {
         } catch (Exception e) {
             log.warn("删除本地录像文件异常: {} {}", path, e.getMessage());
         }
+    }
+
+    /** 记录一条删除墓碑（对账时跳过该路径）。 */
+    private void rememberDeleted(String filePath) {
+        purgeExpiredTombstones();
+        deletedPaths.put(filePath, System.currentTimeMillis());
+    }
+
+    /** 该路径是否在墓碑有效期内（用户主动删过）。 */
+    private boolean isDeleted(String filePath) {
+        Long at = deletedPaths.get(filePath);
+        if (at == null) {
+            return false;
+        }
+        if (System.currentTimeMillis() - at > TOMBSTONE_TTL_MS) {
+            deletedPaths.remove(filePath, at);
+            return false;
+        }
+        return true;
+    }
+
+    /** 清理过期墓碑，避免长期运行后无限增长。 */
+    private void purgeExpiredTombstones() {
+        long now = System.currentTimeMillis();
+        deletedPaths.entrySet().removeIf(e -> now - e.getValue() > TOMBSTONE_TTL_MS);
     }
 
     /** 按录像 ID 查云端录像。 */
@@ -775,11 +999,39 @@ public class RecordService {
 
     // ==================== 内部 ====================
 
+    /**
+     * 幂等写入录像记录。
+     *
+     * <p><b>为什么按 {@code file_path} 也要去重</b>：同一个录像文件有两条
+     * 写入路径 —— 归档（{@code archiveRecording}，recordId 来自 ZLM 索引）
+     * 与对账（{@code reconcileAutoRecordings}，recordId 随机生成）。
+     * 两者可能<b>并发</b>跑到同一文件：实测间隔仅 206 微秒，各自的
+     * 「是否已入库」检查都通过了，于是插入两条指向同一文件的记录。
+     * 数据库侧已加 {@code uk_gb_record_file_path} 唯一索引兜底，
+     * 这里先按 {@code file_path} 查一次，避免把异常当正常路径走。
+     */
     private void saveRecord(GbRecord record) {
         GbRecord existing = recordMapper.selectOne(Wrappers.<GbRecord>lambdaQuery()
                 .eq(GbRecord::getRecordId, record.getRecordId()).last("limit 1"));
+        if (existing == null && record.getFilePath() != null
+                && !record.getFilePath().isBlank()) {
+            // 同一文件已由另一条路径登记：更新它而不是再插一条
+            existing = recordMapper.selectOne(Wrappers.<GbRecord>lambdaQuery()
+                    .eq(GbRecord::getFilePath, record.getFilePath()).last("limit 1"));
+        }
         if (existing == null) {
-            recordMapper.insert(record);
+            try {
+                recordMapper.insert(record);
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                // 并发窗口内对方先插入：唯一索引拦下，转为更新
+                GbRecord race = recordMapper.selectOne(Wrappers.<GbRecord>lambdaQuery()
+                        .eq(GbRecord::getFilePath, record.getFilePath()).last("limit 1"));
+                if (race == null) {
+                    throw e;
+                }
+                record.setId(race.getId());
+                recordMapper.updateById(record);
+            }
         } else {
             record.setId(existing.getId());
             recordMapper.updateById(record);
@@ -793,7 +1045,8 @@ public class RecordService {
         GbRecord r = new GbRecord();
         r.setRecordId(recording.getRecordId());
         r.setChannelId(recording.getChannelId());
-        r.setDeviceId(recording.getChannelId());
+        // 同 toDiskRecord：device_id 是设备编码，需按通道反查（多通道设备下二者不同）
+        r.setDeviceId(deviceIdOf(recording.getChannelId()));
         r.setName(recording.getChannelId());
         // 路径可能尚未确定：ZLM 自行生成文件名与日期子目录，
         // 需等首个分片落盘、on_mk_record_mp4 回调到达后才可得知

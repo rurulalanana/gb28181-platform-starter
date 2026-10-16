@@ -181,6 +181,12 @@ CREATE TABLE IF NOT EXISTS gb_record (
     UNIQUE (record_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gb_record_channel ON gb_record (channel_id, start_time DESC);
+-- 同一录像文件只能有一条记录。
+-- 归档（recordId 取自 ZLM 索引）与对账（recordId 随机生成）可能并发跑到
+-- 同一文件：实测两条插入间隔仅 206 微秒，各自的存在性检查都通过了，
+-- 于是出现指向同一 file_path 的重复行。用部分唯一索引从库层面兜住。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_gb_record_file_path
+    ON gb_record (file_path) WHERE file_path IS NOT NULL;
 
 -- -------------------- 设备录像目录（RecordInfo） --------------------
 

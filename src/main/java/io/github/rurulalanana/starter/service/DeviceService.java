@@ -580,6 +580,11 @@ public class DeviceService {
         if (channel == null) {
             return;
         }
+        if (streamId == null || streamId.isBlank()) {
+            // 必须走显式 UPDATE：updateById 会跳过 null 字段，清不掉 stream_id
+            channelMapper.clearStreamIdByChannel(channelId);
+            return;
+        }
         channel.setStreamId(streamId);
         channel.setUpdateTime(LocalDateTime.now());
         channelMapper.updateById(channel);
@@ -596,6 +601,11 @@ public class DeviceService {
         if (channel == null) {
             return;
         }
+        if (streamId == null || streamId.isBlank()) {
+            // 必须走显式 UPDATE：updateById 会跳过 null 字段，清不掉 stream_id
+            channelMapper.clearStreamId(deviceId, channelId);
+            return;
+        }
         channel.setStreamId(streamId);
         channel.setUpdateTime(LocalDateTime.now());
         channelMapper.updateById(channel);
@@ -606,6 +616,45 @@ public class DeviceService {
     public void updateChannel(GbChannel channel) {
         channel.setUpdateTime(LocalDateTime.now());
         channelMapper.updateById(channel);
+    }
+
+    /**
+     * 平台启动时收敛残留的通道状态。
+     *
+     * <p><b>为什么必须做</b>：通道的 {@code status=ON} 与 {@code stream_id} 都由
+     * 流上线事件写入，而「流下线」只在设备/流正常收敛时才触发。平台重启、
+     * 进程被杀、或某个流异常终止而没有走到下线分支时，这两个字段就永久留在
+     * 「在线/有流」状态 —— 界面显示通道在线、挂着 stream_id，实际一路都没有。
+     * 实测踩过：一个 11:01 就离线的设备，其通道被错误认领后显示 ON 达数小时。
+     *
+     * <p>判据用<b>设备是否在线</b>而不是「有没有会话」：设备离线则其所有通道
+     * 必然不可能有流；而设备在线时通道状态由后续真实的流事件驱动。
+     * 这样既清掉脏状态，又不会误伤「设备在线但暂时没推流」的正常通道。
+     *
+     * @return 收敛的通道数
+     */
+    @Transactional
+    public int resetStaleChannelStates() {
+        try {
+            List<GbDevice> all = allDevices();
+            List<String> offlineIds = all.stream()
+                    .filter(d -> !Boolean.TRUE.equals(d.getOnline()))
+                    .map(GbDevice::getDeviceId)
+                    .toList();
+            // 离线设备的通道：状态置 OFF、清空 stream_id
+            int off = channelMapper.resetByDeviceIds(offlineIds);
+            // 在线设备的通道：清空 stream_id（内存会话已随重启清空，这个字段必然过期），
+            // 但不动 status —— 设备在线时通道状态由真实流事件驱动
+            int cleared = channelMapper.clearStreamIdsByDeviceIds(
+                    all.stream().map(GbDevice::getDeviceId).toList());
+            if (off > 0 || cleared > 0) {
+                log.info("已收敛残留通道状态：{} 个离线设备通道置 OFF，{} 个通道清除 stream_id", off, cleared);
+            }
+            return off + cleared;
+        } catch (Exception e) {
+            log.warn("收敛残留通道状态失败（不影响启动）: {}", e.getMessage());
+            return 0;
+        }
     }
 
     /** 设备属性更新。 */

@@ -198,9 +198,12 @@ public class SystemMetricsService {
      * <p>三个数字的口径不同，务必区分：
      * <ul>
      *   <li><b>直播</b>：{@code MediaType.REALTIME} 会话数 —— 正在从设备拉流的通道；</li>
-     *   <li><b>播放</b>：ZLM 中「有观看者」的媒体源数 —— 含实时流的播放者与
-     *       云端录像点播。不能用会话数代替：录像点播走 MP4 解复用源，
-     *       压根不建 RtpSession，只遍历会话表永远是 0；</li>
+     *   <li><b>播放</b>：ZLM 中各流<b>观众总数之和</b> —— 含实时流的播放者、
+     *       云端录像点播，以及<b>录制器本身</b>（ZLM 把 MP4 录制当读者，
+     *       见 {@code protocol.mp4_as_player}）。同一个流被多个浏览器打开
+     *       会累加，所以这个数字是「多少路正在被看」而非「多少路流有观众」。
+     *       不能用会话数代替：录像点播走 MP4 解复用源，压根不建 RtpSession，
+     *       只遍历会话表永远是 0；</li>
      *   <li><b>录像</b>：{@code gb_record} 中 {@code end_time IS NULL} 的条数。</li>
      * </ul>
      *
@@ -223,7 +226,7 @@ public class SystemMetricsService {
         vo.setRecord(countRecording());
     }
 
-    /** 正在播放的源数量（实时流 + 录像点播，以 ZLM 的观看者为准）。 */
+    /** 正在播放的观众总数（实时流 + 录像点播 + 录制器，以 ZLM 的读者数为准）。 */
     private long countPlaying() {
         try {
             ZlmMediaServer media = platform.mediaServer();
