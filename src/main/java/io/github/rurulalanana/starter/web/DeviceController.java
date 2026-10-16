@@ -13,6 +13,7 @@ import io.github.rurulalanana.starter.entity.GbDevice;
 import io.github.rurulalanana.starter.entity.GbDeviceGroup;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.mapper.GbDeviceGroupMapper;
+import io.github.rurulalanana.starter.service.ChannelRecordPolicy;
 import io.github.rurulalanana.starter.service.ControlService;
 import io.github.rurulalanana.starter.service.DeviceCollectService;
 import io.github.rurulalanana.starter.service.DeviceService;
@@ -78,6 +79,7 @@ public class DeviceController {
     private final StreamService streamService;
     private final ControlService controlService;
     private final DeviceCollectService collectService;
+    private final ChannelRecordPolicy recordPolicy;
     private final GbDeviceGroupMapper groupMapper;
     private final Gb28181Properties props;
 
@@ -542,7 +544,16 @@ public class DeviceController {
         return ApiResponse.ok();
     }
 
-    /** 设置通道云端录像。 */
+    /**
+     * 设置通道云端录像。
+     *
+     * <p><b>开关必须同步内存镜像</b>：流上线回调读的是镜像而不是库表
+     * （ZLM 回调线程不能查库），只改库不改镜像的话，开关永远不生效。
+     *
+     * <p>开启时若流已在播，立即开录（不等下一次流上线）；
+     * 关闭时若在录，立即停止并归档 —— 否则开关要到「下一次流上下线」
+     * 才体现，用户会以为功能坏了。
+     */
     @PostMapping("/setchannelcloudrecord")
     public ApiResponse<Void> setChannelCloudRecord(@RequestParam String serial,
                                                    @RequestParam String code,
@@ -551,6 +562,23 @@ public class DeviceController {
         GbChannel channel = requireChannel(code);
         channel.setCloudRecord(cloudrecord);
         deviceService.updateChannel(channel);
+        recordPolicy.set(code, Boolean.TRUE.equals(cloudrecord));
+        try {
+            if (Boolean.TRUE.equals(cloudrecord)) {
+                // 双参精确定位会话：通道编码跨设备可能重复，单参会拿错设备
+                if (streamService.session(serial, code) != null
+                        && !recordService.isRecording(code)) {
+                    recordService.startRecordingDirect(code);
+                    log.info("通道 {} 流已在播，立即开始录像", code);
+                }
+            } else if (recordService.isRecording(code)) {
+                recordService.stopCloudRecord(code);
+                log.info("通道 {} 已关闭录像并归档", code);
+            }
+        } catch (Exception e) {
+            // 开关本身已生效；开/停录失败只告警，不回滚开关（下一次流上下线会重试）
+            log.warn("按开关即时开/停录像失败: channel={} {}", code, e.getMessage());
+        }
         return ApiResponse.ok();
     }
 

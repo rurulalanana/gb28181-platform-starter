@@ -1,8 +1,10 @@
 package io.github.rurulalanana.starter.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaType;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.mapper.GbRecordMapper;
@@ -71,6 +73,7 @@ public class SystemMetricsService {
 
     private final StreamService streamService;
     private final GbRecordMapper recordMapper;
+    private final Gb28181MediaPlatform platform;
 
     /** 网络采样基线（-1 表示尚未采样）。 */
     private volatile long lastRxBytes = -1;
@@ -190,35 +193,45 @@ public class SystemMetricsService {
     }
 
     /**
-     * 负载计数：按会话类型拆分直播与播放。
+     * 负载计数：直播 / 播放 / 录像。
      *
-     * <p><b>为什么不能直接用 {@code sessionCount()}</b>：那返回的是全部会话数，
-     * 回放/下载的会话也被算进去，导致「直播」数字虚高而「播放」恒为 0。
-     * 会话自带的 {@link MediaType} 才是区分的依据。
+     * <p>三个数字的口径不同，务必区分：
+     * <ul>
+     *   <li><b>直播</b>：{@code MediaType.REALTIME} 会话数 —— 正在从设备拉流的通道；</li>
+     *   <li><b>播放</b>：ZLM 中「有观看者」的媒体源数 —— 含实时流的播放者与
+     *       云端录像点播。不能用会话数代替：录像点播走 MP4 解复用源，
+     *       压根不建 RtpSession，只遍历会话表永远是 0；</li>
+     *   <li><b>录像</b>：{@code gb_record} 中 {@code end_time IS NULL} 的条数。</li>
+     * </ul>
      *
-     * <p>{@code DOWNLOAD}（录像下载）归入播放：它同样是对历史录像的消费，
-     * 与回放同属一类；单独列一项会让卡片信息过细。
+     * <p><b>为什么不直接用 {@code sessionCount()}</b>：那返回全部会话数，
+     * 回放会话也被算进去，导致「直播」虚高而「播放」恒为 0。
      */
     private void fillLoadCounts(SystemMetricsVo vo) {
         long live = 0;
-        long play = 0;
         try {
             for (RtpSession s : streamService.sessions()) {
-                if (s == null) {
-                    continue;
-                }
-                if (s.getType() == MediaType.REALTIME) {
+                if (s != null && s.getType() == MediaType.REALTIME) {
                     live++;
-                } else {
-                    play++;
                 }
             }
         } catch (Exception e) {
-            log.debug("统计会话数失败：{}", e.toString());
+            log.debug("统计直播会话失败：{}", e.toString());
         }
         vo.setLive(live);
-        vo.setPlay(play);
+        vo.setPlay(countPlaying());
         vo.setRecord(countRecording());
+    }
+
+    /** 正在播放的源数量（实时流 + 录像点播，以 ZLM 的观看者为准）。 */
+    private long countPlaying() {
+        try {
+            ZlmMediaServer media = platform.mediaServer();
+            return media == null ? 0L : media.playingSourceCount(null);
+        } catch (Exception e) {
+            log.debug("统计播放数失败：{}", e.toString());
+            return 0L;
+        }
     }
 
     /** CPU 与内存（JDK com.sun.management 扩展）。 */
@@ -378,11 +391,22 @@ public class SystemMetricsService {
         }
     }
 
-    /** 录制中的云端录像条数（end_time 为空表示仍未结束）。 */
+    /**
+     * 录制中的云端录像条数。
+     *
+     * <p><b>为什么读 ZLM 内存索引而不是库表</b>：自动录像的归档挂在
+     * 「流下线」事件上 —— 录制中的条目<b>还没落库</b>（没有 recordId 入库），
+     * 查库恒为 0，用户会以为「我明明开了录像怎么计数是 0」。
+     * ZLM 的内存索引才是录制状态的真源：正在录的条目 endTime=0。
+     */
     private long countRecording() {
         try {
-            return recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
-                    .isNull(GbRecord::getEndTime));
+            if (platform.recordingService() == null) {
+                return 0L;
+            }
+            return platform.recordingService().all().stream()
+                    .filter(r -> r.getEndTime() <= 0)
+                    .count();
         } catch (Exception e) {
             return 0L;
         }

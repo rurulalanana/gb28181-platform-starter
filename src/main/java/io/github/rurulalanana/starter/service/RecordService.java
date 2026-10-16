@@ -11,6 +11,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.RtpSessionManager;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.mapper.GbDeviceRecordMapper;
@@ -25,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -64,6 +66,7 @@ public class RecordService {
     private final ObjectStorageService storage;
     private final io.github.rurulalanana.starter.storage.ObjectStorageProperties storageProps;
     private final StreamService streamService;
+    private final Gb28181Properties props;
 
     // ==================== 设备侧录像（RecordInfo） ====================
 
@@ -181,6 +184,25 @@ public class RecordService {
         record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
         saveRecord(record);
         return record;
+    }
+
+    /**
+     * 直接开始录像，<b>不点播、不等流</b>。
+     *
+     * <p>专供流上线回调使用：调用时机就是流刚就绪，再走
+     * {@link #startCloudRecord} 的点播+轮询是多余的（还可能重复 INVITE）。
+     *
+     * <p>落库由归档路径统一处理：自动录像在流下线时由
+     * {@link #archiveRecording} 落库；若中途被手动停止，则走
+     * {@link #stopCloudRecord} 的常规落库。
+     *
+     * @return ZLM 录像条目；服务未启动返回 null
+     */
+    public Recording startRecordingDirect(String channelId) {
+        if (platform.recordingService() == null) {
+            return null;
+        }
+        return platform.recordingService().startRecording(channelId);
     }
 
     /**
@@ -338,10 +360,173 @@ public class RecordService {
         }
     }
 
-    /** 云端录像是否正在录制。 */
+    /**
+     * 自动录像对账：扫描录像目录，把「磁盘有、库里无」的文件补登记。
+     *
+     * <p><b>为什么扫磁盘而不是读 ZLM 内存索引</b>：实测流下线时 ZLM 侧的
+     * 停录与索引簿记存在竞态 —— 条目可能先被摘除，导致
+     * {@code stopRecording} 拿不到条目、终态永不归档（文件留在磁盘上、
+     * 云端录像列表却看不到）。而磁盘文件是最终事实：ZLM 完成归档后
+     * 会把临时名改成正式名（无 {@code .} 前缀），路径结构固定为
+     * {@code <recordRoot>/<channelId>/record/<app>/<zlmStream>/<yyyy-MM-dd>/*-<idx>.mp4}。
+     *
+     * <p>目录第三层（{@code record}）以下是 ZLM 的固定布局；
+     * 通道编码取自第一层目录名。
+     *
+     * @return 本次补登记的文件数
+     */
+    public int reconcileAutoRecordings() {
+        String root = props.getRecordRoot();
+        if (root == null || root.isBlank()) {
+            root = System.getProperty("user.dir") + "/record";
+        }
+        File rootDir = new File(root);
+        if (!rootDir.isDirectory()) {
+            return 0;
+        }
+        int count = 0;
+        File[] channelDirs = rootDir.listFiles(File::isDirectory);
+        if (channelDirs == null) {
+            return 0;
+        }
+        for (File channelDir : channelDirs) {
+            String channelId = channelDir.getName();
+            List<File> files = new ArrayList<>();
+            collectMp4s(channelDir, files);
+            for (File f : files) {
+                // 正在写的分片是临时名（ZLM 用 . 前缀，关闭后改名）：跳过
+                if (f.getName().startsWith(".")) {
+                    continue;
+                }
+                String absPath = f.getAbsolutePath();
+                Long exists = recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
+                        .eq(GbRecord::getFilePath, absPath));
+                if (exists != null && exists > 0) {
+                    continue;
+                }
+                try {
+                    saveRecord(toDiskRecord(channelId, f));
+                    count++;
+                    log.info("对账补登记录像: channel={} file={}", channelId, absPath);
+                } catch (Exception e) {
+                    log.warn("对账登记失败: file={} {}", absPath, e.getMessage());
+                }
+            }
+        }
+        return count;
+    }
+
+    /** 递归收集目录下的 mp4 文件。 */
+    private void collectMp4s(File dir, List<File> out) {
+        File[] children = dir.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File f : children) {
+            if (f.isDirectory()) {
+                collectMp4s(f, out);
+            } else if (f.getName().toLowerCase().endsWith(".mp4")) {
+                out.add(f);
+            }
+        }
+    }
+
+    /** 从磁盘文件构建录像条目（时间从文件名/修改时间推断，文件名格式见 ZLM Mp4.cpp）。 */
+    private GbRecord toDiskRecord(String channelId, File f) {
+        GbRecord r = new GbRecord();
+        r.setRecordId(java.util.UUID.randomUUID().toString().replace("-", "")
+                .substring(0, 16));
+        r.setChannelId(channelId);
+        r.setDeviceId(channelId);
+        r.setName(channelId);
+        r.setFilePath(f.getAbsolutePath());
+        r.setFileName(f.getName());
+        LocalDateTime end = lastModified(f);
+        // 文件名形如 2026-10-16-10-36-18-0.mp4，前 19 字符即开始时间；
+        // 文件名解析失败时用修改时间兜底（此时时长为 0，可接受）
+        LocalDateTime start = parseZlmFileName(f.getName());
+        if (start == null || start.isAfter(end)) {
+            start = end;
+        }
+        r.setStartTime(start);
+        // 对账时录制早已结束：以最后修改时间近似结束时间（时长 = 两者差）
+        r.setEndTime(end);
+        r.setDuration((int) Duration.between(start, end).getSeconds());
+        r.setFileSize(f.length());
+        r.setCloudRecord(true);
+        r.setImportant(false);
+        r.setCreateTime(LocalDateTime.now());
+        r.setStorageType(ObjectStorageService.TYPE_LOCAL);
+        r.setUploadState(storage.enabled() ? "PENDING" : "NONE");
+        return r;
+    }
+
+    /** 文件最后修改时间（读失败时回退到当前时间，不让对账中断）。 */
+    private LocalDateTime lastModified(File f) {
+        try {
+            return LocalDateTime.ofInstant(
+                    java.nio.file.Files.getLastModifiedTime(f.toPath()).toInstant(),
+                    java.time.ZoneId.systemDefault());
+        } catch (Exception e) {
+            return LocalDateTime.now();
+        }
+    }
+
+    /** 解析 ZLM 录像文件名中的时间（{@code yyyy-MM-dd-HH-mm-ss-<idx>.mp4}）。 */
+    private LocalDateTime parseZlmFileName(String name) {
+        try {
+            String base = name.endsWith(".mp4") ? name.substring(0, name.length() - 4) : name;
+            String[] p = base.split("-");
+            if (p.length < 6) {
+                return null;
+            }
+            return LocalDateTime.of(Integer.parseInt(p[0]), Integer.parseInt(p[1]),
+                    Integer.parseInt(p[2]), Integer.parseInt(p[3]), Integer.parseInt(p[4]),
+                    Integer.parseInt(p[5]));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 云端录像是否正在录制。
+     */
     public boolean isRecording(String channelId) {
         return platform.recordingService() != null
                 && platform.recordingService().isRecording(channelId);
+    }
+
+    /**
+     * 归档一条已结束的录像（自动录像的收尾）。
+     *
+     * <p><b>为什么不用 {@link #stopCloudRecord}</b>：那是对外接口（record/stop），
+     * 它会再调一次 {@code mk_recorder_stop} —— 而流下线时 ZLM 已自动停录，
+     * 再调一次只会拿到 null。这里只做「取条目 → 落库 → 异步上传」。
+     *
+     * <p><b>为什么不直接在回调里写库</b>：可以，但上传逻辑（对象存储、删本地文件）
+     * 与手动录像完全一致，收敛到一个方法里两条路径才不会漂移。
+     *
+     * @return 归档成功返回库里的条目；录像不存在或服务未启动返回 null
+     */
+    public GbRecord archiveRecording(String channelId) {
+        if (platform.recordingService() == null) {
+            return null;
+        }
+        // 此时 ZLM 侧已结束（流下线会自动停录），从内存索引取出终态条目
+        Recording recording = platform.recordingService().recordings(channelId).stream()
+                .filter(r -> r.getEndTime() > 0)
+                .findFirst().orElse(null);
+        if (recording == null) {
+            return null;
+        }
+        GbRecord record = toRecord(recording);
+        record.setStorageType(storage.type());
+        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
+        saveRecord(record);
+        if (storage.enabled()) {
+            uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
+        }
+        return record;
     }
 
     /**

@@ -10,7 +10,8 @@ import org.springframework.stereotype.Component;
 /**
  * 平台定时任务。
  *
- * <p>当前做三件事：心跳超时设备标记离线；操作日志过期清理；系统指标采样。
+ * <p>当前做四件事：心跳超时设备标记离线；操作日志过期清理；系统指标采样；
+ * 自动录像对账。
  *
  * <p>通道只由设备上报的目录应答产生，这里不做任何兜底登记。
  */
@@ -22,6 +23,8 @@ public class PlatformScheduler {
     private final DeviceService deviceService;
     private final OperationLogService operationLogService;
     private final SystemMetricsService systemMetricsService;
+    private final RecordService recordService;
+    private final ChannelRecordPolicy recordPolicy;
     private final Gb28181Properties props;
 
     /** 操作日志保留天数（默认 7 天）。 */
@@ -69,6 +72,27 @@ public class PlatformScheduler {
             }
         } catch (Exception e) {
             log.warn("操作日志清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 自动录像对账（默认每 60 秒）。
+     *
+     * <p><b>为什么需要</b>：自动录像的归档挂在「流下线」事件上，但事件可能丢 ——
+     * 平台重启（ZLM 内存索引清空）、设备拔线超时（直接 BYE 超时而非正常下线）。
+     * 丢了事件的录像在 ZLM 侧已经结束，但库里永远缺一条终态记录。
+     * 这里周期性把「已结束却未落库」的录像补归档，保证云端录像列表完整。
+     */
+    @Scheduled(fixedDelayString = "${gb28181.starter.record-reconcile-interval-ms:60000}",
+            initialDelayString = "${gb28181.starter.record-reconcile-initial-delay-ms:30000}")
+    public void reconcileRecordings() {
+        try {
+            int archived = recordService.reconcileAutoRecordings();
+            if (archived > 0) {
+                log.info("录像对账：补归档 {} 条丢失下线事件的录像", archived);
+            }
+        } catch (Exception e) {
+            log.warn("录像对账失败: {}", e.getMessage());
         }
     }
 }

@@ -8,7 +8,6 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-
 /**
  * 收流会话事件 → 数据库 的桥接器。
  *
@@ -18,6 +17,9 @@ import org.springframework.stereotype.Component;
  * <p>注意与 {@code ZlmMediaServer.StreamListener} 的区别：
  * 后者由 ZLM 原生事件驱动（可能因未注册推流鉴权而不投递），
  * 前者由 {@code RtpSessionManager} 内部在收到 RTP 时主动触发，更可靠。
+ *
+ * <p>云端录像的自动开/停也挂在这里：会话对象直接带 deviceId/channelId，
+ * 不需要像 ZLM 层那样反查会话。见 {@link ChannelRecordPolicy}。
  */
 @Slf4j
 @Component
@@ -27,7 +29,9 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
     private final Gb28181MediaPlatform platform;
     private final StreamService streamService;
     private final DeviceService deviceService;
+    private final RecordService recordService;
     private final PlatformAsyncExecutor asyncExecutor;
+    private final ChannelRecordPolicy recordPolicy;
 
     @PostConstruct
     public void attach() {
@@ -36,6 +40,9 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
             return;
         }
         platform.sessionManager().setListener(this);
+        // 通道云端录像开关是逐通道的库表数据，启动时载入内存镜像；
+        // 放在 attach()（@PostConstruct）里而不是构造器：此时数据源已装配完毕
+        recordPolicy.reload();
         // 同时挂 ZLM 原生流事件，覆盖「流上线但会话未跟踪」的场景。
         // 必须用 addStreamListener：媒体平台内部已注册了一个监听者驱动会话状态，
         // 用 set 会把它顶掉，导致会话永远停在 NEGOTIATING（画面能播但状态不变）。
@@ -75,13 +82,37 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
         asyncExecutor.run("流上线处理", () -> {
             deviceService.setChannelStatus(session.getDeviceId(), session.getChannelId(), "ON");
             streamService.markOnline(session.getSessionKey());
+            // 通道开了云端录像 → 自动开始录制。此方法要求流已就绪，
+            // 而会话上线事件本身就是流就绪信号，故可直接开录；
+            // 失败只告警，不影响流本身。
+            if (recordPolicy.isEnabled(session.getChannelId())
+                    && !recordService.isRecording(session.getChannelId())) {
+                try {
+                    recordService.startRecordingDirect(session.getChannelId());
+                    log.info("按通道开关自动开始录像: {}", session.getChannelId());
+                } catch (Exception e) {
+                    log.warn("自动录像启动失败: channel={} {}", session.getChannelId(), e.getMessage());
+                }
+            }
         });
     }
 
     @Override
     public void onSessionOffline(RtpSession session) {
         log.info("媒体流已下线（端口保留等待恢复）: {}", session.getSessionKey());
-        asyncExecutor.run("流下线处理", () -> streamService.markOffline(session.getSessionKey()));
+        asyncExecutor.run("流下线处理", () -> {
+            streamService.markOffline(session.getSessionKey());
+            // 流没了，ZLM 会自动停录；这里只负责把录像归档落库。
+            // 必须在确认该通道确实在录时才归档，否则普通直播也会多打一次库。
+            if (recordPolicy.isEnabled(session.getChannelId())
+                    && recordService.isRecording(session.getChannelId())) {
+                try {
+                    recordService.archiveRecording(session.getChannelId());
+                } catch (Exception e) {
+                    log.warn("录像归档失败: channel={} {}", session.getChannelId(), e.getMessage());
+                }
+            }
+        });
     }
 
     @Override
