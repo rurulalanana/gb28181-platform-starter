@@ -46,6 +46,7 @@ public class OperationLogInterceptor implements HandlerInterceptor {
     /** 不记录的具体路径（精确匹配）。 */
     private static final Set<String> EXCLUDED_PATHS = Set.of(
             "/api/v1/device/onlinestats",
+            "/api/v1/system/metrics",
             "/api/v1/stream/info"
     );
 

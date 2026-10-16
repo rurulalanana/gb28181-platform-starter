@@ -13,6 +13,11 @@ export const systemApi = {
   restart: (force = true) => post('/restart', { force })
 }
 
+/** 系统运行指标接口（`/api/v1/system/*`，概览页轮询）。 */
+export const metricsApi = {
+  get: () => get('/system/metrics')
+}
+
 /** 设备与通道接口（`/api/v1/device/*`）。 */
 export const deviceApi = {
   list: (params) => get('/device/list', params),
