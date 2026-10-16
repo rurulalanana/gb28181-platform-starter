@@ -12,6 +12,9 @@
         <el-button size="small" :loading="loading" @click="load">
           <el-icon><Refresh /></el-icon> 刷新
         </el-button>
+        <el-button size="small" title="导出设备列表（CSV）" @click="exportCsv">
+          <el-icon><Download /></el-icon> 导出
+        </el-button>
       </div>
     </header>
 
@@ -79,11 +82,24 @@
         <el-table-column prop="channelCount" label="通道数" width="76" align="center" sortable>
           <template #default="{ row }">{{ row.channelCount ?? 0 }}</template>
         </el-table-column>
-        <el-table-column label="在线状态" width="88" align="center">
+        <el-table-column label="在线状态" width="120" align="center">
           <template #default="{ row }">
-            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
-              {{ row.online ? '在线' : '离线' }}
-            </span>
+            <!-- 对齐参考站：状态文字点击查看状态记录，图标点击查看流量统计 -->
+            <div class="status-cell">
+              <span
+                class="badge is-clickable"
+                :class="row.online ? 'is-online' : 'is-offline'"
+                title="点击查看状态记录"
+                @click="openStatusLog(row)"
+              >{{ row.online ? '在线' : '离线' }}</span>
+              <el-icon
+                class="traffic-icon"
+                title="点击查看流量统计"
+                @click="openStreamLog(row)"
+              >
+                <Histogram />
+              </el-icon>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="240" align="center">
@@ -177,6 +193,52 @@
         <el-button @click="editDialog = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="doSave">确定</el-button>
       </template>
+    </el-dialog>
+
+    <!-- 设备状态记录（对齐参考站：点击在线/离线文字查看） -->
+    <el-dialog
+      v-model="statusLogDialog"
+      :title="'设备状态记录 · ' + (statusLogTarget?.customName || statusLogTarget?.name || statusLogTarget?.id || '')"
+      width="580px"
+    >
+      <el-table v-loading="statusLogLoading" :data="statusLogRows" size="small" max-height="420">
+        <el-table-column prop="createdAt" label="时间" width="180">
+          <template #default="{ row }"><span class="mono">{{ row.createdAt }}</span></template>
+        </el-table-column>
+        <el-table-column label="状态" width="90" align="center">
+          <template #default="{ row }">
+            <span
+              class="badge"
+              :class="String(row.status || '').toUpperCase() === 'ON' ? 'is-online' : 'is-offline'"
+            >{{ String(row.status || '').toUpperCase() === 'ON' ? '在线' : '离线' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
+        <template #empty>
+          <el-empty description="暂无状态记录" :image-size="64" />
+        </template>
+      </el-table>
+      <div class="dialog-foot-tip">记录保留 {{ statusLogReserveDays }} 天，由平台定时清理</div>
+    </el-dialog>
+
+    <!-- 流量统计（嵌入式 ZLMediaKit 无计数接口，弹窗如实说明） -->
+    <el-dialog
+      v-model="streamLogDialog"
+      :title="'流量统计 · ' + (streamLogTarget?.customName || streamLogTarget?.name || streamLogTarget?.id || '')"
+      width="520px"
+    >
+      <el-empty
+        v-if="!streamLogRows.length"
+        :description="streamLogNote || '暂无流量数据'"
+        :image-size="72"
+      />
+      <el-table v-else :data="streamLogRows" size="small" max-height="380">
+        <el-table-column prop="time" label="时间" min-width="170" />
+        <el-table-column prop="channelId" label="通道" min-width="170">
+          <template #default="{ row }"><span class="mono">{{ row.channelId }}</span></template>
+        </el-table-column>
+        <el-table-column prop="bytes" label="流量(字节)" width="120" align="right" />
+      </el-table>
     </el-dialog>
   </div>
 </template>
@@ -287,6 +349,89 @@ async function changeTransport(row, value) {
     ElMessage.error(e.message || '切换失败')
   } finally {
     transportPending.delete(row.id)
+  }
+}
+
+/* ---------------- 状态记录 / 流量统计（对齐参考站：点击状态查看） ---------------- */
+
+const statusLogDialog = ref(false)
+const statusLogTarget = ref(null)
+const statusLogLoading = ref(false)
+const statusLogRows = ref([])
+const statusLogReserveDays = ref(30)
+
+/** 打开设备状态记录弹窗（点击「在线/离线」文字触发）。 */
+async function openStatusLog(row) {
+  statusLogTarget.value = row
+  statusLogRows.value = []
+  statusLogDialog.value = true
+  statusLogLoading.value = true
+  try {
+    const data = await deviceApi.statusLog({ serial: row.id, limit: 200 })
+    statusLogRows.value = data?.logList || []
+    statusLogReserveDays.value = data?.logReserveDays ?? 30
+  } catch (e) {
+    ElMessage.error(e.message || '加载状态记录失败')
+  } finally {
+    statusLogLoading.value = false
+  }
+}
+
+const streamLogDialog = ref(false)
+const streamLogTarget = ref(null)
+const streamLogRows = ref([])
+const streamLogNote = ref('')
+
+/** 打开流量统计弹窗（点击状态旁图表图标触发）。 */
+async function openStreamLog(row) {
+  streamLogTarget.value = row
+  streamLogRows.value = []
+  streamLogNote.value = ''
+  streamLogDialog.value = true
+  try {
+    const data = await deviceApi.streamLog({ serial: row.id })
+    streamLogRows.value = data?.list || []
+    streamLogNote.value = data?.note || ''
+  } catch (e) {
+    ElMessage.error(e.message || '加载流量统计失败')
+  }
+}
+
+/* ---------------- 导出设备列表（CSV） ---------------- */
+
+async function exportCsv() {
+  try {
+    // limit=0 不分页，拉全量后导出
+    const data = await deviceApi.list({ start: 0, limit: 0 })
+    const list = data?.deviceList || []
+    if (!list.length) {
+      ElMessage.warning('没有可导出的设备')
+      return
+    }
+    const header = ['设备国标编号', '名称', '厂商', '型号', '在线状态', '流传输', 'IP 地址', '通道数', '最后注册']
+    const rows = list.map((d) => [
+      d.id,
+      d.customName || d.name || '',
+      d.manufacturer || '',
+      d.model || '',
+      d.online ? '在线' : '离线',
+      d.mediaTransport || 'UDP',
+      d.remoteIp || '',
+      d.channelCount ?? 0,
+      d.lastRegisterAt || ''
+    ])
+    const csv = '\uFEFF' + [header, ...rows]
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `设备列表-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+    ElMessage.success(`已导出 ${list.length} 台设备`)
+  } catch (e) {
+    ElMessage.error(e.message || '导出失败')
   }
 }
 
@@ -428,6 +573,31 @@ onMounted(load)
 }
 .row-actions .act-edit:hover {
   color: var(--warning-600, #d48806);
+}
+
+/* 状态列：可点击的状态徽标 + 流量图标 */
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-cell .is-clickable {
+  cursor: pointer;
+}
+.traffic-icon {
+  font-size: 13px;
+  color: var(--ink-400, #909399);
+  cursor: pointer;
+}
+.traffic-icon:hover {
+  color: var(--brand-500, #2f5c94);
+}
+
+/* 弹窗底部说明 */
+.dialog-foot-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-400, #909399);
 }
 
 /* 行内流传输切换：紧凑分段按钮（比下拉在窄列里更清晰、可见当前值） */
