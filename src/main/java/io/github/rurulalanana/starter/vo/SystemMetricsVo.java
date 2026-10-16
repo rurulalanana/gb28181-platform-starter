@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.vo;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -35,14 +36,44 @@ public class SystemMetricsVo implements Serializable {
     /** 网络发送速率（Mbps；首次采样或非 Linux 为 null）。 */
     private Double netTxMbps;
 
-    /** 负载计数：点播中的实时流数。 */
+    /** 负载计数：直播中的会话数（{@code MediaType.REALTIME}）。 */
     private Long live;
 
-    /** 负载计数：播放数（暂无数据源，恒 0）。 */
+    /** 负载计数：播放数（{@code MediaType.PLAYBACK} 与 {@code DOWNLOAD}）。 */
     private Long play;
 
     /** 负载计数：云端录像录制中数。 */
     private Long record;
+
+    /** 服务端累积的采样历史（页面首次加载即可画出完整曲线）。 */
+    private History history;
+
+    /**
+     * 采样历史（时间正序，各数组等长）。
+     *
+     * <p>由服务端持续采样维护，前端进页面直接拿它铺满折线图 ——
+     * 否则图表从零开始累积，刚打开时只有一个点，看不出趋势。
+     */
+    @Data
+    public static class History implements Serializable {
+
+        private static final long serialVersionUID = 1L;
+
+        /** 采样时刻（{@code HH:mm:ss}）。 */
+        private List<String> time = new ArrayList<>();
+
+        /** CPU 使用率（0~100）。 */
+        private List<Double> cpu = new ArrayList<>();
+
+        /** 内存占用率（0~100）。 */
+        private List<Double> mem = new ArrayList<>();
+
+        /** 网络接收速率（Mbps）。 */
+        private List<Double> rx = new ArrayList<>();
+
+        /** 网络发送速率（Mbps）。 */
+        private List<Double> tx = new ArrayList<>();
+    }
 
     /** 磁盘挂载点用量。 */
     @Data

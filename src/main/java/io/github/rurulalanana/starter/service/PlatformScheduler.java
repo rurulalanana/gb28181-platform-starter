@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 /**
  * 平台定时任务。
  *
- * <p>当前做两件事：心跳超时设备标记离线；操作日志过期清理。
+ * <p>当前做三件事：心跳超时设备标记离线；操作日志过期清理；系统指标采样。
  *
  * <p>通道只由设备上报的目录应答产生，这里不做任何兜底登记。
  */
@@ -21,6 +21,7 @@ public class PlatformScheduler {
 
     private final DeviceService deviceService;
     private final OperationLogService operationLogService;
+    private final SystemMetricsService systemMetricsService;
     private final Gb28181Properties props;
 
     /** 操作日志保留天数（默认 7 天）。 */
@@ -38,6 +39,19 @@ public class PlatformScheduler {
         } catch (Exception e) {
             log.warn("离线巡检失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 系统指标采样（默认每 3 秒，与前端轮询间隔一致）。
+     *
+     * <p><b>为什么由服务端定时采而不是等前端请求</b>：历史曲线要的是
+     * 「过去 3 分钟」，而请求只在有人开页面时才发生。若靠请求驱动，
+     * 第一个打开概览页的人只能看到一个点，得等 3 分钟才成线。
+     * 这里恒定频率积累，页面打开即有完整曲线。
+     */
+    @Scheduled(fixedDelayString = "${gb28181.starter.metrics-sample-interval-ms:3000}")
+    public void sampleSystemMetrics() {
+        systemMetricsService.sample();
     }
 
     /**

@@ -1,25 +1,20 @@
 <template>
-  <div ref="pageRef" class="page dash-page">
-    <!-- 页头：标题 + 大屏展示（对齐参考站概览页头部） -->
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">服务器概览</h2>
-        <p class="page-subtitle">
-          主机指标与负载计数，每 3 秒自动刷新<span v-if="lastSync"> · 最近同步 {{ lastSync }}</span>
-        </p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load(true)">
-          <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button size="small" @click="toggleFullscreen">
-          <el-icon><FullScreen /></el-icon> 大屏展示
-        </el-button>
-      </div>
-    </header>
+  <div ref="pageRef" class="page is-fill dash-page">
+    <!--
+      标题与副标题各占一行却不带信息量，删掉把高度让给图表；
+      刷新与大屏是操作入口，保留但压成一行靠右，不单独占标题位。
+    -->
+    <div class="dash-actions">
+      <el-button size="small" :loading="loading" @click="load(true)">
+        <el-icon><Refresh /></el-icon> 刷新
+      </el-button>
+      <el-button size="small" @click="toggleFullscreen">
+        <el-icon><FullScreen /></el-icon> 大屏展示
+      </el-button>
+    </div>
 
     <!-- 6 卡网格：3 列 × 2 行（通道信息 / 负载 / CPU / 存储 / 带宽 / 内存） -->
-    <section class="dash-grid">
+    <section ref="gridRef" class="dash-grid">
       <!-- 1. 通道信息（两个圆环） -->
       <div class="dash-card">
         <div class="dc-title">通道信息</div>
@@ -104,24 +99,35 @@ import { deviceApi, metricsApi } from '@/api'
 
 echarts.use([BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
-/** 折线历史采样上限（60 点 × 3 秒 ≈ 3 分钟视窗）。 */
-const MAX_POINTS = 60
-/** 轮询间隔（毫秒）。 */
+/**
+ * 轮询间隔（毫秒）。
+ *
+ * <p>与服务端采样间隔保持一致 —— 比它快只是重复取到同一份快照，
+ * 比它慢则会丢掉中间点。
+ */
 const POLL_MS = 3000
 
 const pageRef = ref(null)
+const gridRef = ref(null)
 const loadRef = ref(null)
 const cpuRef = ref(null)
 const netRef = ref(null)
 const memRef = ref(null)
 
 const loading = ref(false)
-const lastSync = ref('')
 const stats = ref(null)
 const metrics = ref(null)
-/** 折线历史（页面打开期间累积）。 */
+/**
+ * 折线历史缓冲（由服务端快照直接覆盖，前端不自行累积）。
+ *
+ * <p>为什么不在前端累积：服务端以 3 秒恒定频率采样并保留固定长度的窗口，
+ * 前端只需把快照画出来。两端各存一份历史必然会因为采样时刻不同而对不齐，
+ * 表现为 X 轴重复刻度或曲线出现阶梯。
+ */
 const hist = { t: [], cpu: [], mem: [], rx: [], tx: [] }
 let timer = null
+/** 盯网格尺寸，窗口/全屏/侧栏变化都会改它，图表据此重算。 */
+let ro = null
 const charts = {}
 
 /* ---------------- 主题色（取自自家设计令牌） ---------------- */
@@ -159,10 +165,6 @@ function fmtSize(bytes) {
   return gb.toFixed(1) + ' GB'
 }
 
-function fmtTime(d) {
-  return d.toLocaleTimeString('zh-CN', { hour12: false })
-}
-
 /* ---------------- 数据加载 ---------------- */
 async function load(manual = false) {
   if (manual) loading.value = true
@@ -173,26 +175,28 @@ async function load(manual = false) {
     ])
     if (s) stats.value = s
     if (m) metrics.value = m
-    pushHistory(m)
+    applyHistory(m?.history)
     updateCharts()
-    lastSync.value = fmtTime(new Date())
   } finally {
     loading.value = false
   }
 }
 
-/** 把最新指标追加进历史缓冲。 */
-function pushHistory(m) {
-  const now = new Date()
-  const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-  hist.t.push(label)
-  hist.cpu.push(m?.cpu ?? null)
-  hist.mem.push(m?.memTotal ? Math.round((m.memUsed / m.memTotal) * 1000) / 10 : null)
-  hist.rx.push(m?.netRxMbps ?? null)
-  hist.tx.push(m?.netTxMbps ?? null)
-  for (const k of Object.keys(hist)) {
-    if (hist[k].length > MAX_POINTS) hist[k].shift()
-  }
+/**
+ * 用服务端历史铺满缓冲。
+ *
+ * <p><b>为什么不再本地追加</b>：服务端已按 3 秒恒定频率采样并保留 60 点，
+ * 前端每次轮询直接取快照就是完整曲线。若前端再 push 一个「本地时刻」的点，
+ * 会与快照里同一时刻的点重复 —— 表现为 X 轴出现两个相同刻度。
+ * 采样源唯一，才能保证刻度与数据一一对应。
+ */
+function applyHistory(h) {
+  if (!h?.time?.length) return
+  hist.t = [...h.time]
+  hist.cpu = [...(h.cpu || [])]
+  hist.mem = [...(h.mem || [])]
+  hist.rx = [...(h.rx || [])]
+  hist.tx = [...(h.tx || [])]
 }
 
 /* ---------------- 图表 ---------------- */
@@ -328,46 +332,70 @@ function onResize() {
   for (const c of Object.values(charts)) c.resize()
 }
 
-function onFullscreenChange() {
-  // 全屏切换后布局尺寸变化，图表需要重算
-  setTimeout(() => onResize(), 120)
-}
-
 onMounted(async () => {
   await load()
   await nextTick()
   initCharts()
   updateCharts()
-  window.addEventListener('resize', onResize)
-  document.addEventListener('fullscreenchange', onFullscreenChange)
+  // 直接盯网格尺寸：窗口缩放、进/退全屏、侧栏折叠都会改它。
+  // 比分别监听 window 与 fullscreenchange 更全，也不会漏掉非窗口原因引起的重排。
+  // rAF 包裹是惯例 —— 在观察回调里同步改布局会触发 ResizeObserver 循环告警。
+  ro = new ResizeObserver(() => requestAnimationFrame(onResize))
+  if (gridRef.value) ro.observe(gridRef.value)
   timer = setInterval(() => load(), POLL_MS)
 })
 
 onUnmounted(() => {
   if (timer) clearInterval(timer)
-  window.removeEventListener('resize', onResize)
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  ro?.disconnect()
   for (const c of Object.values(charts)) c.dispose()
 })
 </script>
 
 <style scoped>
-/* 6 卡网格：3 列 × 2 行（小屏降列） */
+/* 操作入口：靠右一行，不再单独占标题位 */
+.dash-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 6 卡网格：3 列 × 2 行，吃满剩余高度（小屏降列） */
 .dash-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 行高由容器均分 —— 不写 minmax 下限，否则小窗口会把网格撑出滚动条 */
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 14px;
+  /* 吃掉 .page.is-fill 里除操作行外的全部高度 */
+  flex: 1;
+  min-height: 0;
 }
 
 @media (max-width: 992px) {
   .dash-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* 2 列时 6 卡变 3 行 */
+    grid-template-rows: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 640px) {
+  /*
+   * 窄屏卡片改为纵向堆叠，总高必然超过一屏 ——
+   * 此时必须放弃「铺满高度」，否则 grid 会被压到容器高、
+   * 而卡片仍按 240px 最小值溢出到网格外，滚动计算就不准了。
+   */
+  .dash-page,
+  .dash-grid {
+    flex: none;
+  }
+
   .dash-grid {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: minmax(240px, auto);
   }
 }
 
@@ -375,7 +403,8 @@ onUnmounted(() => {
 .dash-card {
   display: flex;
   flex-direction: column;
-  min-height: 280px;
+  /* 高度交给网格行，不再写 min-height —— 那是底部留空的根因 */
+  min-height: 0;
   background: var(--bg-surface);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
@@ -400,7 +429,7 @@ onUnmounted(() => {
 .chart-fill {
   width: 100%;
   height: 100%;
-  min-height: 200px;
+  /* 不写 min-height：那会让图表比卡片高，把卡片撑开、又留出新的空白 */
 }
 
 /* 通道信息：两个圆环并排 */
