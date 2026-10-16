@@ -66,6 +66,17 @@ public class StreamService {
         if (ch != null && !ch.isOnline()) {
             throw BizException.badRequest("通道不在线：" + channel);
         }
+        // 没有活会话，但设备侧可能仍在推上一轮的流（下级平台收不到 BYE 会一直推）。
+        // 此时若直接发 INVITE，设备会为同一通道开第二路推流 —— 实测 LiveGBS 真的会
+        // 推第二路（每路约 3 Mbps），同一通道多点几次就攒成多路，用户看到的就是
+        // 「级联那边显示还有 N 个视频正在推送」。先把已在推的那路认领回来即可。
+        RtpSession adopted = platform.sessionManager().reclaimOrphanForChannel(deviceId, channel);
+        if (adopted != null) {
+            GbStream stream = toStream(adopted, GbStream.TYPE_LIVE);
+            save(stream);
+            deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
+            return stream;
+        }
         // 平台重启后 SIP 注册表为空（纯内存），而设备要到下次心跳才自愈，
         // 空窗期内点播会报「设备未注册或会话已失效」。这里按库里的地址先补一次，
         // 让重启后立刻点播也能成功。
@@ -445,6 +456,8 @@ public class StreamService {
             if (stale.isEmpty()) {
                 return 0;
             }
+            // 先补发 BYE 再改状态：这些对话在设备/下级平台侧可能还「活着」。
+            releaseStaleRemoteSessions(stale);
             LocalDateTime now = LocalDateTime.now();
             for (GbStream s : stale) {
                 s.setState(GbStream.STATE_CLOSED);
@@ -456,6 +469,79 @@ public class StreamService {
             log.warn("收敛残留流状态失败（不影响启动）: {}", e.getMessage());
             return 0;
         }
+    }
+
+    /** 单次启动最多补发多少个 BYE（防止异常数据导致刷屏）。 */
+    private static final int MAX_STALE_RELEASE = 50;
+
+    /**
+     * 为上一轮运行遗留的对话补发 BYE，释放设备侧仍在进行的推流。
+     *
+     * <p><b>为什么必须补</b>：进程被强杀（{@code gb.sh} 优雅停止超时后会强制 kill）
+     * 时来不及发 BYE，设备/下级平台不知道我方已退出，会一直推下去 ——
+     * 实测 LiveGBS 每路约 3 Mbps 且从不超时，多重启几次就攒成多路重复推流，
+     * 用户看到的就是「级联那边显示还有 N 个视频正在推送」，只能人工清理。
+     *
+     * <p>平台侧已无对话信息（内存会话随进程消失），只能靠库里持久化的 Call-ID 补发。
+     * 实测 LiveGBS 按 Call-ID 匹配，不带原 tag 也会回 200 OK 并停止推流；
+     * 对严格实现的设备，已结束的对话会回 481 —— 无害。
+     *
+     * @param stale 上一轮遗留（未 CLOSED）的流记录
+     * @return 成功发出的 BYE 数
+     */
+    private int releaseStaleRemoteSessions(List<GbStream> stale) {
+        Gb28181MediaService media = platform.mediaService();
+        if (media == null) {
+            return 0;
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        int sent = 0;
+        int skipped = 0;
+        for (GbStream s : stale) {
+            String callId = s.getCallId();
+            if (callId == null || callId.isBlank() || !seen.add(callId)) {
+                continue;
+            }
+            if (seen.size() > MAX_STALE_RELEASE) {
+                skipped++;
+                continue;
+            }
+            try {
+                healRegistryForRelease(s.getDeviceId());
+                if (media.byeQuietly(s.getDeviceId(), s.getChannelId(), callId)) {
+                    sent++;
+                }
+            } catch (Exception e) {
+                log.debug("补发 BYE 失败: callId={} {}", callId, e.getMessage());
+            }
+        }
+        if (sent > 0) {
+            log.info("已为 {} 个上一轮遗留对话补发 BYE（释放设备侧仍在进行的推流）", sent);
+        }
+        if (skipped > 0) {
+            log.warn("遗留对话过多，跳过 {} 个未补发 BYE", skipped);
+        }
+        return sent;
+    }
+
+    /**
+     * 补发 BYE 前先把设备的 SIP 会话补回来。
+     *
+     * <p><b>为什么必须补</b>：平台刚启动时 SIP 注册表是空的（纯内存），设备要到
+     * 下一次心跳才回来 —— 实测启动瞬间补发 BYE 直接报「设备未注册或会话已失效」，
+     * 于是回收动作全部失效，残余推流继续跑。用库里存的 {@code remote_ip/remote_port}
+     * 先把会话建起来即可（与点播路径的 {@code healRegistryIfNeeded} 同一套机制）。
+     */
+    private void healRegistryForRelease(String deviceId) {
+        if (deviceId == null || deviceId.isBlank() || registryHealer.inRegistry(deviceId)) {
+            return;
+        }
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            return;
+        }
+        registryHealer.healFromDb(deviceId, device.getRemoteIp(), device.getRemotePort(),
+                device.getTransport());
     }
 
     /**

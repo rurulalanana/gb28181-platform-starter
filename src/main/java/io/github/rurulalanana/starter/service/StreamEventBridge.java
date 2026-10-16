@@ -153,9 +153,16 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
             // 某路流实际在用的 SSRC。若按「最新一条」恢复，就会把孤儿流认领到
             // 完全不相干的通道 —— 正是「离线设备的通道显示成在线」的成因。
             java.util.Map<String, java.util.Set<String>> keysBySsrc = new java.util.LinkedHashMap<>();
+            // SSRC → 该流最近一次对话的 Call-ID。认领出的孤儿流要靠它发 BYE
+            // （没有 Call-ID 就只能本地注销媒体源，设备侧会一直推下去）。
+            java.util.Map<String, String> callIdBySsrc = new java.util.LinkedHashMap<>();
             for (GbStream s : rows) {
                 keysBySsrc.computeIfAbsent(s.getSsrc(), k -> new java.util.LinkedHashSet<>())
                         .add(s.getStreamKey());
+                if (s.getCallId() != null && !s.getCallId().isBlank()) {
+                    // rows 已按 start_time 倒序，取最新一条
+                    callIdBySsrc.putIfAbsent(s.getSsrc(), s.getCallId());
+                }
             }
             int ok = 0;
             int ambiguous = 0;
@@ -167,7 +174,8 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
                     continue;
                 }
                 if (platform.sessionManager().restoreSsrcMapping(
-                        e.getKey(), e.getValue().iterator().next())) {
+                        e.getKey(), e.getValue().iterator().next(),
+                        callIdBySsrc.get(e.getKey()))) {
                     ok++;
                 }
             }
