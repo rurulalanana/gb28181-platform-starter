@@ -4,10 +4,6 @@
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">实时预览</h2>
-        <p class="page-subtitle">
-          点击右侧通道快速上屏，或在画面格内下拉选择通道 · 当前
-          <b class="text-brand">{{ playingCount }}</b> / {{ gridSize }} 路播放中
-        </p>
       </div>
       <div class="page-actions">
         <el-radio-group v-model="gridSize" size="small">
@@ -85,6 +81,14 @@
               <span class="ellipsis">{{ tile.channelName || tile.code }}</span>
             </div>
 
+            <!-- 选中角标：播放中且未显示通道名时才需要（否则与通道标签重叠） -->
+            <div
+              v-if="tile.id === activeTileId && !(tile.playing && showName)"
+              class="tile-active-badge"
+            >
+              {{ tile.id }}
+            </div>
+
             <!-- 右上角：状态灯 -->
             <div v-if="tile.playing" class="tile-state" :title="tile.state">
               <span class="pulse-dot" />
@@ -104,36 +108,22 @@
             </div>
           </div>
 
-          <!-- 格内工具条 -->
+          <!--
+            格内工具条：始终占位，避免有按钮/没按钮的格子高度不一致
+            （视频墙是网格，行高一致才能对齐；去掉下拉后这里只剩图标按钮）
+          -->
           <div class="tile-bar">
-            <el-select
-              v-model="tile.channelKey"
-              placeholder="选择通道"
-              filterable
-              clearable
-              size="small"
-              class="tile-select"
-              @change="onChannelChange(tile)"
-            >
-              <el-option
-                v-for="opt in channelOptions"
-                :key="opt.value"
-                :label="opt.label"
-                :value="opt.value"
-              />
-            </el-select>
-
             <el-button
-              v-if="!tile.playing"
+              v-if="!tile.playing && tile.channelKey"
               type="primary"
               size="small"
               class="tile-btn tile-btn-play"
-              :disabled="!tile.channelKey"
+              title="播放"
               @click="playTile(tile)"
             >
               <el-icon><VideoPlay /></el-icon>
             </el-button>
-            <template v-else>
+            <template v-else-if="tile.playing">
               <el-button
                 v-if="supportsPtz(tile.ptzType)"
                 size="small"
@@ -214,9 +204,8 @@
             :key="c.deviceId + '/' + c.id"
             class="channel-item"
             :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
-            title="单击上屏到空位，双击上屏到选中格"
+            title="点击上屏到选中格（焦点自动后移）"
             @click="pickChannel(c)"
-            @dblclick="playOnActiveTile(c)"
           >
             <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
             <span class="ch-main">
@@ -251,9 +240,8 @@
                 :key="c.id"
                 class="channel-item"
                 :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
-                title="单击上屏到空位，双击上屏到选中格"
+                title="点击上屏到选中格（焦点自动后移）"
                 @click="pickChannel(c)"
-                @dblclick="playOnActiveTile(c)"
               >
                 <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
                 <span class="ch-main">
@@ -480,17 +468,6 @@ function stopRotate() {
   }
 }
 
-/** 双击通道：直接上屏到当前选中的画面格。 */
-function playOnActiveTile(channel) {
-  const tile =
-    visibleTiles.value.find((t) => t.id === activeTileId.value) || visibleTiles.value[0]
-  if (!tile) return
-  if (tile.playing) stopTile(tile)
-  tile.channelKey = `${channel.deviceId}/${channel.id}`
-  applyChannel(tile, channel)
-  playTile(tile)
-}
-
 /** 画面格点击：单选该格；320ms 内再次点击同一格视为双击 → 切换全屏。 */
 const tileClick = { id: 0, ts: 0 }
 
@@ -591,13 +568,6 @@ const filteredChannels = computed(() => {
   })
 })
 
-const channelOptions = computed(() =>
-  filteredChannels.value.map((c) => ({
-    label: `${c.customName || c.name || c.id}${c.deviceOnline ? '' : '（离线）'}`,
-    value: `${c.deviceId}/${c.id}`
-  }))
-)
-
 function setContainerRef(id, el) {
   if (el) containerRefs[id] = el
 }
@@ -644,28 +614,31 @@ async function loadChannels() {
   }
 }
 
-/** 点击右侧通道：填充第一个空闲格子并播放。 */
+/**
+ * 点击右侧通道：上屏到当前选中的画面格，并把选中位置往后推一格。
+ *
+ * <p><b>为什么是「选中格」而不是「第一个空位」</b>：用户先点画面格选出要操作的位置，
+ * 再点通道，语义就是「把这一路放到我刚选的位置」。若改成找第一个空位，
+ * 用户的选择被忽略，连点几个通道会跳到与预期不同的格子上。
+ *
+ * <p><b>为什么播放后 active 要 +1</b>：连续上屏是常见操作 —— 选好起始格后
+ * 依次点几个通道，每次都期望落在下一格。自动前移后无需反复点格子，
+ * 且视觉焦点跟着走，能立刻看出「下一个会落在哪」。
+ *
+ * <p>前移只在还有可见格时进行；已到最后一格就停在原地，
+ * 再次点击会覆盖该格（而不是绕回第 1 格，那样会意外覆盖别处的画面）。
+ */
 function pickChannel(channel) {
-  const target = visibleTiles.value.find((t) => !t.playing && !t.channelKey) || visibleTiles.value[0]
+  const target =
+    visibleTiles.value.find((t) => t.id === activeTileId.value) || visibleTiles.value[0]
   if (!target) return
   if (target.playing) stopTile(target)
   target.channelKey = `${channel.deviceId}/${channel.id}`
   applyChannel(target, channel)
   playTile(target)
-}
-
-function onChannelChange(tile) {
-  if (tile.playing) stopTile(tile)
-  const channel = channels.value.find((c) => `${c.deviceId}/${c.id}` === tile.channelKey)
-  if (channel) {
-    applyChannel(tile, channel)
-  } else {
-    tile.serial = ''
-    tile.code = ''
-    tile.channelName = ''
-    tile.ptzType = 0
-    tile.state = '未选择通道'
-  }
+  // 焦点前移到下一格，方便连续上屏
+  const next = visibleTiles.value.find((t) => t.id === target.id + 1)
+  if (next) activeTileId.value = next.id
 }
 
 function applyChannel(tile, channel) {
@@ -924,13 +897,9 @@ onUnmounted(() => {
 .tile-bar {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 5px;
   height: var(--control-h);
-}
-
-.tile-select {
-  flex: 1;
-  min-width: 0;
 }
 
 .tile-btn {
@@ -969,21 +938,6 @@ onUnmounted(() => {
   background: var(--white);
   border-color: var(--line);
   color: var(--ink-300);
-}
-
-/* 格内下拉：不聚焦/不悬停时无边框（视频墙不是表单），避免每格都像输入框 */
-.tile-select :deep(.el-select__wrapper) {
-  background: transparent;
-  box-shadow: 0 0 0 1px transparent inset;
-}
-
-.tile-select :deep(.el-select__wrapper:hover) {
-  background: var(--white);
-  box-shadow: 0 0 0 1px var(--line) inset;
-}
-
-.tile-select :deep(.el-select__wrapper.is-focused) {
-  background: var(--white);
 }
 
 /* 顶部"全部停止"：默认态朴素，hover 才提示危险 */
@@ -1272,9 +1226,43 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-/* 选中的画面格：2px 强调描边 */
+/* 选中的画面格：实心强调描边 + 外发光，确保一眼能看出操作的是哪一格 */
 .tile.is-active .video-box {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  box-shadow:
+    inset 0 0 0 3px var(--accent),
+    0 0 0 1px var(--accent),
+    0 0 14px rgba(44, 98, 214, 0.55);
+}
+
+/* 选中角标：空格子没有通道标签，靠它标明当前操作的是哪一格 */
+.tile-active-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-md) 0 var(--r-sm) 0;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.tile.is-active .tile-tag {
+  background: var(--accent);
+  color: #fff;
+}
+
+.tile.is-active .tile-tag .tile-index {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
 }
 
 /* 工具栏里的开关与轮播按钮 */
