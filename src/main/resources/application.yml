@@ -114,6 +114,10 @@ gb28181:
     collect-device-info: true
     # 是否采集设备状态
     collect-device-status: true
+    # 自动录像对账间隔（毫秒）：补归档丢失下线事件的录像（见 RecordService#reconcileAutoRecordings）
+    record-reconcile-interval-ms: 60000
+    # 对账首跑延迟（毫秒）：给启动过程中的流上下线事件留出到达时间
+    record-reconcile-initial-delay-ms: 30000
 
   # 对象存储（云端录像归档）。采用 S3 兼容协议，一套配置覆盖主流对象存储：
   #   阿里云 OSS：endpoint=https://oss-cn-hangzhou.aliyuncs.com  region=cn-hangzhou  path-style=false
