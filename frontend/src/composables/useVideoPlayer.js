@@ -230,6 +230,9 @@ export function useVideoPlayer(containerRef) {
     }
     if (disposed) return
 
+    /** 本次播放是否已进入失败/重连流程（暂停自愈据此退让）。 */
+    let failing = false
+
     destroyPlayer()
     const container = createHost()
     if (!container) {
@@ -263,14 +266,18 @@ export function useVideoPlayer(containerRef) {
       // 静音起播：浏览器只允许静音视频自动播放；
       // 用户点击底部音量按钮即可恢复声音
       isNotMute: false,
-      // 显示全屏/截图/播放/音量按钮，便于用户手动开声音
-      operateBtns: { fullscreen: true, screenshot: true, play: true, audio: true },
+      // 只保留全屏/截图/音量，**不放播放/暂停按钮**：
+      // 直播画面本来就不该被暂停，而控制条是浮在画面底部的，
+      // 点画面时很容易误触暂停键，表现为「点了一下画面就卡住了」。
+      operateBtns: { fullscreen: true, screenshot: true, audio: true },
       // 控制条改为浮层：jessibuca 默认会为底部控制条预留 38px 高度
       // （canvas 高度 = 容器高度 − 控制条高度），导致画面永远填不满容器。
       // 开启自动隐藏后控制条浮在画面上，不占用布局高度。
       controlAutoHide: true,
-      // 支持双击全屏
-      supportDblclickFullscreen: true,
+      // 双击全屏由页面自己实现（画面格的双击检测）：
+      // SDK 自带的 dblclick 全屏与页面同时触发会互相抢夺，且它内部的全屏
+      // 状态与真实全屏不同步（控制台报 "API can only be initiated by a user gesture"）。
+      supportDblclickFullscreen: false,
       // 关闭调试打印（需要排查时改 true）
       debug: false
     })
@@ -288,11 +295,30 @@ export function useVideoPlayer(containerRef) {
       stats.value = s
     })
     instance.on('play', () => {
+      failing = false
       playing.value = true
       state.value = '播放中'
     })
+    /**
+     * 暂停自愈：直播不允许被暂停。
+     *
+     * <p>控制条已不提供播放/暂停按钮，但 SDK 仍有其他会置暂停的路径
+     * （页面隐藏自动暂停、浏览器媒体策略等）。只要不是我们主动停流、
+     * 也不是正在走重连流程，就用同一个地址重新拉起播放。
+     */
+    instance.on('pause', () => {
+      if (disposed || failing || player.value !== instance) return
+      if (document.visibilityState !== 'visible') return
+      playing.value = false
+      try {
+        instance.play(url)
+      } catch (e) {
+        // 拉起失败交给既有的错误/超时重连机制
+      }
+    })
     instance.on('error', (err) => {
       if (disposed) return
+      failing = true
       state.value = '播放异常：' + formatError(err)
       playing.value = false
       // 流可能仍在建立中，短暂后重试
@@ -300,6 +326,7 @@ export function useVideoPlayer(containerRef) {
     })
     instance.on('timeout', () => {
       if (disposed) return
+      failing = true
       state.value = '连接超时，重试中…'
       playing.value = false
       scheduleRetry(url)
@@ -354,6 +381,12 @@ export function useVideoPlayer(containerRef) {
         'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000'
       hostEl.appendChild(video)
       webrtcVideoEl = video
+
+      // 直播不应被暂停：原生控制条上的暂停键点了会立即恢复（保留控制条以便调音量）
+      video.addEventListener('pause', () => {
+        if (disposed || document.visibilityState !== 'visible') return
+        video.play().catch(() => {})
+      })
 
       const conn = new RTCPeerConnection({ iceServers: [] })
       pc.value = conn
