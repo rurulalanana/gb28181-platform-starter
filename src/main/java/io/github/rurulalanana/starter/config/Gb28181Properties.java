@@ -74,6 +74,16 @@ public class Gb28181Properties {
     /** 是否随流上下线自动录像。 */
     private boolean autoRecord = false;
 
+    /**
+     * 「无人观看」自动关流的延迟（毫秒）。
+     *
+     * <p>点播后若在此时长内没有任何播放器拉流，ZLM 会关闭该路流并向设备发 BYE。
+     * 默认 45 秒（参考站为 20 秒）：前端首次点播需要现场加载播放器 SDK
+     * （jessibuca.js + decoder.wasm 约 1.3MB）与 WASM 编译，公网慢时 20 秒内
+     * 可能还没建立拉流连接，流就会被提前关闭，表现为「点播很慢/失败」。
+     */
+    private int streamNoneReaderDelayMs = 45_000;
+
     /** 录像根目录（留空用 ${user.dir}/record）。 */
     private String recordRoot = "";
 

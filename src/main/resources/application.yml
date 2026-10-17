@@ -39,7 +39,9 @@ logging:
   level:
     io.github.rurulalanana: INFO
     gov.nist.javax.sip: INFO
-    io.github.rurulalanana.gb28181.sip: DEBUG
+    # SIP 协议栈逐包日志（每次 MESSAGE/INVITE/事务都打）量极大，
+    # 排障时临时改 DEBUG 即可；常开会让日志卷到百 MB 级并拖慢 IO。
+    io.github.rurulalanana.gb28181.sip: INFO
     # 需要看 SQL 时打开下面这行
     # io.github.rurulalanana.starter.mapper: DEBUG
 
@@ -92,6 +94,11 @@ gb28181:
   rtp-single-port: true
   # 单端口模式下的收流端口（UDP 与 TCP 被动共用）
   rtp-single-port-number: 24560
+  # 「无人观看」自动关流延迟（毫秒）。点播后若一直没有播放器拉流，
+  # ZLM 到点就关流并向设备发 BYE。默认 45 秒：给前端留足首次加载播放器
+  # SDK（jessibuca.js + decoder.wasm 约 1.3MB）与 WASM 编译的时间
+  # （公网慢时 20 秒内可能还没建立拉流连接，流会被提前关掉→“点播很慢”）。
+  stream-none-reader-delay-ms: 45000
   # 随流上下线自动录像
   auto-record: false
   record-root: ""
