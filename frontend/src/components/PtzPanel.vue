@@ -56,6 +56,8 @@
       </el-button-group>
     </div>
 
+    <!-- 精简模式（实时预览页）：只保留方向 + 变倍/光圈，以下运维功能不下放 -->
+    <template v-if="!simple">
     <!-- 预置位 -->
     <div class="ptz-section">
       <div class="section-title">预置位</div>
@@ -153,6 +155,7 @@
       </el-button>
       <div v-if="talking" class="muted mt-1">正在推流设备音频通道…</div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -167,7 +170,15 @@ const props = defineProps({
   /** 通道编码 */
   code: { type: String, default: '' },
   /** 是否禁用（如设备离线） */
-  disabled: { type: Boolean, default: false }
+  disabled: { type: Boolean, default: false },
+  /**
+   * 精简模式：只显示方向盘与变倍/光圈。
+   *
+   * <p>预置位、设备功能（雨刷/补光/录像/布防）、高级操作（关键帧/重启/格式化）、
+   * 语音喊话都是运维动作（重启、格式化风险高），不放在实时预览页，
+   * 需要时到通道管理页操作。
+   */
+  simple: { type: Boolean, default: false }
 })
 
 /**
