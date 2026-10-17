@@ -29,15 +29,6 @@
         <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
           <el-icon><FullScreen /></el-icon> 全屏
         </el-button>
-        <el-button size="small" :loading="loading" @click="loadChannels">
-          <el-icon><Refresh /></el-icon> 刷新通道
-        </el-button>
-        <el-button size="small" class="stop-all" :disabled="!playingCount" @click="stopAll">
-          <el-icon><SwitchButton /></el-icon> 全部停止
-        </el-button>
-        <el-button size="small" :disabled="!hasAnyTile" @click="clearAll">
-          <el-icon><Delete /></el-icon> 清除
-        </el-button>
       </div>
     </header>
 
@@ -165,10 +156,15 @@
               @click="playTile(tile)"
             />
 
-            <!-- 右上角：状态灯 -->
-            <div v-if="tile.playing" class="tile-state" :title="tile.state">
-              <span class="pulse-dot" />
-            </div>
+            <!-- 右上角：清除该格（断流并腾空） -->
+            <button
+              v-if="tile.playing || tile.channelKey"
+              class="tile-clear"
+              title="清除该画面"
+              @click.stop="clearTile(tile)"
+            >
+              <el-icon :size="13"><Close /></el-icon>
+            </button>
           </div>
         </div>
       </div>
@@ -194,6 +190,7 @@
               :serial="ptzTile.serial"
               :code="ptzTile.code"
               :disabled="!ptzTile.playing || ptzTile.ptzType === 3"
+              simple
             />
           </template>
           <div v-else class="panel-empty">
@@ -246,7 +243,6 @@ import { resolvePlayUrls, useVideoPlayer, preloadJessibuca } from '@/composables
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
-const loading = ref(false)
 const gridSize = ref(4)
 const filterText = ref('')
 const proto = ref('wsflv')
@@ -331,12 +327,6 @@ const tiles = ref(
 )
 
 const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
-
-/** 正在播放的格子数（用于页头提示与"全部停止"按钮的可用态）。 */
-const playingCount = computed(() => tiles.value.filter((t) => t.playing).length)
-
-/** 是否有画面格占着通道（决定"清除"按钮的可用态）。 */
-const hasAnyTile = computed(() => tiles.value.some((t) => t.channelKey || t.playing))
 
 /** 已被画面格占用的通道 key，通道列表用它标记"使用中"。 */
 const usedKeys = computed(
@@ -519,7 +509,6 @@ function playerOf(tile) {
 }
 
 async function loadChannels() {
-  loading.value = true
   try {
     const data = await deviceApi.channelList({ start: 0, limit: 1000 })
     channels.value = data?.channelList || []
@@ -535,8 +524,6 @@ async function loadChannels() {
     }
   } catch (e) {
     ElMessage.error(e.message || '加载通道失败')
-  } finally {
-    loading.value = false
   }
 }
 
@@ -633,33 +620,22 @@ function stopTile(tile) {
   tile.state = '已停止'
 }
 
-function stopAll() {
-  for (const tile of tiles.value) {
-    if (tile.playing || tile.channelKey) stopTile(tile)
-  }
-  ElMessage.success('已停止全部画面')
-}
-
 /**
- * 清除所有画面：断流并解绑通道，格子回到「未选择通道」。
+ * 清除单个画面格：断流并解绑通道，格子回到「未选择通道」。
  *
- * <p>与「全部停止」的区别：停止只断流、保留通道绑定（再点一下格子就能重播）；
- * 清除把格子彻底腾空，适合换一组通道重新上屏。
+ * <p>与旧版顶端「全部停止 / 清除」相比，清除粒度改到每格右上角，
+ * 想腾空哪一格就清哪一格，不影响其它画面。
  */
-function clearAll() {
-  for (const tile of tiles.value) {
-    stopTile(tile)
-    tile.channelKey = ''
-    tile.serial = ''
-    tile.code = ''
-    tile.channelName = ''
-    tile.ptzType = 0
-    tile.playing = false
-    tile.state = '未选择通道'
-  }
-  ptzTileId.value = 0
-  activeTileId.value = 1
-  ElMessage.success('已清除全部画面')
+function clearTile(tile) {
+  stopTile(tile)
+  tile.channelKey = ''
+  tile.serial = ''
+  tile.code = ''
+  tile.channelName = ''
+  tile.ptzType = 0
+  tile.playing = false
+  tile.state = '未选择通道'
+  if (ptzTileId.value === tile.id) ptzTileId.value = 0
 }
 
 /** 切换协议：所有播放中的格子重连。 */
@@ -826,25 +802,34 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 右上角状态灯 */
-.tile-state {
+/* 右上角清除按钮：常驻但低调，悬停变红提示危险 */
+.tile-clear {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
-  pointer-events: none;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(8, 13, 20, 0.62);
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-/* 顶部"全部停止"：默认态朴素，hover 才提示危险 */
-.stop-all {
-  color: var(--danger-500);
+.tile:hover .tile-clear {
+  opacity: 1;
 }
 
-.stop-all:hover:not(.is-disabled) {
-  border-color: var(--danger-500);
-  color: var(--danger-500);
-  background: var(--danger-50);
+.tile-clear:hover {
+  background: var(--danger-500);
+  color: var(--white);
 }
 
 /* 分屏切换（1/4/6/9/16）压到与其它控件同高，避免顶栏高低不齐 */
