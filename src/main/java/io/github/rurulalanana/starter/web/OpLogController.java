@@ -50,12 +50,18 @@ public class OpLogController {
         return ApiResponse.ok(vo);
     }
 
-    /** 清空全部日志。 */
+    /**
+     * 清空全部日志。
+     *
+     * <p>仅管理员可执行：审计日志是事后追责的唯一依据，
+     * 普通用户若能清空，等于任何账号都能抹掉自己的操作痕迹。
+     */
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
         StpUtil.checkLogin();
+        StpUtil.checkRoleOr("admin");
         int deleted = operationLogService.clear();
-        log.info("操作日志已清空：{} 条", deleted);
+        log.info("操作日志已清空：{} 条（操作人 {}）", deleted, StpUtil.getLoginId());
         DeletedVo vo = new DeletedVo();
         vo.setDeleted(deleted);
         return ApiResponse.ok(vo);

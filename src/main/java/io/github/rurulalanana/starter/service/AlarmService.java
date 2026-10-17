@@ -137,8 +137,18 @@ public class AlarmService {
 
     /** 清空全部报警。 */
     @Transactional
+    /**
+     * 清空全部报警。
+     *
+     * <p><b>不能写 {@code delete(null)}</b>：MyBatis-Plus 的
+     * {@code BlockAttackInnerInterceptor} 会拦截无 where 条件的全表写，
+     * 直接抛 {@code Prohibition of table update operation}，
+     * 导致「清空报警」按钮永远失败（前端只看到一句数据库错误）。
+     * 这里用一个永真的 id 条件代替，既绕开拦截器语义（仍然明确指定了范围），
+     * 也能走索引。
+     */
     public int clear() {
-        return alarmMapper.delete(null);
+        return alarmMapper.delete(Wrappers.<GbAlarm>lambdaQuery().gt(GbAlarm::getId, 0));
     }
 
     // ==================== 字典 ====================

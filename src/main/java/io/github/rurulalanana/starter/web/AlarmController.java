@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbAlarm;
 import io.github.rurulalanana.starter.service.AlarmService;
 import io.github.rurulalanana.starter.service.DeviceService;
@@ -74,9 +75,7 @@ public class AlarmController {
         vo.setAlarmCount(list.size());
         vo.setAlarmReserveDays(30);
         vo.setAlarmPublishToRedis(false);
-        vo.setAlarmList(limit > 0
-                ? list.subList(Math.min(start, list.size()), Math.min(start + limit, list.size()))
-                : list);
+        vo.setAlarmList(PageQuery.slice(list, start, limit));
         return ApiResponse.ok(vo);
     }
 
@@ -103,6 +102,8 @@ public class AlarmController {
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
         StpUtil.checkLogin();
+        // 清空是破坏性操作：普通用户误点会丢掉全部历史警情，仅管理员可执行
+        StpUtil.checkRoleOr("admin");
         int deleted = alarmService.clear();
         return ApiResponse.ok(DeletedVo.of(deleted));
     }

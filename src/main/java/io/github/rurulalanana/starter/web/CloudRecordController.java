@@ -169,12 +169,13 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 删除单条录像。 */
+    /** 删除单条录像（仅管理员：录像文件不可恢复）。 */
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
                                     @RequestParam String period) {
         StpUtil.checkLogin();
+        StpUtil.checkRoleOr("admin");
         String channelId = code == null || code.isBlank() ? serial : code;
         GbRecord record = recordService.findByPeriod(channelId, period);
         if (record == null) {
@@ -185,11 +186,12 @@ public class CloudRecordController {
         return ApiResponse.ok();
     }
 
-    /** 删除通道所有录像。 */
+    /** 删除通道所有录像（仅管理员）。 */
     @PostMapping("/removechannel")
     public ApiResponse<DeletedVo> removeChannel(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
+        StpUtil.checkRoleOr("admin");
         String channelId = code == null || code.isBlank() ? serial : code;
         int deleted = 0;
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {
@@ -202,12 +204,13 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 按天删除。 */
+    /** 按天删除（仅管理员）。 */
     @PostMapping("/removedaily")
     public ApiResponse<DeletedVo> removeDaily(@RequestParam String serial,
                                               @RequestParam(required = false) String code,
                                               @RequestParam String period) {
         StpUtil.checkLogin();
+        StpUtil.checkRoleOr("admin");
         String channelId = code == null || code.isBlank() ? serial : code;
         LocalDateTime day = TimeFormats.parse(period);
         if (day == null) {

@@ -35,4 +35,14 @@ public class BizException extends RuntimeException {
     public static BizException notFound(String message) {
         return new BizException(ApiResponse.CODE_BAD_REQUEST, message);
     }
+
+    /**
+     * 无权限（403）。
+     *
+     * <p>与「参数错误」区分开：调用方身份合法、参数也合法，只是没有该操作的权限。
+     * 前端据此可以给出「请联系管理员」而不是「参数有误」。
+     */
+    public static BizException forbidden(String message) {
+        return new BizException(ApiResponse.CODE_FORBIDDEN, message);
+    }
 }

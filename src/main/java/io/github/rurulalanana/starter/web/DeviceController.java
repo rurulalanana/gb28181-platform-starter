@@ -462,6 +462,12 @@ public class DeviceController {
                                                @RequestParam String code,
                                                @RequestParam(value = "ptz_type", defaultValue = "0") Integer ptzType) {
         StpUtil.checkLogin();
+        // 附录 A.3 只定义了 0~4：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机。
+        // 界面上该字段是下拉，但接口可被脚本直接调用；写进 99 这类值后
+        // 前端 supportsPtz() 判定为「不支持云台」，该通道的云台入口会消失。
+        if (ptzType != null && (ptzType < 0 || ptzType > 4)) {
+            throw BizException.badRequest("ptz_type 只能是 0~4，收到：" + ptzType);
+        }
         GbChannel channel = requireChannel(code);
         channel.setPtzType(ptzType);
         deviceService.updateChannel(channel);
@@ -633,7 +639,14 @@ public class DeviceController {
         if (device == null) {
             throw BizException.notFound("设备不存在：" + serial);
         }
-        device.setMediaTransport(mediaTransport);
+        // 取值必须校验：这个值会被直接拼进 SIP INVITE 的 m= 行（附录 G），
+        // 写进 BOGUS 之类脏值后该设备后续所有点播都会协商失败，
+        // 而界面上只表现为「点播不出画面」，排查成本极高。
+        String transport = mediaTransport == null ? "" : mediaTransport.trim().toUpperCase();
+        if (!"UDP".equals(transport) && !"TCP".equals(transport)) {
+            throw BizException.badRequest("media_transport 只能是 UDP 或 TCP，收到：" + mediaTransport);
+        }
+        device.setMediaTransport(transport);
         device.setUpdateTime(java.time.LocalDateTime.now());
         deviceService.updateDevice(device);
         return ApiResponse.ok();

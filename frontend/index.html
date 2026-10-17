@@ -3,6 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    favicon 必须显式声明。
+    不声明时浏览器会去请求 /favicon.ico，而项目里没有这个文件，
+    每次打开/刷新页面后端都会打一条 NoResourceFoundException 的 ERROR 日志。
+  -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>GB28181 视频监控平台</title>
 </head>
 <body>
