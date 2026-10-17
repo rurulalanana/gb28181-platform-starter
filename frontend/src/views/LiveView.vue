@@ -38,8 +38,96 @@
       </div>
     </header>
 
-    <!-- 主体：视频墙 + 通道列表 -->
+    <!-- 主体：设备树 + 视频墙 + 云台 -->
     <div class="live-body">
+      <!-- 左侧：设备树（对齐 LiveGBS：搜索 + 设备/通道树） -->
+      <aside class="side-panel tree-panel">
+        <div class="panel-head">
+          <span class="panel-title">设备树</span>
+          <span class="count-pill">{{ filteredChannels.length }}</span>
+        </div>
+
+        <!-- 视图切换：设备树 / 平铺列表 -->
+        <div class="panel-tabs">
+          <button class="ptab" :class="{ 'is-on': treeTab === 'tree' }" @click="treeTab = 'tree'">
+            设备树
+          </button>
+          <button class="ptab" :class="{ 'is-on': treeTab === 'list' }" @click="treeTab = 'list'">
+            通道列表
+          </button>
+        </div>
+
+        <div class="panel-search">
+          <el-input v-model="filterText" placeholder="搜索名称或编码" clearable size="small">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+        </div>
+
+        <div v-if="!filteredChannels.length" class="panel-empty">
+          <el-empty :description="channels.length ? '无匹配通道' : '暂无通道'" :image-size="64" />
+        </div>
+
+        <!-- 设备树：设备为可折叠节点，通道挂在设备下 -->
+        <div v-else-if="treeTab === 'tree'" class="channel-list dark-scroll">
+          <div v-for="g in channelGroups" :key="g.deviceId" class="ch-group">
+            <button class="ch-group-head" @click="toggleGroup(g.deviceId)">
+              <el-icon :size="11">
+                <ArrowDown v-if="expandedDevices.has(g.deviceId)" />
+                <ArrowRight v-else />
+              </el-icon>
+              <span class="ch-dot" :class="g.online ? 'is-online' : 'is-offline'" />
+              <span class="ch-group-main">
+                <span class="ch-group-name ellipsis">{{ g.deviceName }}</span>
+                <span class="ch-group-code mono ellipsis">{{ g.deviceId }}</span>
+              </span>
+              <span class="ch-group-count">{{ g.channels.length }}</span>
+            </button>
+            <div v-show="expandedDevices.has(g.deviceId)" class="ch-group-body">
+              <button
+                v-for="c in g.channels"
+                :key="c.id"
+                class="channel-item"
+                :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
+                title="点击上屏到选中格；再次点击已在播放的通道可停止"
+                @click="pickChannel(c)"
+              >
+                <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
+                <span class="ch-main">
+                  <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
+                  <span class="ch-code mono ellipsis">{{ c.id }}</span>
+                </span>
+                <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
+                  <span class="pulse-dot" />
+                </span>
+                <span v-else-if="!c.deviceOnline" class="ch-offline">离线</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 平铺列表 -->
+        <div v-else class="channel-list dark-scroll">
+          <button
+            v-for="c in filteredChannels"
+            :key="c.deviceId + '/' + c.id"
+            class="channel-item"
+            :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
+            title="点击上屏到选中格；再次点击已在播放的通道可停止"
+            @click="pickChannel(c)"
+          >
+            <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
+            <span class="ch-main">
+              <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
+              <span class="ch-code mono ellipsis">{{ c.id }}</span>
+            </span>
+            <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
+              <span class="pulse-dot" />
+            </span>
+            <span v-else-if="!c.deviceOnline" class="ch-offline">离线</span>
+          </button>
+        </div>
+      </aside>
+
       <!-- 视频墙 -->
       <div ref="wallRef" class="wall" :class="'wall-' + gridSize">
         <div
@@ -64,7 +152,7 @@
               <el-icon :size="30"><VideoCamera /></el-icon>
               <span class="overlay-text">{{ tile.state }}</span>
               <span v-if="tile.channelKey" class="overlay-hint">点击重试</span>
-              <span v-else class="overlay-hint">从右侧选择通道</span>
+              <span v-else class="overlay-hint">从左侧选择通道</span>
             </div>
 
             <!-- 空闲态且已选通道时整块可点 -->
@@ -79,152 +167,34 @@
               <span class="pulse-dot" />
             </div>
           </div>
-
-          <!--
-            格内工具条：始终占位，避免有按钮/没按钮的格子高度不一致
-            （视频墙是网格，行高一致才能对齐；去掉下拉后这里只剩图标按钮）
-          -->
-          <div class="tile-bar">
-            <el-button
-              v-if="!tile.playing && tile.channelKey"
-              type="primary"
-              size="small"
-              class="tile-btn tile-btn-play"
-              title="播放"
-              @click="playTile(tile)"
-            >
-              <el-icon><VideoPlay /></el-icon>
-            </el-button>
-            <template v-else-if="tile.playing">
-              <el-button
-                v-if="supportsPtz(tile.ptzType)"
-                size="small"
-                class="tile-btn"
-                title="云台控制"
-                @click="openPtz(tile)"
-              >
-                <el-icon><Aim /></el-icon>
-              </el-button>
-              <el-button
-                type="danger"
-                size="small"
-                class="tile-btn tile-btn-stop"
-                title="停止"
-                @click="stopTile(tile)"
-              >
-                <el-icon><VideoPause /></el-icon>
-              </el-button>
-            </template>
-          </div>
         </div>
       </div>
 
-      <!-- 通道列表 -->
-      <aside class="channel-panel">
+      <!-- 右侧：云台控制（常驻，绑定当前操作的画面格） -->
+      <aside class="side-panel ptz-aside">
         <div class="panel-head">
-          <span class="panel-title">{{ panelTab === 'ptz' ? '云台控制' : '通道列表' }}</span>
-          <span class="count-pill">{{ filteredChannels.length }}</span>
+          <span class="panel-title">云台控制</span>
+          <span v-if="ptzTile" class="ptz-target-cell">画面 {{ ptzTile.id }}</span>
         </div>
 
-        <!-- 视图切换：平铺列表 / 按设备分组 / 云台 -->
-        <div class="panel-tabs">
-          <button class="ptab" :class="{ 'is-on': panelTab === 'list' }" @click="panelTab = 'list'">
-            通道列表
-          </button>
-          <button class="ptab" :class="{ 'is-on': panelTab === 'group' }" @click="panelTab = 'group'">
-            按设备分组
-          </button>
-          <button class="ptab" :class="{ 'is-on': panelTab === 'ptz' }" @click="panelTab = 'ptz'">
-            云台
-          </button>
-        </div>
-
-        <div v-if="panelTab !== 'ptz'" class="panel-search">
-          <el-input v-model="filterText" placeholder="搜索名称或编码" clearable size="small">
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-        </div>
-
-        <!-- 云台面板（常驻，对齐 LiveGBS：绑定当前选中画面格）） -->
-        <div v-if="panelTab === 'ptz'" class="ptz-tab dark-scroll">
-          <template v-if="activeTile && activeTile.channelKey">
+        <div class="ptz-tab dark-scroll">
+          <template v-if="ptzTile">
             <div class="ptz-target">
-              <span class="ch-dot" :class="activeTile.playing ? 'is-online' : 'is-offline'" />
-              <span class="ellipsis">{{ activeTile.channelName || activeTile.code }}</span>
-              <span class="ptz-target-cell">画面 {{ activeTile.id }}</span>
+              <span class="ch-dot" :class="ptzTile.playing ? 'is-online' : 'is-offline'" />
+              <span class="ellipsis">{{ ptzTile.channelName || ptzTile.code }}</span>
+            </div>
+            <div v-if="ptzTile.ptzType === 3" class="ptz-note">
+              该通道标记为固定枪机，云台指令可能不被设备支持
             </div>
             <PtzPanel
-              :key="activeTile.id"
-              :serial="activeTile.serial"
-              :code="activeTile.code"
-              :disabled="!activeTile.playing"
+              :key="ptzTile.id"
+              :serial="ptzTile.serial"
+              :code="ptzTile.code"
+              :disabled="!ptzTile.playing || ptzTile.ptzType === 3"
             />
           </template>
           <div v-else class="panel-empty">
-            <el-empty description="先上屏一个通道，再使用云台控制" :image-size="64" />
-          </div>
-        </div>
-
-        <div v-else-if="!filteredChannels.length" class="panel-empty">
-          <el-empty :description="channels.length ? '无匹配通道' : '暂无通道'" :image-size="64" />
-        </div>
-
-        <!-- 平铺列表 -->
-        <div v-else-if="panelTab === 'list'" class="channel-list dark-scroll">
-          <button
-            v-for="c in filteredChannels"
-            :key="c.deviceId + '/' + c.id"
-            class="channel-item"
-            :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
-            title="点击上屏到选中格（焦点自动后移）"
-            @click="pickChannel(c)"
-          >
-            <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
-            <span class="ch-main">
-              <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
-              <span class="ch-code mono ellipsis">{{ c.id }}</span>
-            </span>
-            <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
-              <span class="pulse-dot" />
-            </span>
-            <span v-else-if="!c.deviceOnline" class="ch-offline">离线</span>
-          </button>
-        </div>
-
-        <!-- 按设备分组（同一台设备下的通道折叠在一起） -->
-        <div v-else class="channel-list dark-scroll">
-          <div v-for="g in channelGroups" :key="g.deviceId" class="ch-group">
-            <button class="ch-group-head" @click="toggleGroup(g.deviceId)">
-              <el-icon :size="11">
-                <ArrowDown v-if="expandedDevices.has(g.deviceId)" />
-                <ArrowRight v-else />
-              </el-icon>
-              <span class="ch-dot" :class="g.online ? 'is-online' : 'is-offline'" />
-              <span class="ch-group-main">
-                <span class="ch-group-name ellipsis">{{ g.deviceName }}</span>
-                <span class="ch-group-code mono ellipsis">{{ g.deviceId }}</span>
-              </span>
-              <span class="ch-group-count">{{ g.channels.length }}</span>
-            </button>
-            <div v-show="expandedDevices.has(g.deviceId)" class="ch-group-body">
-              <button
-                v-for="c in g.channels"
-                :key="c.id"
-                class="channel-item"
-                :class="{ 'is-offline': !c.deviceOnline, 'is-used': usedKeys.has(c.deviceId + '/' + c.id) }"
-                title="点击上屏到选中格（焦点自动后移）"
-                @click="pickChannel(c)"
-              >
-                <span class="ch-dot" :class="c.deviceOnline ? 'is-online' : 'is-offline'" />
-                <span class="ch-main">
-                  <span class="ch-name ellipsis">{{ c.customName || c.name || c.id }}</span>
-                  <span class="ch-code mono ellipsis">{{ c.id }}</span>
-                </span>
-                <span v-if="usedKeys.has(c.deviceId + '/' + c.id)" class="ch-playing">
-                  <span class="pulse-dot" />
-                </span>
-              </button>
-            </div>
+            <el-empty description="先在左侧上屏一个通道，再进行云台控制" :image-size="64" />
           </div>
         </div>
       </aside>
@@ -294,18 +264,33 @@ const stoppers = {}
 /** 当前选中的画面格（加 2px 强调描边，方便看清操作的是哪一格）。 */
 const activeTileId = ref(1)
 
-/** 当前选中的画面格（云台面板绑定它的通道）。 */
+/** 当前选中的画面格（描边高亮 + 下一次上屏的落点）。 */
 const activeTile = computed(
   () =>
     visibleTiles.value.find((t) => t.id === activeTileId.value) ||
     visibleTiles.value[0] ||
     null
 )
+
+/**
+ * 云台面板绑定的小格：优先取最近操作的格子，该格没有通道时退回到第一个已选通道的格子。
+ *
+ * <p>为什么不直接用 activeTile：连续上屏时选中位置会自动前移（见 pickChannel），
+ * 若云台跟着前移，刚播放的通道会立刻失去云台控制。
+ */
+const ptzTile = computed(() => {
+  const picked = tiles.value.find((t) => t.id === ptzTileId.value && t.channelKey)
+  if (picked) return picked
+  return tiles.value.find((t) => t.channelKey) || null
+})
+
 /** 视频墙容器（整体全屏用）。 */
 const wallRef = ref(null)
-/** 通道面板视图：list=平铺列表，group=按设备分组。 */
-const panelTab = ref('list')
-/** 已展开的设备（分组视图）。 */
+/** 左侧面板视图：tree=设备树，list=平铺列表。 */
+const treeTab = ref('tree')
+/** 云台面板绑定的小格（最近操作的格子）。 */
+const ptzTileId = ref(0)
+/** 已展开的设备（设备树）。 */
 const expandedDevices = ref(new Set())
 
 /** 轮播状态（间隔由弹窗里的 rotateSeconds 决定）。 */
@@ -335,22 +320,12 @@ const tiles = ref(
     serial: '',
     code: '',
     channelName: '',
-    /** 通道的云台类型，用于决定格子工具条是否出现云台按钮。 */
+    /** 通道的云台类型：3（固定枪机）时右侧云台面板置灰。 */
     ptzType: 0,
     state: '未选择通道',
     playing: false
   }))
 )
-
-/**
- * 该类型是否支持云台控制。
- *
- * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
- * 与 {@code ChannelView.vue} 保持一致；类型可在通道管理列表里直接下拉修改。
- */
-function supportsPtz(type) {
-  return type === 1 || type === 2 || type === 4
-}
 
 const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
 
@@ -443,6 +418,8 @@ const tileClick = { id: 0, ts: 0 }
 
 function onTileClick(tile) {
   activeTileId.value = tile.id
+  // 点了带通道的格子：云台跟着切到这一格
+  if (tile.channelKey) ptzTileId.value = tile.id
   const now = Date.now()
   if (tileClick.id === tile.id && now - tileClick.ts < 320) {
     tileClick.ts = 0
@@ -540,6 +517,8 @@ async function loadChannels() {
   try {
     const data = await deviceApi.channelList({ start: 0, limit: 1000 })
     channels.value = data?.channelList || []
+    // 设备树默认全展开（对齐 LiveGBS：进来就能看到通道）
+    expandedDevices.value = new Set(channels.value.map((c) => c.deviceId))
     if (!mediaHttpPort.value) {
       try {
         const info = await systemApi.serverinfo()
@@ -556,7 +535,7 @@ async function loadChannels() {
 }
 
 /**
- * 点击右侧通道：上屏到当前选中的画面格，并把选中位置往后推一格。
+ * 点击左侧通道：上屏到当前选中的画面格，并把选中位置往后推一格。
  *
  * <p><b>为什么是「选中格」而不是「第一个空位」</b>：用户先点画面格选出要操作的位置，
  * 再点通道，语义就是「把这一路放到我刚选的位置」。若改成找第一个空位，
@@ -570,12 +549,20 @@ async function loadChannels() {
  * 再次点击会覆盖该格（而不是绕回第 1 格，那样会意外覆盖别处的画面）。
  */
 function pickChannel(channel) {
+  const key = `${channel.deviceId}/${channel.id}`
   const target =
     visibleTiles.value.find((t) => t.id === activeTileId.value) || visibleTiles.value[0]
   if (!target) return
+  // 同一路已在当前格播放：再点一次即停止（画面格上已不放停止按钮）
+  if (target.playing && target.channelKey === key) {
+    stopTile(target)
+    ptzTileId.value = target.id
+    return
+  }
   if (target.playing) stopTile(target)
-  target.channelKey = `${channel.deviceId}/${channel.id}`
+  target.channelKey = key
   applyChannel(target, channel)
+  ptzTileId.value = target.id
   playTile(target)
   // 焦点前移到下一格，方便连续上屏
   const next = visibleTiles.value.find((t) => t.id === target.id + 1)
@@ -596,6 +583,8 @@ async function playTile(tile) {
     return
   }
   const player = playerOf(tile)
+  // 点播就把云台面板切到这一格（上屏后马上能控云台）
+  ptzTileId.value = tile.id
   tile.state = '点播中…'
 
   const streamId = `${tile.serial}/${tile.code}`
@@ -666,12 +655,6 @@ async function onProtoChange() {
   }
 }
 
-function openPtz(tile) {
-  /* 不再弹抽屉：切到右侧「云台」常驻面板并选中该格（对齐 LiveGBS 布局）。 */
-  activeTileId.value = tile.id
-  panelTab.value = 'ptz'
-}
-
 const route = useRoute()
 const router = useRouter()
 
@@ -707,10 +690,29 @@ onUnmounted(() => {
 
 .live-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 264px;
-  gap: var(--sp-4);
+  /* 左树 · 中墙 · 右云台 */
+  grid-template-columns: 248px minmax(0, 1fr) 252px;
+  gap: var(--sp-3);
   flex: 1;
   min-height: 0;
+}
+
+/* 三栏固定列位：树在最左、墙在中间、云台在最右；
+   显式指定列位后，DOM 顺序变化也不会把墙挤到侧栏位置。
+   小屏单列时列位复位，靠 order 保持「树 → 墙 → 云台」的纵向顺序。 */
+.tree-panel {
+  grid-column: 1;
+  order: 1;
+}
+
+.wall {
+  grid-column: 2;
+  order: 2;
+}
+
+.ptz-aside {
+  grid-column: 3;
+  order: 3;
 }
 
 /* ============ 视频墙 ============ */
@@ -739,15 +741,19 @@ onUnmounted(() => {
 
 .tile {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
   min-width: 0;
+  min-height: 0;
 }
 
 /* ============ 画面格 ============ */
 
 /* 画面格：靠 1px 内描边区分边界，不用投影（投影会让视频墙显得"漂浮"） */
 .tile .video-box {
+  /* 全局 .video-box 是 16:9 定比例的；视频墙里要让每格精确填满网格单元，
+     否则多出来的比例高度会溢出/留白，故改为自适应高度 */
+  aspect-ratio: auto;
+  flex: 1;
+  min-height: 0;
   border-radius: var(--r-md);
 }
 
@@ -802,53 +808,6 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* 格内工具条：与画面同宽的一条窄带，按钮压到 26px 与输入框等高 */
-.tile-bar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  height: var(--control-h);
-}
-
-.tile-btn {
-  width: 30px;
-  padding: 0;
-  flex-shrink: 0;
-}
-
-/* 播放：实色主按钮；停止：只在图标上着红，不做整块红色按钮 */
-.tile-btn-stop {
-  background: var(--white);
-  border-color: var(--line);
-  color: var(--danger-500);
-}
-
-.tile-btn-stop:hover {
-  background: var(--danger-50);
-  border-color: var(--danger-500);
-  color: var(--danger-500);
-}
-
-/* 播放按钮：默认描边幽灵态——视频墙上不该有 4 个实心蓝块抢视线 */
-.tile-btn-play {
-  background: var(--white);
-  border-color: var(--line);
-  color: var(--accent);
-}
-
-.tile-btn-play:hover:not(.is-disabled) {
-  background: var(--brand-50);
-  border-color: var(--brand-300);
-  color: var(--accent-ink);
-}
-
-.tile-btn-play.is-disabled {
-  background: var(--white);
-  border-color: var(--line);
-  color: var(--ink-300);
-}
-
 /* 顶部"全部停止"：默认态朴素，hover 才提示危险 */
 .stop-all {
   color: var(--danger-500);
@@ -880,9 +839,9 @@ onUnmounted(() => {
   border-radius: 0 var(--r-md) var(--r-md) 0;
 }
 
-/* ============ 通道列表面板 ============ */
+/* ============ 侧栏面板（设备树 / 云台） ============ */
 
-.channel-panel {
+.side-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -918,6 +877,17 @@ onUnmounted(() => {
   flex-shrink: 0;
   color: var(--ink-400, #909399);
   font-size: 11.5px;
+}
+
+/* 固定枪机提示：云台面板整体置灰时给出原因，避免用户以为是故障 */
+.ptz-note {
+  margin: 0 8px 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--warning-50, #fdf6ec);
+  color: var(--warning-600, #b88230);
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .panel-head {
@@ -1190,18 +1160,29 @@ onUnmounted(() => {
 
 /* ============ 响应式 ============ */
 
-@media (max-width: 1200px) {
+@media (max-width: 1400px) {
   .live-body {
-    grid-template-columns: minmax(0, 1fr) 232px;
+    grid-template-columns: 216px minmax(0, 1fr) 230px;
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
+  /* 单列堆叠：树在上、墙居中、云台在下 */
   .live-body {
     grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
   }
-  .channel-panel {
-    max-height: 300px;
+  .tree-panel,
+  .wall,
+  .ptz-aside {
+    grid-column: auto;
+  }
+  .tree-panel,
+  .ptz-aside {
+    max-height: 280px;
+  }
+  .wall {
+    min-height: 320px;
   }
   .wall-16 {
     grid-template-columns: repeat(2, minmax(0, 1fr));

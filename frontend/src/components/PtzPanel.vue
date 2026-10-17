@@ -59,17 +59,26 @@
     <!-- 预置位 -->
     <div class="ptz-section">
       <div class="section-title">预置位</div>
-      <div class="ptz-row">
-        <el-input-number v-model="presetNo" :min="1" :max="255" size="small" controls-position="right" style="width: 100px" />
-        <el-button size="small" type="primary" :disabled="inactive" @click="cmd('preset', { command: 'set', preset: presetNo })">
-          设置
-        </el-button>
-        <el-button size="small" :disabled="inactive" @click="cmd('preset', { command: 'goto', preset: presetNo })">
-          调用
-        </el-button>
-        <el-button size="small" type="danger" plain :disabled="inactive" @click="cmd('preset', { command: 'remove', preset: presetNo })">
-          删除
-        </el-button>
+      <!--
+        右侧常驻面板只有 ~250px 宽：输入框 + 三个按钮放一行会顶出边框，
+        所以分两行——编号单独一行，操作按钮等分一行。
+      -->
+      <div class="ptz-preset">
+        <div class="ptz-row">
+          <span class="preset-label">编号</span>
+          <el-input-number v-model="presetNo" :min="1" :max="255" size="small" controls-position="right" style="width: 100px" />
+        </div>
+        <el-button-group style="display: flex">
+          <el-button size="small" type="primary" style="flex: 1" :disabled="inactive" @click="cmd('preset', { command: 'set', preset: presetNo })">
+            设置
+          </el-button>
+          <el-button size="small" style="flex: 1" :disabled="inactive" @click="cmd('preset', { command: 'goto', preset: presetNo })">
+            调用
+          </el-button>
+          <el-button size="small" type="danger" plain style="flex: 1" :disabled="inactive" @click="cmd('preset', { command: 'remove', preset: presetNo })">
+            删除
+          </el-button>
+        </el-button-group>
       </div>
     </div>
 
@@ -371,6 +380,18 @@ async function toggleTalk() {
 
 .ptz-row.wrap {
   flex-wrap: wrap;
+}
+
+/* 预置位：编号一行、操作按钮等分一行 */
+.ptz-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preset-label {
+  font-size: 12.5px;
+  color: var(--text-secondary);
 }
 
 .ptz-section {
