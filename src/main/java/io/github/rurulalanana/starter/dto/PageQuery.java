@@ -2,6 +2,7 @@ package io.github.rurulalanana.starter.dto;
 
 import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -53,11 +54,36 @@ public class PageQuery {
 
     /** 对列表做游标切片。 */
     public <T> List<T> slice(List<T> all) {
-        if (!paged()) {
+        return slice(all, offset(), size());
+    }
+
+    /**
+     * 安全游标切片（静态工具）。
+     *
+     * <p><b>为什么必须有这个方法</b>：控制器里原先直接写
+     * {@code list.subList(Math.min(start, size), Math.min(start + limit, size))}，
+     * 一旦调用方传 {@code start=-5}，{@code Math.min(-5, size)} 仍是 -5，
+     * {@code subList(-5, …)} 直接抛 {@code IndexOutOfBoundsException: fromIndex = -5}，
+     * 被全局异常处理器转成 {@code code=500}。负偏移是探测/误操作常见输入，
+     * 不该表现为服务端异常。
+     *
+     * @param all   全量列表（可为 null，视为空）
+     * @param start 偏移量（负数归零；超出长度则返回空列表）
+     * @param limit 页大小（0 或负数表示不分页，返回全部）
+     * @return 切片结果（新列表，避免持有原列表视图）
+     */
+    public static <T> List<T> slice(List<T> all, int start, int limit) {
+        if (all == null || all.isEmpty()) {
+            return new ArrayList<>();
+        }
+        if (limit <= 0) {
             return all;
         }
-        int from = Math.min(offset(), all.size());
-        int to = Math.min(from + size(), all.size());
-        return all.subList(from, to);
+        int from = Math.max(start, 0);
+        if (from >= all.size()) {
+            return new ArrayList<>();
+        }
+        int to = Math.min(from + limit, all.size());
+        return new ArrayList<>(all.subList(from, to));
     }
 }

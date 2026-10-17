@@ -1,10 +1,14 @@
 package io.github.rurulalanana.starter.web;
 
 import cn.dev33.satoken.stp.StpUtil;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbCascade;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.service.CascadeService;
@@ -58,35 +62,77 @@ public class CascadeController {
     private final DeviceService deviceService;
     private final Gb28181Properties props;
 
-    /** 保存请求体。 */
+    /**
+     * 保存请求体。
+     *
+     * <p><b>字段名为什么是 PascalCase</b>：青瓜 GBS 的 {@code /cascade/save}
+     * 契约用大写开头（{@code Serial} / {@code Host} / {@code Port}），
+     * 前端 {@code CascadeView.vue} 也按该契约提交，这里保持一致。
+     *
+     * <p><b>为什么必须加 {@code @JsonNaming}</b>：Jackson 的属性名是从
+     * <b>getter</b> 推导的，不是字段名 —— {@code getSerial()} 推导出的属性名是
+     * {@code serial}（首字母小写）。只把字段写成 {@code Serial} 完全无效，
+     * 前端提交的 {@code {"Serial":"..."}} 会被静默丢弃，后端接着报
+     * 「上级平台编号（Serial）不能为空」——调用方明明传了值却提示没传。
+     * 这里用 {@code UpperCamelCaseStrategy} 把规范名统一成 PascalCase，
+     * 再靠每个字段上的 {@code @JsonAlias} 兼容 camelCase / 全小写写法。
+     */
     @Data
+    @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
     public static class CascadeSaveRequest {
+        @JsonAlias({"id"})
         private String ID;
+        @JsonAlias({"enable"})
         private Boolean Enable;
+        @JsonAlias({"name"})
         private String Name;
+        @JsonAlias({"serial"})
         private String Serial;
+        @JsonAlias({"realm"})
         private String Realm;
+        @JsonAlias({"host"})
         private String Host;
+        @JsonAlias({"port"})
         private Integer Port;
+        @JsonAlias({"localSerial"})
         private String LocalSerial;
+        @JsonAlias({"localHost"})
         private String LocalHost;
+        @JsonAlias({"localPort"})
         private Integer LocalPort;
+        @JsonAlias({"username"})
         private String Username;
+        @JsonAlias({"password"})
         private String Password;
+        @JsonAlias({"keepaliveMaxCount"})
         private Integer KeepaliveMaxCount;
+        @JsonAlias({"keepaliveInterval"})
         private Integer KeepaliveInterval;
+        @JsonAlias({"registerInterval"})
         private Integer RegisterInterval;
+        @JsonAlias({"registerTimeout"})
         private Integer RegisterTimeout;
+        @JsonAlias({"loadLimit"})
         private Integer LoadLimit;
+        @JsonAlias({"catalogGroupSize"})
         private Integer CatalogGroupSize;
+        @JsonAlias({"commandTransport"})
         private String CommandTransport;
+        @JsonAlias({"charset"})
         private String Charset;
+        @JsonAlias({"allowControl"})
         private Boolean AllowControl;
+        @JsonAlias({"shareRecord"})
         private Boolean ShareRecord;
+        @JsonAlias({"shareAllChannel"})
         private Boolean ShareAllChannel;
+        @JsonAlias({"streamKeepalive"})
         private Boolean StreamKeepalive;
+        @JsonAlias({"streamReader"})
         private Boolean StreamReader;
+        @JsonAlias({"bindLocalIP"})
         private Boolean BindLocalIP;
+        @JsonAlias({"controlPriority"})
         private Integer ControlPriority;
     }
 
@@ -106,9 +152,7 @@ public class CascadeController {
         }
         CascadeListVo vo = new CascadeListVo();
         vo.setCasecadeCount(list.size());
-        vo.setCasecadeList(limit > 0
-                ? list.subList(Math.min(start, list.size()), Math.min(start + limit, list.size()))
-                : list);
+        vo.setCasecadeList(PageQuery.slice(list, start, limit));
         return ApiResponse.ok(vo);
     }
 
@@ -216,9 +260,7 @@ public class CascadeController {
         vo.setChannelCount(list.size());
         vo.setChannelRelateCount(sharedCount);
         vo.setShareAllChannel(cascade.getShareAllChannel());
-        vo.setChannelList(limit > 0
-                ? list.subList(Math.min(start, list.size()), Math.min(start + limit, list.size()))
-                : list);
+        vo.setChannelList(PageQuery.slice(list, start, limit));
         return ApiResponse.ok(vo);
     }
 

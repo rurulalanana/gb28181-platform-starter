@@ -8,6 +8,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.dto.PlaybackStartRequest;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbStream;
@@ -256,10 +257,7 @@ public class PlaybackController {
         }
         StreamListVo vo = new StreamListVo();
         vo.setStreamCount(filtered.size());
-        vo.setStreams(limit > 0
-                ? filtered.subList(Math.min(start, filtered.size()),
-                Math.min(start + limit, filtered.size()))
-                : filtered);
+        vo.setStreams(PageQuery.slice(filtered, start, limit));
         return ApiResponse.ok(vo);
     }
 

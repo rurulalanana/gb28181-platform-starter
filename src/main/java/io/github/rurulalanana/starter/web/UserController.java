@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbUser;
 import io.github.rurulalanana.starter.mapper.GbUserMapper;
 import io.github.rurulalanana.starter.service.UserService;
@@ -69,9 +70,7 @@ public class UserController {
         }
         UserListVo vo = new UserListVo();
         vo.setUserCount(list.size());
-        vo.setUserList(limit > 0
-                ? list.subList(Math.min(start, list.size()), Math.min(start + limit, list.size()))
-                : list);
+        vo.setUserList(PageQuery.slice(list, start, limit));
         return ApiResponse.ok(vo);
     }
 
