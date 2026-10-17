@@ -17,7 +17,6 @@
           <el-option label="WebSocket-FLV" value="wsflv" />
           <el-option label="WebRTC（低延迟）" value="webrtc" />
         </el-select>
-        <el-checkbox v-model="showName" size="small" class="tool-check">显示名称</el-checkbox>
         <el-button
           size="small"
           class="rotate-btn"
@@ -75,36 +74,9 @@
               @click="playTile(tile)"
             />
 
-            <!-- 左上角：通道名 + 序号（可用工具栏「显示名称」关掉） -->
-            <div v-if="tile.playing && showName" class="tile-tag">
-              <span class="tile-index">{{ tile.id }}</span>
-              <span class="ellipsis">{{ tile.channelName || tile.code }}</span>
-            </div>
-
-            <!-- 选中角标：播放中且未显示通道名时才需要（否则与通道标签重叠） -->
-            <div
-              v-if="tile.id === activeTileId && !(tile.playing && showName)"
-              class="tile-active-badge"
-            >
-              {{ tile.id }}
-            </div>
-
             <!-- 右上角：状态灯 -->
             <div v-if="tile.playing" class="tile-state" :title="tile.state">
               <span class="pulse-dot" />
-            </div>
-
-            <!-- 悬浮工具条：全屏 / 抓图 / 停止（双击画面格同样可全屏） -->
-            <div v-if="tile.playing" class="tile-tools">
-              <button class="tt-btn" title="全屏（双击画面亦可）" @click.stop="toggleFullscreen(tile)">
-                <el-icon><FullScreen /></el-icon>
-              </button>
-              <button class="tt-btn" title="抓图并下载" @click.stop="snapshot(tile)">
-                <el-icon><Camera /></el-icon>
-              </button>
-              <button class="tt-btn" title="停止播放" @click.stop="stopTile(tile)">
-                <el-icon><Close /></el-icon>
-              </button>
             </div>
           </div>
 
@@ -331,8 +303,6 @@ const activeTile = computed(
 )
 /** 视频墙容器（整体全屏用）。 */
 const wallRef = ref(null)
-/** 是否在画面上显示通道名（工具栏可关）。 */
-const showName = ref(true)
 /** 通道面板视图：list=平铺列表，group=按设备分组。 */
 const panelTab = ref('list')
 /** 已展开的设备（分组视图）。 */
@@ -506,35 +476,6 @@ function toggleWallFullscreen() {
   if (el?.requestFullscreen) {
     el.requestFullscreen().catch(() => ElMessage.warning('当前浏览器不允许全屏'))
   }
-}
-
-/** 抓图：jessibuca 渲染在 canvas 上，WebRTC 走 video，两条路都支持。 */
-function snapshot(tile) {
-  const host = containerRefs[tile.id]
-  let url = null
-  const canvas = host?.querySelector('canvas')
-  if (canvas && canvas.width) {
-    url = canvas.toDataURL('image/png')
-  } else {
-    const video = host?.querySelector('video')
-    if (video && video.videoWidth) {
-      const c = document.createElement('canvas')
-      c.width = video.videoWidth
-      c.height = video.videoHeight
-      c.getContext('2d').drawImage(video, 0, 0, c.width, c.height)
-      url = c.toDataURL('image/png')
-    }
-  }
-  if (!url) {
-    ElMessage.warning('当前画面还取不到图像，稍后再试')
-    return
-  }
-  const name = tile.channelName || tile.code || tile.id
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${name}-${Date.now()}.png`
-  a.click()
-  ElMessage.success('已保存抓图')
 }
 
 /**
@@ -851,41 +792,6 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 左上角通道标签 */
-.tile-tag {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  right: 34px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: var(--r-sm);
-  background: rgba(5, 7, 13, 0.66);
-  backdrop-filter: blur(4px);
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 11.5px;
-  pointer-events: none;
-}
-
-.tile-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.14);
-  color: rgba(255, 255, 255, 0.9);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
 /* 右上角状态灯 */
 .tile-state {
   position: absolute;
@@ -1140,51 +1046,6 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 画面格悬浮工具条：默认透明，鼠标移入才出现（不干扰看画面） */
-.tile-tools {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.tile:hover .tile-tools,
-.tile.is-active .tile-tools {
-  opacity: 1;
-}
-
-.tt-btn {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: var(--r-sm);
-  background: rgba(8, 12, 18, 0.62);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.tt-btn:hover {
-  background: var(--accent);
-  color: #fff;
-}
-
-/* 画面格右上角状态灯与工具条不要叠在一起 */
-.tile-state {
-  right: 10px;
-}
-
-.tile:hover .tile-state {
-  display: none;
-}
-
 /* 轮播设置弹窗 */
 .rotate-tip {
   font-size: 12.5px;
@@ -1237,43 +1098,7 @@ onUnmounted(() => {
     0 0 14px rgba(44, 98, 214, 0.55);
 }
 
-/* 选中角标：空格子没有通道标签，靠它标明当前操作的是哪一格 */
-.tile-active-badge {
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 3;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--r-md) 0 var(--r-sm) 0;
-  background: var(--accent);
-  color: #fff;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  pointer-events: none;
-}
-
-.tile.is-active .tile-tag {
-  background: var(--accent);
-  color: #fff;
-}
-
-.tile.is-active .tile-tag .tile-index {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
-}
-
-/* 工具栏里的开关与轮播按钮 */
-.tool-check {
-  height: 26px;
-  margin-right: 2px;
-}
-
+/* 工具栏里的轮播按钮 */
 .rotate-btn.is-on {
   color: var(--accent-ink);
   border-color: var(--brand-300);
