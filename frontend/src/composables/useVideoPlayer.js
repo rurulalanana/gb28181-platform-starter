@@ -47,6 +47,57 @@ import { webrtcApi } from '@/api'
  *
  * @param containerRef 容器 div 的 ref（jessibuca 会在其中创建 canvas）
  */
+/** jessibuca SDK 加载 Promise（模块级：多个播放器/预热共享同一次 script 加载）。 */
+let sdkPromise = null
+
+/**
+ * 加载 jessibuca SDK（模块级，只发一次 script 请求）。
+ *
+ * 静态文件放在 `public/jessibuca/`，构建后是 `/jessibuca/jessibuca.js`。
+ */
+export function loadJessibucaSdk() {
+  if (window.Jessibuca) {
+    return Promise.resolve(window.Jessibuca)
+  }
+  if (sdkPromise) {
+    return sdkPromise
+  }
+  sdkPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = '/jessibuca/jessibuca.js'
+    script.async = true
+    script.onload = () => {
+      if (window.Jessibuca) {
+        resolve(window.Jessibuca)
+      } else {
+        reject(new Error('jessibuca 加载后未暴露全局变量'))
+      }
+    }
+    script.onerror = () => {
+      sdkPromise = null
+      reject(new Error('jessibuca.js 加载失败，请确认 /jessibuca/ 静态资源可访问'))
+    }
+    document.head.appendChild(script)
+  })
+  return sdkPromise
+}
+
+/**
+ * 预热播放器（进入实时预览页时调用）。
+ *
+ * 点播时才按需加载 SDK 会让首次点播多等 2~5 秒（公网下载 jessibuca.js
+ * 220KB + decoder.wasm 1MB）。提前把脚本拉进内存、wasm 拉进 HTTP 缓存，
+ * 点播时几乎零等待。失败静默（点播时仍会重试）。
+ */
+export function preloadJessibuca() {
+  loadJessibucaSdk().catch(() => {})
+  try {
+    fetch('/jessibuca/decoder.wasm', { cache: 'force-cache' }).catch(() => {})
+  } catch (e) {
+    /* 忽略：预热失败不影响点播 */
+  }
+}
+
 export function useVideoPlayer(containerRef) {
   const playing = ref(false)
   const state = ref('空闲')
@@ -68,8 +119,6 @@ export function useVideoPlayer(containerRef) {
   let disposed = false
   /** 重连定时器。 */
   let retryTimer = null
-  /** jessibuca 脚本加载 Promise（只加载一次）。 */
-  let sdkPromise = null
   /** 尺寸监听：布局切换（单屏/四分屏…）时通知播放器重新计算缩放。 */
   let resizeObserver = null
   /** 当前播放器宿主 div（每次播放新建，销毁时整块移除）。 */
@@ -78,34 +127,10 @@ export function useVideoPlayer(containerRef) {
   /**
    * 按需加载 jessibuca SDK。
    *
-   * 静态文件放在 `public/jessibuca/`，构建后是 `/jessibuca/jessibuca.js`。
-   * 只在真正要播放时才加载，避免首屏多下 1.3MB（js + wasm）。
+   * 实际加载逻辑在模块级 {@link loadJessibucaSdk}（多个实例与预热共享）。
    */
   function loadSdk() {
-    if (window.Jessibuca) {
-      return Promise.resolve(window.Jessibuca)
-    }
-    if (sdkPromise) {
-      return sdkPromise
-    }
-    sdkPromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script')
-      script.src = '/jessibuca/jessibuca.js'
-      script.async = true
-      script.onload = () => {
-        if (window.Jessibuca) {
-          resolve(window.Jessibuca)
-        } else {
-          reject(new Error('jessibuca 加载后未暴露全局变量'))
-        }
-      }
-      script.onerror = () => {
-        sdkPromise = null
-        reject(new Error('jessibuca.js 加载失败，请确认 /jessibuca/ 静态资源可访问'))
-      }
-      document.head.appendChild(script)
-    })
-    return sdkPromise
+    return loadJessibucaSdk()
   }
 
   /**
@@ -221,6 +246,11 @@ export function useVideoPlayer(containerRef) {
       isFlv: true,
       // 有音频（PCMA/PCMU），让 jessibuca 解码
       hasAudio: true,
+      // 优先 WebCodecs 硬解（H264/H265）：
+      // 本项目设备常见 2560×1440 H265，纯 WASM 软解（单线程 ffmpeg）只有个位数
+      // 帧率，体感「播放很慢/卡死」；走 WebCodecs 后由 GPU 硬解，帧率正常。
+      // 浏览器/显卡不支持对应编码时 jessibuca 会自动回退到 WASM 软解。
+      useWCS: true,
       // 直播流：断流自动重连（-1 = 无限重试）
       heartTimeoutReplay: true,
       heartTimeoutReplayTimes: -1,

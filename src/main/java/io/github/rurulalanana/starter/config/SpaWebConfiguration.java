@@ -1,8 +1,12 @@
 package io.github.rurulalanana.starter.config;
 
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.CacheControl;
+import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+import java.time.Duration;
 
 /**
  * 前端单页应用（SPA）路由回退。
@@ -24,6 +28,16 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
 
     /** 一级路径白名单：这些前缀下的请求交给静态资源处理器，不做 SPA 回退。 */
     private static final String STATIC_PREFIXES = "api|assets|record|error|jessibuca";
+
+    @Override
+    public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        // 播放器 SDK（jessibuca.js + decoder.wasm，约 1.3MB）加长缓存：
+        // 避免每次进实时预览都重新下载（或 304 往返）。文件名无内容哈希，
+        // 所以用 7 天而非 immutable：升级 SDK 后最多脏缓存一周。
+        registry.addResourceHandler("/jessibuca/**")
+                .addResourceLocations("classpath:/static/jessibuca/")
+                .setCacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePublic());
+    }
 
     @Override
     public void addViewControllers(ViewControllerRegistry registry) {

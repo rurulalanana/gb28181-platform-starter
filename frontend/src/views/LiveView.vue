@@ -297,7 +297,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { resolvePlayUrls, useVideoPlayer, preloadJessibuca } from '@/composables/useVideoPlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
@@ -735,6 +735,9 @@ const route = useRoute()
 const router = useRouter()
 
 onMounted(async () => {
+  /* 预热播放器 SDK（js + wasm 约 1.3MB）：用户浏览通道列表时先下载好，
+     点播时几乎零等待（见 useVideoPlayer.preloadJessibuca）。 */
+  preloadJessibuca()
   await loadChannels()
   await applyQueryPlay()
 })

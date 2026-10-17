@@ -33,6 +33,7 @@ public class Gb28181PlatformConfiguration {
                 .rtpSinglePort(props.isRtpSinglePort())
                 .rtpSinglePortNumber(props.getRtpSinglePortNumber())
                 .autoRecord(props.isAutoRecord())
+                .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())
                 .recordRoot(isBlank(props.getRecordRoot())
                         ? System.getProperty("user.dir") + "/record" : props.getRecordRoot());
         // 注意：Lombok @Builder.Default 只在"未显式赋值"时生效，
