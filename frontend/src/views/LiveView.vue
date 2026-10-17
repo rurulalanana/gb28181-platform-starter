@@ -35,6 +35,9 @@
         <el-button size="small" class="stop-all" :disabled="!playingCount" @click="stopAll">
           <el-icon><SwitchButton /></el-icon> 全部停止
         </el-button>
+        <el-button size="small" :disabled="!hasAnyTile" @click="clearAll">
+          <el-icon><Delete /></el-icon> 清除
+        </el-button>
       </div>
     </header>
 
@@ -331,6 +334,9 @@ const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
 
 /** 正在播放的格子数（用于页头提示与"全部停止"按钮的可用态）。 */
 const playingCount = computed(() => tiles.value.filter((t) => t.playing).length)
+
+/** 是否有画面格占着通道（决定"清除"按钮的可用态）。 */
+const hasAnyTile = computed(() => tiles.value.some((t) => t.channelKey || t.playing))
 
 /** 已被画面格占用的通道 key，通道列表用它标记"使用中"。 */
 const usedKeys = computed(
@@ -632,6 +638,28 @@ function stopAll() {
     if (tile.playing || tile.channelKey) stopTile(tile)
   }
   ElMessage.success('已停止全部画面')
+}
+
+/**
+ * 清除所有画面：断流并解绑通道，格子回到「未选择通道」。
+ *
+ * <p>与「全部停止」的区别：停止只断流、保留通道绑定（再点一下格子就能重播）；
+ * 清除把格子彻底腾空，适合换一组通道重新上屏。
+ */
+function clearAll() {
+  for (const tile of tiles.value) {
+    stopTile(tile)
+    tile.channelKey = ''
+    tile.serial = ''
+    tile.code = ''
+    tile.channelName = ''
+    tile.ptzType = 0
+    tile.playing = false
+    tile.state = '未选择通道'
+  }
+  ptzTileId.value = 0
+  activeTileId.value = 1
+  ElMessage.success('已清除全部画面')
 }
 
 /** 切换协议：所有播放中的格子重连。 */
