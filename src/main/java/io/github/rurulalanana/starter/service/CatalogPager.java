@@ -53,8 +53,11 @@ public class CatalogPager {
      * @param items    累积到的全部目录项
      * @param complete 是否已收齐（已收条数 &ge; {@code SumNum}）。
      *                 仅当收齐时才能当作「全量快照」去清理已下线的旧通道。
+     * @param sumNum   设备自报的总条数（{@code SumNum}），0 表示设备未提供。
+     *                 带上它才能从日志区分「下级只共享了 2 个」和「下级共享 4 个但我们只收到 2 个」。
+     * @param frames   本次批次实际收到的应答帧数（诊断分页上报风格）。
      */
-    public record Result(List<CatalogItem> items, boolean complete) {
+    public record Result(List<CatalogItem> items, boolean complete, int sumNum, int frames) {
     }
 
     /** 正在聚合的批次，key = {@code deviceId#sn}。 */
@@ -68,6 +71,8 @@ public class CatalogPager {
         private final long startedAt = System.currentTimeMillis();
         /** 已累积的条目，按设备编码去重（标准要求设备编码全局唯一）。 */
         private final Map<String, CatalogItem> items = new LinkedHashMap<>();
+        /** 收到的应答帧数（诊断用：可区分「单帧多条」与「多帧各一条」两种上报风格）。 */
+        private int frames;
 
         Batch(int sumNum) {
             this.sumNum = sumNum;
@@ -93,6 +98,7 @@ public class CatalogPager {
 
         Batch batch = pending.computeIfAbsent(key, k -> new Batch(total));
         synchronized (batch) {
+            batch.frames++;
             if (items != null) {
                 for (CatalogItem it : items) {
                     if (it != null && it.getDeviceId() != null && !it.getDeviceId().isBlank()) {
@@ -105,7 +111,7 @@ public class CatalogPager {
             // 而它们实际上都是单帧全量上报，直接收口即可。
             if (batch.sumNum <= 0) {
                 pending.remove(key);
-                return new Result(new ArrayList<>(batch.items.values()), false);
+                return new Result(new ArrayList<>(batch.items.values()), false, 0, batch.frames);
             }
             boolean complete = batch.items.size() >= batch.sumNum;
             boolean expired = System.currentTimeMillis() - batch.startedAt > WINDOW_MS;
@@ -118,10 +124,16 @@ public class CatalogPager {
             if (!complete) {
                 // 少报通常意味着设备侧过滤（权限/离线通道不报），不是错误；
                 // 但需要在日志里留痕，便于排查「通道数与设备侧不一致」
-                log.info("目录分页未收齐即收口: device={} sn={} 已收={}/{}",
-                        deviceId, sn, batch.items.size(), batch.sumNum);
+                log.info("目录分页未收齐即收口: device={} sn={} 已收={}/{} 帧数={}",
+                        deviceId, sn, batch.items.size(), batch.sumNum, batch.frames);
             }
-            return new Result(new ArrayList<>(batch.items.values()), complete);
+            if (log.isDebugEnabled()) {
+                log.debug("目录分页收口: device={} sn={} 帧数={} 条目={} SumNum={} 收齐={} 设备编码={}",
+                        deviceId, sn, batch.frames, batch.items.size(), batch.sumNum,
+                        complete, batch.items.keySet());
+            }
+            return new Result(new ArrayList<>(batch.items.values()), complete,
+                    batch.sumNum, batch.frames);
         }
     }
 

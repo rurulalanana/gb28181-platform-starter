@@ -369,6 +369,22 @@ public class DeviceService {
     @Transactional
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
                             boolean fullSnapshot) {
+        saveCatalog(parentDeviceId, items, fullSnapshot, 0, 0);
+    }
+
+    /**
+     * 处理设备目录应答（带全量快照标记与下级自报信息）。
+     *
+     * @param parentDeviceId 应答来源设备
+     * @param items          聚合后的目录项
+     * @param fullSnapshot   是否为完整的全量目录（收齐且带了 SumNum）
+     * @param sumNum         下级自报的总条数（{@code SumNum}），0 表示未提供；
+     *                       仅用于日志——出现「下级说有 N 个，库里只有 M 个」时能直接定位责任方
+     * @param frames         本次批次收到的应答帧数，仅用于日志
+     */
+    @Transactional
+    public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
+                            boolean fullSnapshot, int sumNum, int frames) {
         if (items == null || items.isEmpty()) {
             return;
         }
@@ -421,8 +437,9 @@ public class DeviceService {
         device.setChannelCount(channelCount);
         device.setUpdateTime(LocalDateTime.now());
         deviceMapper.updateById(device);
-        log.info("目录已同步: device={} 本次目录项={} 通道总数={} 全量={}",
-                parentDeviceId, items.size(), channelCount, fullSnapshot);
+        log.info("目录已同步: device={} 下级自报={} 收到帧数={} 本次目录项={} 通道总数={} 全量={}",
+                parentDeviceId, sumNum > 0 ? sumNum : "未提供", frames, items.size(),
+                channelCount, fullSnapshot);
     }
 
     /**

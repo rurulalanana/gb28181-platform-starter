@@ -126,7 +126,8 @@ public class SipEventBridge implements SipCallback {
             return;
         }
         asyncExecutor.run("目录同步落库",
-                () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete()));
+                () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete(),
+                        merged.sumNum(), merged.frames()));
     }
 
     /** 把 MANSCDP 的 {@code <DeviceList><Item>} 解析为 {@link CatalogItem}。 */
@@ -201,7 +202,8 @@ public class SipEventBridge implements SipCallback {
                 CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
                 if (merged != null) {
                     asyncExecutor.run("目录推送落库",
-                            () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete()));
+                            () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete(),
+                                    merged.sumNum(), merged.frames()));
                 }
             }
         }
