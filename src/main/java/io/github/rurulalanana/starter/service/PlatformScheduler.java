@@ -27,6 +27,7 @@ public class PlatformScheduler {
     private final RecordService recordService;
     private final ChannelRecordPolicy recordPolicy;
     private final StreamService streamService;
+    private final CatalogPager catalogPager;
     private final Gb28181Properties props;
 
     /** 操作日志保留天数（默认 7 天）。 */
@@ -57,6 +58,25 @@ public class PlatformScheduler {
     @Scheduled(fixedDelayString = "${gb28181.starter.metrics-sample-interval-ms:3000}")
     public void sampleSystemMetrics() {
         systemMetricsService.sample();
+    }
+
+    /**
+     * 目录分页批次回收（默认每 30 秒）。
+     *
+     * <p>正常情况下每帧都会在 {@code CatalogPager.accept} 里被收口。
+     * 但若设备少报 {@code SumNum}（报了 3 实际只发 2 帧）后续再无帧到达，
+     * 该批次就没人来收口，会永久占着内存。这里定期扫掉超时批次。
+     */
+    @Scheduled(fixedDelayString = "${gb28181.starter.catalog-pager-purge-interval-ms:30000}")
+    public void purgeCatalogPager() {
+        try {
+            int removed = catalogPager.purgeExpired();
+            if (removed > 0) {
+                log.warn("目录分页批次超时回收：{} 个（设备少报 SumNum 或应答丢包）", removed);
+            }
+        } catch (Exception e) {
+            log.warn("目录分页批次回收失败: {}", e.getMessage());
+        }
     }
 
     /**

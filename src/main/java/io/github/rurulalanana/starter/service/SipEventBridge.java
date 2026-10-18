@@ -41,6 +41,8 @@ public class SipEventBridge implements SipCallback {
     private final DeviceCollectService collectService;
     private final SipRegistryHealer registryHealer;
     private final PlatformAsyncExecutor asyncExecutor;
+    /** 目录分页聚合（下级平台按 SumNum 一帧一页上报）。 */
+    private final CatalogPager catalogPager;
 
     /** 平台启动后把本对象挂为信令回调委派。 */
     @PostConstruct
@@ -63,6 +65,8 @@ public class SipEventBridge implements SipCallback {
         if (event.isUnregistered()) {
             // 注销后清节流，下次上线立即重新采集
             collectService.forget(deviceId);
+            // 同时丢弃未收口的目录批次，避免旧数据被当成新一轮结果
+            catalogPager.forget(deviceId);
         } else {
             collectService.collectOnOnline(deviceId, false);
         }
@@ -103,7 +107,7 @@ public class SipEventBridge implements SipCallback {
         }
     }
 
-    /** 目录应答：解析 Item 并落库设备与通道。 */
+    /** 目录应答：按 SumNum 聚合分页后落库设备与通道。 */
     private void handleCatalog(ManscdpEvent event, ManscdpMessage msg) {
         String deviceId = msg.getDeviceId();
         if (deviceId == null || deviceId.isBlank()) {
@@ -114,7 +118,15 @@ public class SipEventBridge implements SipCallback {
             log.debug("目录应答无 Item: device={} xml={}", deviceId, event.getXml());
             return;
         }
-        asyncExecutor.run("目录同步落库", () -> deviceService.saveCatalog(deviceId, items));
+        // 分页聚合：下级平台（如 LiveGBS）常按标准一帧一页上报，
+        // 不聚合会把「3 个通道」当成 3 次「只有 1 个通道的全量目录」
+        Integer sumNum = msg.intOf("SumNum");
+        CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
+        if (merged == null) {
+            return;
+        }
+        asyncExecutor.run("目录同步落库",
+                () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete()));
     }
 
     /** 把 MANSCDP 的 {@code <DeviceList><Item>} 解析为 {@link CatalogItem}。 */
@@ -181,12 +193,16 @@ public class SipEventBridge implements SipCallback {
             // 心跳已由 gb28181-sip 自动刷新注册表，此处无需重复处理
             return null;
         } else if ("Catalog".equals(cmdType)) {
-            // 设备主动上报目录变更（订阅推送）
+            // 设备主动上报目录变更（订阅推送）：同样可能是分页的，走聚合器
             List<CatalogItem> items = parseCatalog(msg);
             if (!items.isEmpty()) {
                 String deviceId = msg.getDeviceId();
-                asyncExecutor.run("目录推送落库",
-                        () -> deviceService.saveCatalog(deviceId, items));
+                Integer sumNum = msg.intOf("SumNum");
+                CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
+                if (merged != null) {
+                    asyncExecutor.run("目录推送落库",
+                            () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete()));
+                }
             }
         }
         return null;

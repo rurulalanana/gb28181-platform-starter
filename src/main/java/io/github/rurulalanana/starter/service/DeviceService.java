@@ -349,6 +349,26 @@ public class DeviceService {
      */
     @Transactional
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items) {
+        // 兼容旧调用（增量/未如总量）：不做旧通道清理
+        saveCatalog(parentDeviceId, items, false);
+    }
+
+    /**
+     * 处理设备目录应答（带全量快照标记）。
+     *
+     * <p><b>{@code fullSnapshot} 的作用</b>：下级平台删掉通道后，新目录里不再包含它，
+     * 但库里那条记录不会被自动删——设备列表的「通道数」会一直偏大，
+     * 点播该通道也只会得到「设备未注册」的错。
+     * 只有在<b>确认收齐</b>（已收条数 &ge; {@code SumNum}）时才能把它当全量快照，
+     * 否则分页中途就会把还没收到的通道误删。
+     *
+     * @param parentDeviceId 应答来源设备
+     * @param items          聚合后的目录项
+     * @param fullSnapshot   是否为完整的全量目录（收齐且带了 SumNum）
+     */
+    @Transactional
+    public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
+                            boolean fullSnapshot) {
         if (items == null || items.isEmpty()) {
             return;
         }
@@ -363,10 +383,12 @@ public class DeviceService {
         }
         CatalogItem selfItem = null;
         boolean hasSubItem = false;
+        java.util.Set<String> reported = new java.util.HashSet<>();
         for (CatalogItem item : items) {
             if (item == null || item.getDeviceId() == null || item.getDeviceId().isBlank()) {
                 continue;
             }
+            reported.add(item.getDeviceId());
             if (item.getDeviceId().equals(parentDeviceId)) {
                 selfItem = item;
                 continue;
@@ -380,6 +402,13 @@ public class DeviceService {
         if (hasSubItem) {
             // 设备确实有下级通道 → 清掉可能残留的「自身通道」
             removeSelfChannel(parentDeviceId);
+            if (fullSnapshot) {
+                // 收齐了：设备本次没报的通道说明已不存在，同步删掉
+                int removed = removeChannelsNotIn(parentDeviceId, reported);
+                if (removed > 0) {
+                    log.info("目录全量核对：设备 {} 删除已下线通道 {} 个", parentDeviceId, removed);
+                }
+            }
         } else if (selfItem != null && !hasSubChannels(parentDeviceId)) {
             // 直连摄像机：设备自身就是唯一通道
             saveChannel(device, selfItem, true);
@@ -392,8 +421,35 @@ public class DeviceService {
         device.setChannelCount(channelCount);
         device.setUpdateTime(LocalDateTime.now());
         deviceMapper.updateById(device);
-        log.info("目录已同步: device={} 本次目录项={} 通道总数={}",
-                parentDeviceId, items.size(), channelCount);
+        log.info("目录已同步: device={} 本次目录项={} 通道总数={} 全量={}",
+                parentDeviceId, items.size(), channelCount, fullSnapshot);
+    }
+
+    /**
+     * 删除该设备下「本次目录未上报」的通道。
+     *
+     * <p>「设备自身即通道」那条不参与比较：它在有真实子通道时由
+     * {@link #removeSelfChannel} 单独处理，不依赖本次是否上报。
+     *
+     * @return 删除行数
+     */
+    private int removeChannelsNotIn(String deviceId, java.util.Set<String> reported) {
+        java.util.List<GbChannel> existing = channelMapper.selectList(
+                Wrappers.<GbChannel>lambdaQuery().eq(GbChannel::getDeviceId, deviceId));
+        java.util.List<String> stale = new java.util.ArrayList<>();
+        for (GbChannel c : existing) {
+            String cid = c.getChannelId();
+            if (cid == null || cid.equals(deviceId) || reported.contains(cid)) {
+                continue;
+            }
+            stale.add(cid);
+        }
+        if (stale.isEmpty()) {
+            return 0;
+        }
+        return channelMapper.delete(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId)
+                .in(GbChannel::getChannelId, stale));
     }
 
     /** 统计某设备下的通道行数（含「设备自身即通道」那条）。 */
