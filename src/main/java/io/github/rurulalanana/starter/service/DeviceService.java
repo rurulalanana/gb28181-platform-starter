@@ -386,6 +386,20 @@ public class DeviceService {
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
                             boolean fullSnapshot, int sumNum, int frames) {
         if (items == null || items.isEmpty()) {
+            // 空的全量快照 = 下级把所有通道都删了（应答 SumNum=0 + 空 DeviceList）。
+            // 不能直接 return，否则幽灵通道永远清不掉。
+            if (fullSnapshot) {
+                int removed = removeChannelsNotIn(parentDeviceId, java.util.Set.of());
+                int channelCount = countChannels(parentDeviceId);
+                GbDevice d = findDevice(parentDeviceId);
+                if (d != null) {
+                    d.setChannelCount(channelCount);
+                    d.setUpdateTime(LocalDateTime.now());
+                    deviceMapper.updateById(d);
+                }
+                log.info("目录已同步: device={} 下级自报={} 收到帧数={} 本次目录项=0 通道总数={} 全量=true（空目录，已清理 {} 个）",
+                        parentDeviceId, sumNum > 0 ? sumNum : "未提供", frames, channelCount, removed);
+            }
             return;
         }
         GbDevice device = findDevice(parentDeviceId);

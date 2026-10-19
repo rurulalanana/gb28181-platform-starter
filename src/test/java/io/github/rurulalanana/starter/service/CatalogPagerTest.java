@@ -122,4 +122,35 @@ class CatalogPagerTest {
         pager.forget("dev-A");
         assertEquals(1, pager.pendingCount(), "只清 dev-A 的批次");
     }
+
+    @Test
+    @DisplayName("结果携带下级自报条数与帧数，便于定位通道数差异")
+    void shouldReportSumNumAndFrames() {
+        CatalogPager pager = new CatalogPager();
+        String dev = "34020000002000000006";
+
+        assertNull(pager.accept(dev, 1, 2, List.of(item(dev))));
+        CatalogPager.Result r = pager.accept(dev, 1, 2, List.of(item("34020000001320000001")));
+
+        assertNotNull(r);
+        assertEquals(2, r.sumNum(), "结果应带上 SumNum，否则日志无法区分「下级只报了 N 个」");
+        assertEquals(2, r.frames(), "结果应带上实际收到的帧数，用于区分分页风格");
+        assertTrue(r.complete());
+    }
+
+    @Test
+    @DisplayName("单帧上报时帧数为 1，SumNum 与条目数一致")
+    void shouldHandleSingleFrameWithFramesOne() {
+        CatalogPager pager = new CatalogPager();
+        String dev = "34020000002000000006";
+
+        CatalogPager.Result r = pager.accept(dev, 1, 2,
+                List.of(item(dev), item("34020000001320000001")));
+
+        assertNotNull(r);
+        assertEquals(1, r.frames(), "一次给全时帧数必须是 1");
+        assertEquals(2, r.sumNum());
+        assertEquals(2, r.items().size());
+        assertTrue(r.complete());
+    }
 }

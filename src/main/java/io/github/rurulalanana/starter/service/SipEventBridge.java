@@ -115,7 +115,19 @@ public class SipEventBridge implements SipCallback {
         }
         List<CatalogItem> items = parseCatalog(msg);
         if (items.isEmpty()) {
-            log.debug("目录应答无 Item: device={} xml={}", deviceId, event.getXml());
+            // 空目录不等于「什么都不用做」：下级把所有通道都删了时，
+            // 应答就是 SumNum=0 + 空的 <DeviceList Num="0"/>。
+            // 此时必须当作全量快照去清理，否则库里会永远留着幽灵通道。
+            // 但只有当设备确实声明了 SumNum=0 才能确定是「真的空」；
+            // 没带 SumNum 的空应答可能只是分页的最后一帧，不能据此删数据。
+            Integer declared = msg.intOf("SumNum");
+            if (declared != null && declared == 0) {
+                log.info("收到空目录应答: device={} 按全量快照清理已下线通道", deviceId);
+                asyncExecutor.run("空目录清理",
+                        () -> deviceService.saveCatalog(deviceId, List.of(), true, 0, 1));
+            } else {
+                log.debug("目录应答无 Item: device={} xml={}", deviceId, event.getXml());
+            }
             return;
         }
         // 分页聚合：下级平台（如 LiveGBS）常按标准一帧一页上报，
@@ -173,11 +185,85 @@ public class SipEventBridge implements SipCallback {
         return out;
     }
 
-    // ==================== 报警通知 ====================
+    // ==================== 订阅推送（SIP NOTIFY） ====================
 
+    /**
+     * 处理 SIP {@code NOTIFY}（标准 9.11 / RFC 6665）。
+     *
+     * <p><b>为什么必须在这里解析消息体</b>：国标订阅推送有两条完全不同的信令路径，
+     * 二者在协议栈里分派到不同回调，不能只实现其中一条：
+     * <ul>
+     *   <li>{@code MESSAGE} + MANSCDP 体 → {@link #onManscdpRequest}</li>
+     *   <li>{@code NOTIFY} + MANSCDP 体 → <b>本方法</b></li>
+     * </ul>
+     * 早先本方法是空实现（注释误以为 NOTIFY 体也会走 onManscdpRequest），
+     * 结果所有走 NOTIFY 的目录/报警推送被静默丢弃 —— 表现为
+     * 「下级点了推送通道，本级毫无反应」，只能靠重新注册触发全量目录才能看到变化。
+     *
+     * <p>NOTIFY 与 MESSAGE 的语义一致：都是<b>增量通知</b>，不能当全量快照删旧数据。
+     */
     @Override
     public void onNotify(io.github.rurulalanana.gb28181.sip.event.SubscribeEvent event) {
-        // 设备侧主动上报（订阅推送）走这里；实际报警体在 onManscdpRequest 分支处理
+        String body = event == null ? null : event.getBody();
+        if (body == null || body.isBlank()) {
+            log.debug("NOTIFY 无消息体: peer={} event={}", 
+                    event == null || event.getPeer() == null ? null : event.getPeer().getDeviceId(),
+                    event == null ? null : event.getEventName());
+            return;
+        }
+        ManscdpMessage msg;
+        try {
+            msg = io.github.rurulalanana.gb28181.sip.manscdp.ManscdpXml.parse(body);
+        } catch (Exception e) {
+            // 订阅确认等非 MANSCDP 体（如纯 RFC 6665）解析失败属正常，降为 debug
+            log.debug("NOTIFY 消息体非 MANSCDP，忽略: event={} err={}",
+                    event.getEventName(), e.getMessage());
+            return;
+        }
+        String cmdType = msg.getCmdType();
+        if (cmdType == null) {
+            return;
+        }
+        String deviceId = msg.getDeviceId();
+        if (deviceId == null || deviceId.isBlank()) {
+            // 部分平台在 NOTIFY 里不带 DeviceID，退化为用 From 头里的设备编码
+            deviceId = event.getPeer() == null ? null : event.getPeer().getDeviceId();
+        }
+        if (deviceId == null || deviceId.isBlank()) {
+            log.warn("NOTIFY 无法确定设备编码: event={} cmd={}", event.getEventName(), cmdType);
+            return;
+        }
+        final String from = deviceId;
+        switch (cmdType) {
+            case "Catalog" -> handlePushedCatalog(from, msg, event.getEventName());
+            case "Alarm" -> asyncExecutor.run("报警推送落库",
+                    () -> alarmService.onAlarmNotify(from, msg));
+            default -> log.debug("NOTIFY 未处理的命令: cmd={} device={}", cmdType, from);
+        }
+    }
+
+    /**
+     * 处理推送来的目录（MESSAGE 与 NOTIFY 共用）。
+     *
+     * <p>推送是<b>增量通知</b>：只包含发生变化的条目，因此恒以
+     * {@code fullSnapshot=false} 落库，只做 upsert，绝不清理未提到的通道。
+     */
+    private void handlePushedCatalog(String deviceId, ManscdpMessage msg, String source) {
+        List<CatalogItem> items = parseCatalog(msg);
+        if (items.isEmpty()) {
+            log.debug("目录推送无 Item: device={} source={}", deviceId, source);
+            return;
+        }
+        Integer sumNum = msg.intOf("SumNum");
+        CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
+        if (merged == null) {
+            return;
+        }
+        log.info("收到目录变更推送: device={} 来源={} 条目={} 下级自报={} 帧数={}",
+                deviceId, source, merged.items().size(), merged.sumNum(), merged.frames());
+        asyncExecutor.run("目录推送落库",
+                () -> deviceService.saveCatalog(deviceId, merged.items(), false,
+                        merged.sumNum(), merged.frames()));
     }
 
     @Override
@@ -194,17 +280,16 @@ public class SipEventBridge implements SipCallback {
             // 心跳已由 gb28181-sip 自动刷新注册表，此处无需重复处理
             return null;
         } else if ("Catalog".equals(cmdType)) {
-            // 设备主动上报目录变更（订阅推送）：同样可能是分页的，走聚合器
-            List<CatalogItem> items = parseCatalog(msg);
-            if (!items.isEmpty()) {
-                String deviceId = msg.getDeviceId();
-                Integer sumNum = msg.intOf("SumNum");
-                CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
-                if (merged != null) {
-                    asyncExecutor.run("目录推送落库",
-                            () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete(),
-                                    merged.sumNum(), merged.frames()));
-                }
+            // 设备/下级平台主动上报目录变更（MESSAGE + Notify/Catalog）。
+            //
+            // 【关键】这与 Query 应答的语义完全不同：
+            // - Response 是「对查询的完整答复」，收齐后可当全量快照
+            // - Notify 是「目录发生变化的增量通知」，只包含变化的那几条
+            // 若把增量当全量，removeChannelsNotIn 会把本次没提到的通道全部误删。
+            // 因此恒以 fullSnapshot=false 落库，只做 upsert，绝不删旧通道。
+            String deviceId = msg.getDeviceId();
+            if (deviceId != null && !deviceId.isBlank()) {
+                handlePushedCatalog(deviceId, msg, "MESSAGE");
             }
         }
         return null;
