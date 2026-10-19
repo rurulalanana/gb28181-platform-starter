@@ -93,83 +93,97 @@
     </el-card>
 
     <!-- 编辑对话框 -->
-    <el-dialog v-model="editDialog" :title="form.ID ? '编辑级联' : '新增级联'" width="700px">
-      <el-form :model="form" label-width="130px">
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="名称">
-              <el-input v-model="form.Name" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="上级平台编码">
-              <el-input v-model="form.Serial" class="mono" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="SIP 域">
-              <el-input v-model="form.Realm" class="mono" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="上级平台地址">
-              <el-input v-model="form.Host" class="mono" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="上级端口">
-              <el-input-number v-model="form.Port" :min="1" :max="65535" controls-position="right" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="本地地址">
-              <el-input v-model="form.LocalHost" class="mono" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="本地端口">
-              <el-input-number
-                v-model="form.LocalPort"
-                :min="1"
-                :max="65535"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="传输协议">
-              <el-select v-model="form.CommandTransport">
-                <el-option label="UDP" value="UDP" />
-                <el-option label="TCP" value="TCP" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="用户名（可选）">
-              <el-input v-model="form.Username" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="密码（可选）">
-              <el-input v-model="form.Password" type="password" show-password />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="启用">
-              <el-switch v-model="form.Enable" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="共享全部通道">
-              <el-switch v-model="form.ShareAllChannel" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="允许控制">
-              <el-switch v-model="form.AllowControl" />
-            </el-form-item>
-          </el-col>
-        </el-row>
+    <!-- 布局说明：级联表单字段名普遍较长（「上级平台编码」「共享全部通道」等），
+         早先用 label-width=130px + 两列 el-col span=12 时，每个输入框只剩约 200px，
+         而「上级端口/本地地址/本地端口」三个字段挤在 span=8 里更只剩 130px，
+         数字输入框的增减按钮直接把内容压没了。改为单列 + 分组卡片：
+         每个字段占满整行宽度，长编码也有足够空间完整显示。 -->
+    <el-dialog
+      v-model="editDialog"
+      :title="form.ID ? '编辑级联' : '新增级联'"
+      width="560px"
+      class="cascade-dialog"
+      top="6vh"
+    >
+      <el-form :model="form" label-width="120px" label-position="right">
+        <!-- 基础信息 -->
+        <div class="form-section">
+          <div class="form-section-title">基础信息</div>
+          <el-form-item label="名称">
+            <el-input v-model="form.Name" placeholder="用于在列表中区分，如：市级平台" />
+          </el-form-item>
+          <el-form-item label="上级平台编码">
+            <el-input v-model="form.Serial" class="mono" placeholder="20 位国标编码" />
+          </el-form-item>
+          <el-form-item label="SIP 域">
+            <el-input v-model="form.Realm" class="mono" placeholder="通常与上级平台编码前 10 位一致" />
+          </el-form-item>
+        </div>
+
+        <!-- 网络配置 -->
+        <div class="form-section">
+          <div class="form-section-title">网络配置</div>
+          <el-form-item label="上级平台地址">
+            <el-input v-model="form.Host" class="mono" placeholder="上级平台的 IP 或域名" />
+          </el-form-item>
+          <el-form-item label="上级端口">
+            <el-input-number
+              v-model="form.Port"
+              :min="1"
+              :max="65535"
+              controls-position="right"
+              class="full-width"
+            />
+          </el-form-item>
+          <el-form-item label="本地地址">
+            <el-input v-model="form.LocalHost" class="mono" placeholder="留空则自动探测" />
+          </el-form-item>
+          <el-form-item label="本地端口">
+            <el-input-number
+              v-model="form.LocalPort"
+              :min="1"
+              :max="65535"
+              controls-position="right"
+              class="full-width"
+            />
+          </el-form-item>
+          <el-form-item label="传输协议">
+            <el-select v-model="form.CommandTransport" class="full-width">
+              <el-option label="UDP" value="UDP" />
+              <el-option label="TCP" value="TCP" />
+            </el-select>
+          </el-form-item>
+        </div>
+
+        <!-- 鉴权（可选） -->
+        <div class="form-section">
+          <div class="form-section-title">
+            鉴权
+            <span class="form-section-hint">上级平台要求认证时填写</span>
+          </div>
+          <el-form-item label="用户名">
+            <el-input v-model="form.Username" placeholder="可选" />
+          </el-form-item>
+          <el-form-item label="密码">
+            <el-input v-model="form.Password" type="password" show-password placeholder="可选" />
+          </el-form-item>
+        </div>
+
+        <!-- 行为开关 -->
+        <div class="form-section">
+          <div class="form-section-title">行为开关</div>
+          <el-form-item label="启用">
+            <el-switch v-model="form.Enable" />
+          </el-form-item>
+          <el-form-item label="共享全部通道">
+            <el-switch v-model="form.ShareAllChannel" />
+            <span class="form-item-hint">开启后本级所有通道都会同步给上级</span>
+          </el-form-item>
+          <el-form-item label="允许控制">
+            <el-switch v-model="form.AllowControl" />
+            <span class="form-item-hint">允许上级对本级通道下发云台等控制指令</span>
+          </el-form-item>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="editDialog = false">取消</el-button>
@@ -314,4 +328,82 @@ onMounted(load)
 
 <style scoped>
 /* .card-header 由 styles/main.css 统一提供 */
+
+/* 对话框高度自适应：内容较长时可滚动，不撑破视口。
+   注意必须同时约束 .el-dialog 本身（它是 flex 容器，body 才能拿到剩余高度），
+   只给 __body 加 max-height 在 flex 布局下不生效，底部按钮会被挤出视口。 */
+:deep(.cascade-dialog.el-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  margin-bottom: 0;
+}
+
+:deep(.cascade-dialog .el-dialog__body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: var(--sp-2);
+}
+
+/* 分组：每组一个浅色标题 + 分隔线，避免十几个字段糊成一片 */
+.form-section {
+  padding-bottom: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  border-bottom: 1px dashed var(--line-soft);
+}
+
+.form-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.form-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 var(--sp-3);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.form-section-hint {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* 开关类字段右侧的说明文字 */
+.form-item-hint {
+  margin-left: var(--sp-2);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+/* 让输入框/数字框/下拉框撑满整行可用宽度 */
+.full-width {
+  width: 100%;
+}
+
+:deep(.cascade-dialog .el-input-number.full-width) {
+  width: 100%;
+}
+
+/* 数字输入框的增减按钮在窄宽度下会挤压数值，这里留足右侧空间 */
+:deep(.cascade-dialog .el-input-number .el-input__inner) {
+  text-align: left;
+  padding-right: 40px;
+}
+
+/* 开关行垂直居中对齐，避免与标签错位 */
+:deep(.cascade-dialog .el-form-item) {
+  margin-bottom: var(--sp-3);
+}
+
+:deep(.cascade-dialog .el-form-item:last-child) {
+  margin-bottom: 0;
+}
 </style>
