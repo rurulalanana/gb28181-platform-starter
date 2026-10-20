@@ -10,6 +10,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSessionManager;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.StreamIndex;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbChannel;
@@ -56,6 +57,18 @@ public class StreamService {
      * @return 流信息
      */
     public GbStream startLive(String deviceId, String channelId) {
+        return startLive(deviceId, channelId, null);
+    }
+
+    /**
+     * 平台主动点播。
+     *
+     * @param deviceId  设备编码
+     * @param channelId 通道编码
+     * @param streamNumber 码流编号（GB/T 28181—2022 附录 G：SSRC 后 4 位）；
+     *                     {@code null} 表示按设备配置的「码流索引」取值
+     */
+    public GbStream startLive(String deviceId, String channelId, Integer streamNumber) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
         RtpSession existing = platform.sessionManager().getByChannel(deviceId, channel);
         if (existing != null && isReusable(existing)) {
@@ -81,11 +94,28 @@ public class StreamService {
         // 空窗期内点播会报「设备未注册或会话已失效」。这里按库里的地址先补一次，
         // 让重启后立刻点播也能成功。
         healRegistryIfNeeded(ch);
-        RtpSession session = platform.mediaService().play(deviceId, channel);
+        RtpSession session = platform.mediaService().play(deviceId, channel, resolveStreamNumber(deviceId, streamNumber));
         GbStream stream = toStream(session, GbStream.TYPE_LIVE);
         save(stream);
         deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
         return stream;
+    }
+
+    /**
+     * 决定本次点播用的码流编号。
+     *
+     * <p>优先级：请求显式指定的 {@code streamnumber} &gt; 设备配置的「码流索引」&gt; 自动。
+     * 「自动」返回 {@code -1}，由 SIP 层用域内自增序号填 SSRC 后 4 位（2016 行为）。
+     */
+    private int resolveStreamNumber(String deviceId, Integer requested) {
+        if (requested != null && requested >= 0) {
+            return requested;
+        }
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            return -1;
+        }
+        return StreamIndex.of(device.getStreamIndex()).getStreamNumber();
     }
 
     /**

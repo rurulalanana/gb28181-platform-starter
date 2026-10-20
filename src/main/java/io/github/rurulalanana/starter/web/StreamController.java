@@ -69,7 +69,7 @@ public class StreamController {
         requireMedia();
         String deviceId = requireDevice(req.getSerial());
         String channelId = channelOf(deviceId, req.getCode());
-        GbStream stream = streamService.startLive(deviceId, channelId);
+        GbStream stream = streamService.startLive(deviceId, channelId, req.getStreamnumber());
         StreamVo vo = streamService.describe(streamService.session(deviceId, channelId));
         if (vo.getStreamId() == null) {
             vo = describeStream(stream);

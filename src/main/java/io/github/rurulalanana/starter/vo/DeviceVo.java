@@ -73,6 +73,13 @@ public class DeviceVo {
      */
     private String mediaTransportMode;
 
+    /**
+     * 码流索引：点播时指定哪一路码流。
+     *
+     * <p>取值：{@code auto} 自动 / {@code streamnumber:0} 主码流 / {@code streamnumber:1} 子码流。
+     */
+    private String streamIndex;
+
     private String charset;
     private Integer catalogInterval;
     private Integer subscribeInterval;

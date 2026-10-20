@@ -63,6 +63,19 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="码流" width="104" align="center">
+          <template #default="{ row }">
+            <!--
+              设备在目录应答里用 <StreamNumberList> 上报该通道支持哪几路码流
+              （GB/T 28181—2022 附录 A），如 "0,1" = 主码流 + 子码流。
+              显示出来才能判断「配成子码流」有没有意义。
+            -->
+            <span v-if="row.streamNumberList" class="stream-list" :title="`码流编号：${row.streamNumberList}`">
+              {{ streamLabels(row.streamNumberList) }}
+            </span>
+            <span v-else class="text-dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="云台" width="120" align="center">
           <template #default="{ row }">
             <!--
@@ -250,6 +263,22 @@ const PTZ_TYPES = { 0: '未知', 1: '球机', 2: '半球', 3: '固定枪机', 4:
  */
 function supportsPtz(type) {
   return type === 1 || type === 2 || type === 4
+}
+
+/**
+ * 把设备上报的码流编号列表转成可读文案。
+ *
+ * @param {string} list 形如 {@code "0,1"} 的逗号分隔编号
+ * @returns {string} 如「主+子」；无法识别时原样返回
+ */
+function streamLabels(list) {
+  const names = { 0: '主', 1: '子', 2: '子2' }
+  const parts = String(list)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!parts.length) return '—'
+  return parts.map((p) => names[p] || p).join('+')
 }
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
@@ -440,6 +469,13 @@ onUnmounted(() => player.stop())
 }
 .device-ref .text-dim {
   font-size: var(--fs-xs);
+}
+
+/* 码流能力：设备上报的 StreamNumberList 摘要 */
+.stream-list {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .preview-wrap {

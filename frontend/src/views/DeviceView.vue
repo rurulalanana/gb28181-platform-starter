@@ -196,6 +196,20 @@
                 <el-option v-for="opt in TRANSPORT_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
               </el-select>
             </el-form-item>
+            <el-form-item label="码流索引">
+              <el-select v-model="form.streamIndex" style="width: 100%">
+                <el-option
+                  v-for="opt in STREAM_INDEX_OPTIONS"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                >
+                  <span>{{ opt.label }}</span>
+                  <span class="stream-index-hint">{{ opt.hint }}</span>
+                </el-option>
+              </el-select>
+              <div class="form-item-hint">{{ STREAM_INDEX_HINT }}</div>
+            </el-form-item>
             <el-form-item label="字符集">
               <el-select v-model="form.charset" placeholder="默认" clearable style="width: 100%">
                 <el-option label="GB2312" value="GB2312" />
@@ -274,6 +288,8 @@ const form = reactive({
   customName: '',
   /** 流传输模式标识，取值同 TRANSPORT_OPTIONS 的 value。 */
   transportMode: 'UDP',
+  /** 码流索引，取值同 STREAM_INDEX_OPTIONS 的 value。 */
+  streamIndex: 'auto',
   charset: '',
   catalogInterval: 0,
   subscribeInterval: 0,
@@ -324,6 +340,20 @@ function search() {
 function viewChannels(row) {
   router.push({ path: '/channels', query: { serial: row.id } })
 }
+
+/**
+ * 码流索引选项。
+ *
+ * <p>GB/T 28181—2022 附录 G：SSRC 的第 7~10 位是码流编号，
+ * 0 表示主码流、1 表示子码流。「自动」保持原有行为（域内自增序号）。
+ */
+const STREAM_INDEX_OPTIONS = [
+  { value: 'auto', label: '自动选择', hint: '由设备决定推哪一路' },
+  { value: 'streamnumber:0', label: '主码流', hint: '2022 标准，SSRC 后 4 位填 0' },
+  { value: 'streamnumber:1', label: '子码流', hint: '2022 标准，SSRC 后 4 位填 1' }
+]
+
+const STREAM_INDEX_HINT = '指定后点播只拉该路码流；子码流分辨率低但省带宽'
 
 /**
  * 流传输模式选项。
@@ -496,6 +526,7 @@ function openEdit(row) {
   editTarget.value = row
   form.customName = row.customName || ''
   form.transportMode = transportLabel(row)
+  form.streamIndex = row.streamIndex || 'auto'
   form.charset = row.charset || ''
   form.catalogInterval = row.catalogInterval ?? 0
   form.subscribeInterval = row.subscribeInterval ?? 0
@@ -518,6 +549,7 @@ async function doSave() {
       payload.media_transport = transport.transport
       payload.media_transport_mode = transport.mode
     }
+    if (form.streamIndex) payload.stream_index = form.streamIndex
     if (form.charset) payload.charset = form.charset
     payload.catalog_interval = form.catalogInterval ?? 0
     payload.subscribe_interval = form.subscribeInterval ?? 0
@@ -687,5 +719,12 @@ onMounted(load)
 .count-link {
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+}
+
+/* 下拉选项右侧的说明文字（标准依据） */
+.stream-index-hint {
+  margin-left: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
 }
 </style>

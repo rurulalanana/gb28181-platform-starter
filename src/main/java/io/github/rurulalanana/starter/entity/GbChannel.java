@@ -69,6 +69,14 @@ public class GbChannel implements Serializable {
     private Integer directionType;
 
     private String resolution;
+
+    /**
+     * 码流编号列表（设备上报，如 {@code "0,1"} 表示支持主码流与子码流）。
+     *
+     * <p>GB/T 28181—2022 附录 A：通道 {@code <Info>} 中的 {@code <StreamNumberList>}。
+     * 平台据此知道该通道到底有没有子码流 —— 没有的话配置「码流索引=子码流」是无效的。
+     */
+    private String streamNumberList;
     private String downloadSpeed;
     private String firmware;
     private String serialNumber;

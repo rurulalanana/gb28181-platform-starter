@@ -611,6 +611,7 @@ public class DeviceService {
         channel.setLongitude(item.getLongitude() == null ? null : BigDecimal.valueOf(item.getLongitude()));
         channel.setLatitude(item.getLatitude() == null ? null : BigDecimal.valueOf(item.getLatitude()));
         channel.setResolution(item.getResolution());
+        channel.setStreamNumberList(item.getStreamNumberList());
         channel.setDownloadSpeed(item.getDownloadSpeed());
         channel.setBusinessGroupId(item.getBusinessGroupId());
         String status = item.getStatus();

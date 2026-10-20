@@ -72,6 +72,18 @@ public class GbDevice implements Serializable {
      */
     private String mediaTransportMode;
 
+    /**
+     * 码流索引：点播时指定要哪一路码流。
+     *
+     * <p>取值见 {@code StreamIndex} 枚举：
+     * {@code auto}（自动，域内自增序号）、
+     * {@code streamnumber:0}（主码流）、{@code streamnumber:1}（子码流）。
+     *
+     * <p>GB/T 28181—2022 附录 G：SSRC 的第 7~10 位是码流编号，
+     * 0 表示主码流、1 表示子码流。不指定时用域内自增序号（2016 行为）。
+     */
+    private String streamIndex;
+
     private String charset;
     private String password;
 

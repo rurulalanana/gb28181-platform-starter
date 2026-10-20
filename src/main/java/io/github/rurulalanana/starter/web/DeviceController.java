@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.web;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.StreamIndex;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.common.TreeBuilder;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
@@ -692,6 +693,7 @@ public class DeviceController {
                                            @RequestParam(value = "custom_name", required = false) String customName,
                                            @RequestParam(value = "media_transport", required = false) String mediaTransport,
                                            @RequestParam(value = "media_transport_mode", required = false) String mediaTransportMode,
+                                           @RequestParam(value = "stream_index", required = false) String streamIndex,
                                            @RequestParam(required = false) String charset,
                                            @RequestParam(value = "catalog_interval", required = false) Integer catalogInterval,
                                            @RequestParam(value = "subscribe_interval", required = false) Integer subscribeInterval,
@@ -712,6 +714,18 @@ public class DeviceController {
         if (mediaTransport != null) {
             // 走与 setmediatransport 相同的校验，避免两处规则不一致
             applyMediaTransport(device, mediaTransport, mediaTransportMode);
+        }
+        if (streamIndex != null) {
+            // 码流索引取值有限，非法值直接拒绝而不是静默回落到 auto ——
+            // 用户以为自己配了子码流，实际却在拉主码流，这种错配很难自查
+            StreamIndex si = StreamIndex.of(streamIndex);
+            if (!si.getValue().equalsIgnoreCase(streamIndex.trim())) {
+                throw BizException.badRequest("stream_index 取值只能是 "
+                        + java.util.Arrays.stream(StreamIndex.values())
+                                .map(StreamIndex::getValue).collect(java.util.stream.Collectors.joining(" / "))
+                        + "，收到：" + streamIndex);
+            }
+            device.setStreamIndex(si.getValue());
         }
         if (charset != null) {
             device.setCharset(charset);
@@ -912,6 +926,7 @@ public class DeviceController {
         vo.setCommandTransport(d.getTransport());
         vo.setMediaTransport(d.getMediaTransport());
         vo.setMediaTransportMode(d.getMediaTransportMode());
+        vo.setStreamIndex(d.getStreamIndex());
         vo.setEndpoint(endpointOf(d));
         vo.setCharset(d.getCharset());
         vo.setCatalogInterval(d.getCatalogInterval());
@@ -982,6 +997,7 @@ public class DeviceController {
         vo.setBatteryLevel(c.getBatteryLevel());
         vo.setSignalLevel(c.getSignalLevel());
         vo.setResolution(c.getResolution());
+        vo.setStreamNumberList(c.getStreamNumberList());
         vo.setDownloadSpeed(c.getDownloadSpeed());
         vo.setOndemand(c.getOnDemand());
         vo.setAudioEnable(c.getAudio());

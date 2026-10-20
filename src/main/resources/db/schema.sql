@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS gb_device (
     transport          VARCHAR(8)   DEFAULT 'UDP',
     media_transport    VARCHAR(8)   DEFAULT 'UDP',
     media_transport_mode VARCHAR(8) DEFAULT 'passive',
+    stream_index       VARCHAR(32)  DEFAULT 'auto',
     charset            VARCHAR(16)  DEFAULT 'GB2312',
     password           VARCHAR(64),
     catalog_interval   INTEGER      DEFAULT 3600,
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS gb_channel (
     supply_light      SMALLINT     DEFAULT 0,
     direction_type    SMALLINT     DEFAULT 0,
     resolution        VARCHAR(64),
+    stream_number_list VARCHAR(64),
     download_speed    VARCHAR(32),
     firmware          VARCHAR(64),
     serial_number     VARCHAR(64),
@@ -409,6 +411,12 @@ ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS operator VARCHAR(64);
 -- CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，缺这列时 MyBatis 查询会直接报
 -- "column media_transport_mode does not exist"，整个设备列表都查不出来。
 ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS media_transport_mode VARCHAR(8) DEFAULT 'passive';
+
+-- 老库升级：补充码流索引列（点播时选择主/子码流）
+ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS stream_index VARCHAR(32) DEFAULT 'auto';
+
+-- 老库升级：补充通道的码流编号列表（设备上报该通道支持哪几路码流）
+ALTER TABLE gb_channel ADD COLUMN IF NOT EXISTS stream_number_list VARCHAR(64);
 
 CREATE INDEX IF NOT EXISTS idx_gb_operation_log_time ON gb_operation_log (create_time DESC);
 

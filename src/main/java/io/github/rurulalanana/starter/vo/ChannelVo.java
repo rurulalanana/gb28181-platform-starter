@@ -69,6 +69,13 @@ public class ChannelVo {
     private Integer batteryLevel;
     private Integer signalLevel;
     private String resolution;
+
+    /**
+     * 码流编号列表（设备上报，如 {@code "0,1"}）。
+     *
+     * <p>据此可判断该通道是否支持子码流。
+     */
+    private String streamNumberList;
     private String downloadSpeed;
 
     /** 按需直播开关。 */
