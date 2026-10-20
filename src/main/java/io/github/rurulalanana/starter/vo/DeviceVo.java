@@ -51,11 +51,27 @@ public class DeviceVo {
     private String remoteIp;
     private Integer remotePort;
 
+    /**
+     * 设备信令出口地址，形如 {@code udp://183.201.190.57:5060}。
+     *
+     * <p>把传输协议、IP、端口合成一个可直接复制粘贴的地址，
+     * 排查跨网/NAT 问题时比拆成三列更省事。
+     */
+    private String endpoint;
+
     /** 信令传输模式。 */
     private String commandTransport;
 
     /** 流传输模式。 */
     private String mediaTransport;
+
+    /**
+     * TCP 流传输模式：{@code passive} 被动 / {@code active} 主动。
+     *
+     * <p>与 {@link #mediaTransport} 组合起来才是完整的流传输设置，
+     * 例如 {@code TCP + active} 表示主动推流。
+     */
+    private String mediaTransportMode;
 
     private String charset;
     private Integer catalogInterval;

@@ -11,10 +11,12 @@ import io.github.rurulalanana.starter.common.CharsetFix;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
+import io.github.rurulalanana.starter.entity.GbPositionLog;
 import io.github.rurulalanana.starter.entity.GbPreset;
 import io.github.rurulalanana.starter.entity.GbStatusLog;
 import io.github.rurulalanana.starter.mapper.GbChannelMapper;
 import io.github.rurulalanana.starter.mapper.GbDeviceMapper;
+import io.github.rurulalanana.starter.mapper.GbPositionLogMapper;
 import io.github.rurulalanana.starter.mapper.GbPresetMapper;
 import io.github.rurulalanana.starter.mapper.GbStatusLogMapper;
 import lombok.RequiredArgsConstructor;
@@ -48,6 +50,7 @@ public class DeviceService {
     private final GbDeviceMapper deviceMapper;
     private final GbChannelMapper channelMapper;
     private final GbStatusLogMapper statusLogMapper;
+    private final GbPositionLogMapper positionLogMapper;
     private final GbPresetMapper presetMapper;
 
     // ==================== 查询 ====================
@@ -857,6 +860,65 @@ public class DeviceService {
             q.le(GbStatusLog::getCreateTime, to);
         }
         return statusLogMapper.selectList(q.orderByDesc(GbStatusLog::getCreateTime));
+    }
+
+    /**
+     * 记录一条移动位置。
+     *
+     * <p>位置由设备通过 {@code MobilePosition} 主动上报，或由报警附带坐标。
+     * 经纬度全为 0 的记录没有意义（设备未装 GPS），直接丢弃，
+     * 否则轨迹图上会出现一堆「在几内亚湾」的点。
+     */
+    public void savePosition(String deviceId, String channelId, ManscdpMessage msg) {
+        Double lon = firstDouble(msg, "Longitude");
+        Double lat = firstDouble(msg, "Latitude");
+        if (lon == null || lat == null || (lon == 0d && lat == 0d)) {
+            return;
+        }
+        GbPositionLog entry = new GbPositionLog();
+        entry.setDeviceId(deviceId);
+        entry.setChannelId(channelId);
+        entry.setMethod(msg.firstText("Method"));
+        entry.setLongitude(BigDecimal.valueOf(lon));
+        entry.setLatitude(BigDecimal.valueOf(lat));
+        entry.setAltitude(decimalOf(firstDouble(msg, "Altitude")));
+        entry.setSpeed(decimalOf(firstDouble(msg, "Speed")));
+        entry.setDirection(decimalOf(firstDouble(msg, "Direction")));
+        entry.setCreateTime(LocalDateTime.now());
+        positionLogMapper.insert(entry);
+    }
+
+    /** 位置记录查询，按时间倒序。 */
+    public List<GbPositionLog> positionLogs(String deviceId, String channelId,
+                                             String startTime, String endTime) {
+        LambdaQueryWrapper<GbPositionLog> q = Wrappers.<GbPositionLog>lambdaQuery()
+                .eq(deviceId != null && !deviceId.isBlank(), GbPositionLog::getDeviceId, deviceId)
+                .eq(channelId != null && !channelId.isBlank(), GbPositionLog::getChannelId, channelId);
+        LocalDateTime from = TimeFormats.parse(startTime);
+        LocalDateTime to = TimeFormats.parse(endTime);
+        if (from != null) {
+            q.ge(GbPositionLog::getCreateTime, from);
+        }
+        if (to != null) {
+            q.le(GbPositionLog::getCreateTime, to);
+        }
+        return positionLogMapper.selectList(q.orderByDesc(GbPositionLog::getCreateTime));
+    }
+
+    private static BigDecimal decimalOf(Double v) {
+        return v == null ? BigDecimal.ZERO : BigDecimal.valueOf(v);
+    }
+
+    private static Double firstDouble(ManscdpMessage msg, String tag) {
+        String v = msg.firstText(tag);
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        try {
+            return Double.valueOf(v.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ==================== 内部：MANSCDP 取值 ====================

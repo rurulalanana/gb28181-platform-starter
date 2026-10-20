@@ -27,6 +27,7 @@ import io.github.rurulalanana.starter.vo.DeviceVo;
 import io.github.rurulalanana.starter.vo.FetchResultVo;
 import io.github.rurulalanana.starter.vo.OnlineStatsVo;
 import io.github.rurulalanana.starter.vo.PositionLogListVo;
+import io.github.rurulalanana.starter.vo.PositionLogVo;
 import io.github.rurulalanana.starter.vo.SetPasswordVo;
 import io.github.rurulalanana.starter.vo.StatusLogListVo;
 import io.github.rurulalanana.starter.vo.StatusLogVo;
@@ -235,10 +236,23 @@ public class DeviceController {
             @RequestParam(defaultValue = "0") int start,
             @RequestParam(defaultValue = "1000") int limit) {
         StpUtil.checkLogin();
-        // 位置记录由设备通过 MobilePosition 上报，未开启位置订阅时为空
+        var logs = deviceService.positionLogs(serial, code, starttime, endtime);
+        List<PositionLogVo> list = new ArrayList<>();
+        for (var l : logs) {
+            PositionLogVo vo = new PositionLogVo();
+            vo.setDeviceId(l.getDeviceId());
+            vo.setChannelId(l.getChannelId());
+            vo.setLongitude(l.getLongitude());
+            vo.setLatitude(l.getLatitude());
+            vo.setAltitude(l.getAltitude());
+            vo.setSpeed(l.getSpeed());
+            vo.setDirection(l.getDirection());
+            vo.setTime(TimeFormats.toDisplay(l.getCreateTime()));
+            list.add(vo);
+        }
         PositionLogListVo vo = new PositionLogListVo();
-        vo.setLogCount(0);
-        vo.setLogList(List.of());
+        vo.setLogCount(list.size());
+        vo.setLogList(limit > 0 ? slice(list, start, limit) : list);
         return ApiResponse.ok(vo);
     }
 
@@ -642,14 +656,34 @@ public class DeviceController {
         // 取值必须校验：这个值会被直接拼进 SIP INVITE 的 m= 行（附录 G），
         // 写进 BOGUS 之类脏值后该设备后续所有点播都会协商失败，
         // 而界面上只表现为「点播不出画面」，排查成本极高。
+        applyMediaTransport(device, mediaTransport, mode);
+        device.setUpdateTime(java.time.LocalDateTime.now());
+        deviceService.updateDevice(device);
+        return ApiResponse.ok();
+    }
+
+    /**
+     * 校验并写入流传输模式。
+     *
+     * <p>{@code setmediatransport} 与 {@code setinfo} 共用，避免两处规则漂移。
+     */
+    private void applyMediaTransport(GbDevice device, String mediaTransport, String mode) {
         String transport = mediaTransport == null ? "" : mediaTransport.trim().toUpperCase();
         if (!"UDP".equals(transport) && !"TCP".equals(transport)) {
             throw BizException.badRequest("media_transport 只能是 UDP 或 TCP，收到：" + mediaTransport);
         }
+        // TCP 还要区分被动/主动：模式会被写进 INVITE 的 a=setup / y= 协商，
+        // 填错会导致协商失败（表现为点播不出画面）。
+        String transportMode = "passive";
+        if ("TCP".equals(transport)) {
+            String m = mode == null ? "" : mode.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!"passive".equals(m) && !"active".equals(m)) {
+                throw BizException.badRequest("media_transport_mode 只能是 passive 或 active，收到：" + mode);
+            }
+            transportMode = m;
+        }
         device.setMediaTransport(transport);
-        device.setUpdateTime(java.time.LocalDateTime.now());
-        deviceService.updateDevice(device);
-        return ApiResponse.ok();
+        device.setMediaTransportMode(transportMode);
     }
 
     /** 编辑设备。 */
@@ -657,6 +691,7 @@ public class DeviceController {
     public ApiResponse<Void> setDeviceInfo(@RequestParam String serial,
                                            @RequestParam(value = "custom_name", required = false) String customName,
                                            @RequestParam(value = "media_transport", required = false) String mediaTransport,
+                                           @RequestParam(value = "media_transport_mode", required = false) String mediaTransportMode,
                                            @RequestParam(required = false) String charset,
                                            @RequestParam(value = "catalog_interval", required = false) Integer catalogInterval,
                                            @RequestParam(value = "subscribe_interval", required = false) Integer subscribeInterval,
@@ -675,7 +710,8 @@ public class DeviceController {
             device.setCustomName(customName);
         }
         if (mediaTransport != null) {
-            device.setMediaTransport(mediaTransport);
+            // 走与 setmediatransport 相同的校验，避免两处规则不一致
+            applyMediaTransport(device, mediaTransport, mediaTransportMode);
         }
         if (charset != null) {
             device.setCharset(charset);
@@ -875,6 +911,8 @@ public class DeviceController {
         vo.setRemotePort(d.getRemotePort());
         vo.setCommandTransport(d.getTransport());
         vo.setMediaTransport(d.getMediaTransport());
+        vo.setMediaTransportMode(d.getMediaTransportMode());
+        vo.setEndpoint(endpointOf(d));
         vo.setCharset(d.getCharset());
         vo.setCatalogInterval(d.getCatalogInterval());
         vo.setSubscribeInterval(d.getSubscribeInterval());
@@ -888,6 +926,23 @@ public class DeviceController {
         vo.setUpdatedAt(TimeFormats.toDisplay(d.getUpdateTime()));
         vo.setCreatedAt(TimeFormats.toDisplay(d.getCreateTime()));
         return vo;
+    }
+
+    /**
+     * 拼出设备信令出口地址，形如 {@code udp://183.201.190.57:5060}。
+     *
+     * <p>地址不全时返回 {@code null}：拼一个 {@code udp://} 出来比不显示更糟，
+     * 会被误当成有效地址去排查。
+     */
+    private String endpointOf(GbDevice d) {
+        if (d.getRemoteIp() == null || d.getRemoteIp().isBlank()) {
+            return null;
+        }
+        String proto = d.getTransport() == null || d.getTransport().isBlank()
+                ? "UDP" : d.getTransport().toLowerCase(java.util.Locale.ROOT);
+        return d.getRemotePort() == null
+                ? proto + "://" + d.getRemoteIp()
+                : proto + "://" + d.getRemoteIp() + ":" + d.getRemotePort();
     }
 
     private ChannelVo channelView(GbChannel c) {

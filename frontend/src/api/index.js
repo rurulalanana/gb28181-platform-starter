@@ -42,7 +42,8 @@ export const deviceApi = {
   setChannelOnDemand: (params) => post('/device/setchannelondemand', params),
   setChannelCloudRecord: (params) => post('/device/setchannelcloudrecord', params),
   statusLog: (params) => get('/device/statuslog', params),
-  streamLog: (params) => get('/device/streamlog', params)
+  streamLog: (params) => get('/device/streamlog', params),
+  positionLog: (params) => get('/device/positionlog', params)
 }
 
 /** 直播流接口（`/api/v1/stream/*`）。 */

@@ -101,6 +101,8 @@ public class SipEventBridge implements SipCallback {
                     () -> deviceService.saveDeviceInfo(msg.getDeviceId(), msg));
             case "Alarm" -> asyncExecutor.run("报警复位处理",
                     () -> alarmService.onAlarmReset(msg.getDeviceId(), msg));
+            case "MobilePosition" -> asyncExecutor.run("移动位置落库",
+                    () -> deviceService.savePosition(msg.getDeviceId(), msg.getDeviceId(), msg));
             default -> {
                 // DeviceStatus / RecordInfo / ConfigDownload 等由各自的服务同步等待处理
             }
@@ -246,6 +248,8 @@ public class SipEventBridge implements SipCallback {
             case "Catalog" -> handlePushedCatalog(from, msg, event.getEventName());
             case "Alarm" -> asyncExecutor.run("报警推送落库",
                     () -> alarmService.onAlarmNotify(from, msg));
+            case "MobilePosition" -> asyncExecutor.run("移动位置落库",
+                    () -> deviceService.savePosition(from, from, msg));
             default -> log.debug("NOTIFY 未处理的命令: cmd={} device={}", cmdType, from);
         }
     }

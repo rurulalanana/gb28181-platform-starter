@@ -65,6 +65,13 @@ public class GbDevice implements Serializable {
     /** 流传输模式：{@code UDP} / {@code TCP}。 */
     private String mediaTransport;
 
+    /**
+     * TCP 流传输模式：{@code passive} 被动收流 / {@code active} 主动推流。
+     *
+     * <p>仅在 {@code mediaTransport=TCP} 时有意义；UDP 固定被动。
+     */
+    private String mediaTransportMode;
+
     private String charset;
     private String password;
 
