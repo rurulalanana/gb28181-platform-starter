@@ -29,66 +29,85 @@
       </el-button>
     </div>
 
+      <!--
+        列结构对齐 LiveGBS 的「设备 > 通道列表」页：
+        通道号 / 通道国标编号 / 通道名称 / 在线状态 / 按需直播 / 云端录像 /
+        子节点数 / 厂家 / 云台类型 / 位置 / 更新时间 / 创建时间 / 操作
+      -->
       <el-table v-loading="loading" :data="channels" stripe table-layout="fixed">
-        <el-table-column prop="id" label="通道编码" width="196" sortable>
-          <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
-        </el-table-column>
-        <el-table-column label="名称" width="148" :sort-by="(r) => r.customName || r.name || ''" sortable>
-          <template #default="{ row }">{{ row.customName || row.name || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="所属设备" min-width="240">
+        <el-table-column prop="channel" label="通道号" min-width="64" align="center" sortable>
           <template #default="{ row }">
-            <span class="device-ref">
-              <span class="mono">{{ row.deviceId }}</span>
-              <span class="text-dim">{{ row.deviceCustomName || row.deviceName || '—' }}</span>
-            </span>
+            <span class="text-muted">{{ row.channel ?? '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
-          <template #default="{ row }">
-            <span class="badge" :class="row.status === 'ON' ? 'is-online' : 'is-offline'">
-              {{ row.status === 'ON' ? '在线' : '离线' }}
-            </span>
-          </template>
+
+        <el-table-column prop="id" label="通道国标编号" min-width="168" sortable>
+          <template #default="{ row }"><span class="mono code-sm">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="码流" width="104" align="center">
+
+        <el-table-column
+          label="通道名称"
+          min-width="124"
+          :sort-by="(r) => r.customName || r.name || ''"
+          sortable
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
             <!--
-              设备在目录应答里用 <StreamNumberList> 上报该通道支持哪几路码流
-              （GB/T 28181—2022 附录 A），如 "0,1" = 主码流 + 子码流。
-              显示出来才能判断「配成子码流」有没有意义。
+              按需编辑：常驻输入框会在每行渲染「点击修改」占位符，一屏全是灰字。
+              平时显示文本，点击才换输入框。
             -->
-            <span v-if="row.streamNumberList" class="stream-list" :title="`码流编号：${row.streamNumberList}`">
-              {{ streamLabels(row.streamNumberList) }}
-            </span>
-            <span v-else class="text-dim">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="云台" width="120" align="center">
-          <template #default="{ row }">
-            <!--
-              可直接在列表里改：设备普遍不报或恒报 0（未知），
-              而现场实际支持云台时需要在预览弹窗里用云台面板，
-              所以把这里做成可编辑入口（改完立刻影响预览弹窗是否显示云台）。
-            -->
-            <el-select
-              v-model="row.ptzType"
-              :loading="ptzPending.has(row.id)"
-              :disabled="ptzPending.has(row.id)"
+            <el-input
+              v-if="row._editing"
+              :id="nameInputId(row)"
+              v-model="row.customName"
               size="small"
-              style="width: 104px"
-              @change="(val) => changePtzType(row, val)"
-            >
-              <el-option
-                v-for="(label, value) in PTZ_TYPES"
-                :key="value"
-                :label="label"
-                :value="Number(value)"
-              />
-            </el-select>
+              class="name-input"
+              @keydown.enter="saveName(row)"
+              @keydown.esc="cancelName(row)"
+              @blur="saveName(row)"
+            />
+            <span
+              v-else
+              class="name-text is-editable"
+              :class="{ 'is-empty': !(row.customName || row.name) }"
+              title="点击修改名称"
+              @click="startNameEdit(row)"
+            >{{ row.customName || row.name || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="云端录像" width="110" align="center">
+
+        <el-table-column label="在线状态" min-width="88" align="center">
+          <template #default="{ row }">
+            <div class="status-cell">
+              <span
+                class="badge is-clickable"
+                :class="row.status === 'ON' ? 'is-online' : 'is-offline'"
+                title="点击查看设备详情"
+                @click="openDeviceDetail(row)"
+              >{{ row.status === 'ON' ? '在线' : '离线' }}</span>
+              <el-icon class="traffic-icon" title="点击查看设备详情" @click="openDeviceDetail(row)">
+                <Histogram />
+              </el-icon>
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="按需直播" min-width="88" align="center">
+          <template #default="{ row }">
+            <el-switch
+              v-model="row.ondemand"
+              :loading="ondemandPending.has(row.id)"
+              :disabled="ondemandPending.has(row.id)"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
+              @change="(val) => toggleOndemand(row, val)"
+            />
+          </template>
+        </el-table-column>
+
+        <el-table-column label="云端录像" min-width="88" align="center">
           <template #default="{ row }">
             <el-switch
               v-model="row.cloudRecord"
@@ -101,10 +120,79 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right" align="center">
+
+        <el-table-column label="子节点数" min-width="68" align="center">
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.subCount ?? 0 }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="厂家" min-width="96" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.manufacturer || '—' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="云台类型" min-width="108" align="center">
+          <template #default="{ row }">
+            <!--
+              可直接在列表里改：设备普遍不报或恒报 0（未知），
+              而现场实际支持云台时需要在预览弹窗里用云台面板，
+              所以把这里做成可编辑入口（改完立刻影响预览弹窗是否显示云台）。
+            -->
+            <el-select
+              :model-value="row.ptzType ?? 0"
+              :loading="ptzPending.has(row.id)"
+              :disabled="ptzPending.has(row.id)"
+              size="small"
+              style="width: 108px"
+              @change="(val) => changePtzType(row, val)"
+            >
+              <el-option
+                v-for="(label, value) in PTZ_TYPES"
+                :key="value"
+                :label="label"
+                :value="Number(value)"
+              />
+            </el-select>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="位置" min-width="140" align="center">
+          <template #default="{ row }">
+            <span
+              class="position-text is-editable"
+              title="点击修改经纬度"
+              @click="openPosition(row)"
+            >{{ positionText(row) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="updatedAt" label="更新时间" min-width="156" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.updatedAt || '—' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="createdAt" label="创建时间" min-width="156" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.createdAt || '—' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="操作" min-width="252" align="center" class-name="op-col">
           <template #default="{ row }">
             <el-button link type="primary" @click="preview(row)">
-              <el-icon><VideoPlay /></el-icon> 预览
+              <el-icon><VideoPlay /></el-icon> 播放
+            </el-button>
+            <el-button
+              link
+              type="primary"
+              :disabled="!row.streamId"
+              title="停止该通道的推流"
+              @click="stopStream(row)"
+            >
+              <el-icon><VideoPause /></el-icon> 停止
             </el-button>
             <el-button
               link
@@ -114,8 +202,13 @@
             >
               <el-icon><VideoCamera /></el-icon> 上屏
             </el-button>
-            <el-button link type="primary" @click="openRename(row)">
-              <el-icon><Edit /></el-icon>
+            <el-button
+              link
+              type="primary"
+              title="查看该通道的历史录像"
+              @click="openDeviceRecord(row)"
+            >
+              <el-icon><Film /></el-icon> 设备录像
             </el-button>
           </template>
         </el-table-column>
@@ -192,11 +285,34 @@
         <el-button type="primary" @click="doRename">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 位置（经纬度）编辑 -->
+    <el-dialog v-model="positionDialog" title="修改位置" width="440px">
+      <div class="mono mb-3">{{ positionTarget?.id }}</div>
+      <el-form label-width="72px">
+        <el-form-item label="经度">
+          <el-input v-model="positionLon" placeholder="经度，如 113.325573" />
+        </el-form-item>
+        <el-form-item label="纬度">
+          <el-input v-model="positionLat" placeholder="纬度，如 23.132123" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="positionDialog = false">取消</el-button>
+        <el-button type="primary" :loading="positionSaving" @click="savePosition">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 所属设备详情 -->
+    <DeviceDetailDialog
+      v-model:visible="detailVisible"
+      :device="detailTarget"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
@@ -205,6 +321,7 @@ import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TablePager from '@/components/TablePager.vue'
+import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
 
 /** 上屏预览需要跳转路由。 */
@@ -220,6 +337,20 @@ const recordPending = reactive(new Set())
 
 /** 正在修改云台类型的通道编码集合（用于下拉 loading / 防重复点击）。 */
 const ptzPending = reactive(new Set())
+
+/** 正在切换「按需直播」开关的通道编码集合。 */
+const ondemandPending = reactive(new Set())
+
+/** 位置（经纬度）编辑弹窗。 */
+const positionDialog = ref(false)
+const positionTarget = ref(null)
+const positionLon = ref('')
+const positionLat = ref('')
+const positionSaving = ref(false)
+
+/** 所属设备详情弹窗（状态记录 / 流量统计 / 移动轨迹 / 会话列表）。 */
+const detailVisible = ref(false)
+const detailTarget = ref(null)
 
 const previewDialog = ref(false)
 const previewTarget = ref(null)
@@ -283,7 +414,14 @@ async function load() {
     // 设备筛选（从设备列表「查看通道」跳转而来，或由页面筛选保持）
     if (query.serial) params.serial = query.serial
     const data = await deviceApi.channelList(params)
-    channels.value = data?.channelList || []
+    channels.value = (data?.channelList || []).map((c) => ({
+      ...c,
+      // 名称按需编辑的临时状态：_editing 控制是否显示输入框，
+      // _savedName 记住后端值用于「值未变则不发请求」与失败回滚
+      _editing: false,
+      _savedName: c.customName || '',
+      _draftName: c.customName || ''
+    }))
     setTotal(data?.channelCount ?? channels.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载通道失败')
@@ -434,6 +572,153 @@ async function doRename() {
   }
 }
 
+/* ---------------- 名称按需编辑（对齐 LiveGBS：点名称即改） ---------------- */
+
+/** 进入名称编辑态。 */
+function startNameEdit(row) {
+  if (row._editing) return
+  row._editing = true
+  row._draftName = row.customName || ''
+  // 自动聚焦，Enter/Esc 才作用在输入框上（否则键盘事件落在页面里）
+  nextTick(() => {
+    const input = document.getElementById(nameInputId(row))
+    input?.focus()
+    input?.select()
+  })
+}
+
+/** 名称输入框的 DOM id：通道编码跨设备可重复，必须带上设备编码。 */
+function nameInputId(row) {
+  return `ch-name-${row.deviceId}-${row.id}`
+}
+
+/** 放弃编辑，还原原值。 */
+function cancelName(row) {
+  row.customName = row._draftName || ''
+  row._editing = false
+}
+
+/** 保存名称；值未变化时不发请求。 */
+async function saveName(row) {
+  if (!row._editing) return
+  row._editing = false
+  const next = (row.customName || '').trim()
+  if (next === (row._savedName || '')) return
+  const previous = row._savedName || ''
+  row._savedName = next
+  try {
+    await deviceApi.setChannelName({ serial: row.deviceId, code: row.id, name: next })
+    ElMessage.success('名称已保存')
+  } catch (e) {
+    row.customName = previous
+    row._savedName = previous
+    ElMessage.error(e.message || '保存失败')
+  }
+}
+
+/* ---------------- 位置（经纬度） ---------------- */
+
+/** 位置显示文案：两个都有效才显示，否则占位。 */
+function positionText(row) {
+  const lon = row.longitude
+  const lat = row.latitude
+  const hasLon = lon !== null && lon !== undefined && Number(lon) !== 0
+  const hasLat = lat !== null && lat !== undefined && Number(lat) !== 0
+  if (!hasLon && !hasLat) return '—'
+  // 4 位小数（约 1 米精度），再长就塞不进列宽了
+  return `${hasLon ? Number(lon).toFixed(4) : '-'},${hasLat ? Number(lat).toFixed(4) : '-'}`
+}
+
+/** 打开经纬度编辑弹窗。 */
+function openPosition(row) {
+  positionTarget.value = row
+  positionLon.value = row.longitude ?? ''
+  positionLat.value = row.latitude ?? ''
+  positionDialog.value = true
+}
+
+/** 保存经纬度。 */
+async function savePosition() {
+  const row = positionTarget.value
+  if (!row) return
+  const lon = Number(positionLon.value)
+  const lat = Number(positionLat.value)
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+    ElMessage.warning('经纬度必须是数字')
+    return
+  }
+  positionSaving.value = true
+  try {
+    await deviceApi.setChannelPosition({
+      serial: row.deviceId,
+      code: row.id,
+      longitude: lon,
+      latitude: lat
+    })
+    row.longitude = lon
+    row.latitude = lat
+    positionDialog.value = false
+    ElMessage.success('位置已保存')
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    positionSaving.value = false
+  }
+}
+
+/* ---------------- 按需直播 / 停止推流 ---------------- */
+
+/** 切换「按需直播」开关。 */
+async function toggleOndemand(row, enable) {
+  ondemandPending.add(row.id)
+  try {
+    await deviceApi.setChannelOnDemand({
+      serial: row.deviceId,
+      code: row.id,
+      ondemand: enable
+    })
+    ElMessage.success(enable ? '已开启按需直播' : '已关闭按需直播')
+  } catch (e) {
+    row.ondemand = !enable
+    ElMessage.error(e.message || '操作失败')
+  } finally {
+    ondemandPending.delete(row.id)
+  }
+}
+
+/** 停止该通道的推流。 */
+async function stopStream(row) {
+  try {
+    await streamApi.stop({ serial: row.deviceId, code: row.id })
+    row.streamId = null
+    ElMessage.success('已停止推流')
+  } catch (e) {
+    ElMessage.error(e.message || '停止失败')
+  }
+}
+
+/** 跳到「设备录像」页，并预填当前设备/通道。 */
+function openDeviceRecord(row) {
+  router.push({
+    path: '/playback',
+    query: { serial: row.deviceId, code: row.id }
+  })
+}
+
+/** 打开所属设备的详情弹窗（状态记录 / 流量统计 / 移动轨迹 / 会话列表）。 */function openDeviceDetail(row) {
+  // 弹窗内部按 device.id（设备编码）查日志，通道行的 id 是通道编码，
+  // 直接透传会查不到数据，所以这里重组为设备对象
+  detailTarget.value = {
+    id: row.deviceId,
+    name: row.deviceName,
+    customName: row.deviceCustomName,
+    status: row.deviceOnline ? 'ON' : 'OFF',
+    endpoint: row.endpoint,
+    streamIndex: row.streamIndex
+  }
+  detailVisible.value = true
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -448,6 +733,75 @@ onUnmounted(() => player.stop())
 </script>
 
 <style scoped>
+/* 操作列：四个按钮必须排在一行，否则行高会翻倍 */
+:deep(td.op-col .el-button + .el-button) {
+  margin-left: 4px;
+}
+
+/* 国标编号：20 位等宽字符，用小一号字才塞得进 168px 的列 */
+.code-sm {
+  font-size: var(--fs-xs);
+}
+
+/* 名称按需编辑：平时是文本，点击才换成输入框 */
+.name-text {
+  cursor: default;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+}
+.name-text.is-editable {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.name-text.is-editable:hover {
+  background-color: var(--el-fill-color-light);
+  color: var(--el-color-primary);
+}
+.name-text.is-empty {
+  color: var(--text-tertiary);
+}
+.name-input {
+  width: 100%;
+}
+.name-input :deep(.el-input__wrapper) {
+  padding: 0 6px;
+}
+
+/* 位置：可点击编辑经纬度 */
+.position-text {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  transition: background-color 0.15s;
+}
+.position-text:hover {
+  background-color: var(--el-fill-color-light);
+  color: var(--el-color-primary);
+}
+
+/* 在线状态 + 流量图标：整体可点开设备详情 */
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.badge.is-clickable {
+  cursor: pointer;
+}
+.traffic-icon {
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.traffic-icon:hover {
+  color: var(--el-color-primary);
+}
+
 /* 所属设备：编码（等宽）+ 名称（灰），压成一行避免行高翻倍 */
 .device-ref {
   display: inline-flex;

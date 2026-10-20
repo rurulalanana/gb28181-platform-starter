@@ -39,6 +39,7 @@ export const deviceApi = {
     post('/device/setmediatransport', { serial, media_transport: mediaTransport, media_transport_mode: mode }),
   setChannelName: (params) => post('/device/setchannelname', params),
   setChannelPtzType: (params) => post('/device/setchannelptztype', params),
+  setChannelPosition: (params) => post('/device/setchannelposition', params),
   setChannelOnDemand: (params) => post('/device/setchannelondemand', params),
   setChannelCloudRecord: (params) => post('/device/setchannelcloudrecord', params),
   statusLog: (params) => get('/device/statuslog', params),

@@ -112,9 +112,12 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRoute } from 'vue-router'
 import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
+
+const route = useRoute()
 
 const channels = ref([])
 const records = ref([])
@@ -296,7 +299,15 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-onMounted(loadChannels)
+onMounted(async () => {
+  await loadChannels()
+  // 从通道列表点「设备录像」跳进来时预填设备/通道
+  const serial = String(route.query.serial || '').trim()
+  const code = String(route.query.code || '').trim()
+  if (serial && code) {
+    query.channelKey = `${serial}/${code}`
+  }
+})
 onUnmounted(() => player.stop())
 </script>
 

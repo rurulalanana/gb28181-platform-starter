@@ -1451,7 +1451,9 @@ body {
   .el-card__body {
     padding: var(--sp-3);
   }
-  /* 打印：去掉一切浮层装饰 */
+}
+
+/* 打印：去掉一切浮层装饰 */
 @media print {
   .el-card,
   .kpi-grid,
