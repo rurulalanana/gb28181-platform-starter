@@ -285,7 +285,7 @@ onMounted(async () => {
 
 .brand-name {
   font-family: var(--mono);
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 700;
   color: #fff;
   letter-spacing: -0.2px;
@@ -293,7 +293,7 @@ onMounted(async () => {
 }
 
 .brand-sub {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: rgba(255, 255, 255, 0.4);
   white-space: nowrap;
 }
@@ -307,7 +307,7 @@ onMounted(async () => {
 }
 
 .nav-group-label {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   color: rgba(255, 255, 255, 0.32);
   padding: 15px 10px 5px;
@@ -326,7 +326,7 @@ onMounted(async () => {
   border-radius: var(--r-md);
   color: rgba(255, 255, 255, 0.62);
   text-decoration: none;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
   transition: background 0.14s ease, color 0.14s ease;
 }
@@ -355,7 +355,7 @@ onMounted(async () => {
 }
 
 .nav-icon {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   flex-shrink: 0;
   color: rgba(255, 255, 255, 0.5);
 }
@@ -396,7 +396,7 @@ onMounted(async () => {
   height: 30px;
   padding: 0 10px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -452,7 +452,7 @@ onMounted(async () => {
 
 .crumb-title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -487,7 +487,7 @@ onMounted(async () => {
   border-radius: var(--r-md);
   background: var(--white);
   border: 1px solid var(--line);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-600);
   white-space: nowrap;
 }
@@ -507,7 +507,7 @@ onMounted(async () => {
 .pill-value {
   font-family: var(--mono);
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   letter-spacing: -0.3px;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -521,7 +521,7 @@ onMounted(async () => {
 
 .pill-quiet {
   color: var(--ink-500);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -551,7 +551,7 @@ onMounted(async () => {
 }
 
 .user-welcome {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -564,7 +564,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -576,7 +576,7 @@ onMounted(async () => {
 }
 
 .user-name {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
 }

@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">通道管理</h2>
@@ -41,7 +41,7 @@
         </el-form-item>
       </el-form>
 
-      <el-table v-loading="loading" :data="channels" stripe>
+      <el-table v-loading="loading" :data="channels" stripe table-layout="fixed">
         <el-table-column prop="id" label="通道编码" min-width="190" sortable>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
@@ -253,7 +253,7 @@ function supportsPtz(type) {
 }
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 20,
+  pageSize: 10,
   load: () => load()
 })
 
@@ -439,7 +439,7 @@ onUnmounted(() => player.stop())
   min-width: 0;
 }
 .device-ref .text-dim {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .preview-wrap {

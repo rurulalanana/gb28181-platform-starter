@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">级联配置</h2>
@@ -17,7 +17,7 @@
 
     <el-card shadow="never">
 
-      <el-table v-loading="loading" :data="list" stripe>
+      <el-table v-loading="loading" :data="list" stripe table-layout="fixed">
         <el-table-column label="名称" min-width="120">
           <template #default="{ row }">{{ row.name || '—' }}</template>
         </el-table-column>
@@ -225,7 +225,7 @@ const emptyForm = () => ({
 const form = reactive(emptyForm())
 
 const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 20,
+  pageSize: 10,
   load: () => load()
 })
 
@@ -364,14 +364,14 @@ onMounted(load)
   align-items: baseline;
   gap: var(--sp-2);
   margin: var(--sp-2) 0 var(--sp-3);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-secondary);
   letter-spacing: 0.02em;
 }
 
 .form-section-hint {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--text-tertiary);
 }
@@ -379,7 +379,7 @@ onMounted(load)
 /* 开关类字段右侧的说明文字 */
 .form-item-hint {
   margin-left: var(--sp-2);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
 }
 

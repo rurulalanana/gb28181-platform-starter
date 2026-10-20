@@ -74,7 +74,7 @@
         </el-button>
       </div>
 
-      <el-table v-if="viewMode === 'list'" v-loading="loadingDaily" :data="records" stripe>
+      <el-table v-if="viewMode === 'list'" v-loading="loadingDaily" :data="records" stripe table-layout="fixed">
         <el-table-column prop="startAt" label="开始时间" min-width="160" sortable>
           <template #default="{ row }"><span class="mono">{{ fmtTs(row.startAt) }}</span></template>
         </el-table-column>
@@ -677,7 +677,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 14px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 
@@ -718,7 +718,7 @@ onUnmounted(() => {
   position: absolute;
   top: 0;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   font-family: var(--font-mono, monospace);
 }
@@ -771,7 +771,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   pointer-events: none;
 }
@@ -792,7 +792,7 @@ onUnmounted(() => {
   left: 50%;
   transform: translateX(-50%);
   padding: 1px 6px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: #fff;
   background: var(--danger-500);
   border-radius: 4px;
@@ -805,7 +805,7 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
   margin: 12px 8px 0;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 

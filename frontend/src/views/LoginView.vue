@@ -117,7 +117,7 @@ async function onSubmit() {
   justify-content: center;
   background: var(--bg-sidebar);
   color: #fff;
-  font-size: 17px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   letter-spacing: 0.5px;
 }
@@ -138,7 +138,7 @@ async function onSubmit() {
 /* 输入框内的图标放右侧（参考站同款），灰一点 */
 .login-form :deep(.el-input__suffix .el-icon) {
   color: var(--ink-400);
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 
 .login-alert {
@@ -149,7 +149,7 @@ async function onSubmit() {
 .submit {
   width: 100%;
   height: 36px;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
   border-radius: var(--r-sm);
   letter-spacing: 2px;
@@ -158,13 +158,13 @@ async function onSubmit() {
 .login-foot {
   padding: 10px 26px;
   border-top: 1px solid var(--line);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-500);
 }
 
 .login-foot code {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   padding: 1px 5px;
   background: var(--ink-50);
   border: 1px solid var(--line);

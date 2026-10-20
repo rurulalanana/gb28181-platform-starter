@@ -324,7 +324,7 @@ onMounted(() => {
 .server-actions .sa-tip {
   flex: 1;
   min-width: 220px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   line-height: 1.6;
 }
@@ -347,14 +347,14 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--ink-900);
   margin-bottom: 8px;
 }
 
 .hint-desc {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
   line-height: 1.7;
 }

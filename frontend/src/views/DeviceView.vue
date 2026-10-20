@@ -1,12 +1,8 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">设备管理</h2>
-        <p class="page-subtitle">
-          已接入 {{ totalCount }} 台设备，其中
-          <b class="text-success">{{ onlineCount }}</b> 台在线
-        </p>
       </div>
       <div class="page-actions">
         <el-button size="small" :loading="loading" @click="load">
@@ -37,97 +33,137 @@
         <el-icon><Search /></el-icon> 查询
       </el-button>
       <el-button @click="resetQuery">重置</el-button>
-      <span class="filter-bar-spacer" />
-      <span class="text-dim">设备编码可直接点击名称行内编辑</span>
     </div>
 
     <el-card shadow="never">
 
-      <el-table v-loading="loading" :data="devices" stripe>
-        <el-table-column prop="id" label="设备编码" min-width="170" sortable>
+      <!--
+        table-layout="fixed"：列宽严格按 width/min-width 分配，不再随内容重算。
+        默认的 fit 布局会测量每列内容最大宽度，行内编辑的 input 一出现
+        （或某个操作按钮加载态变化），列宽就会重排，整张表跟着跳。
+      -->
+      <el-table v-loading="loading" :data="devices" stripe table-layout="fixed">
+        <el-table-column prop="id" label="设备国标编号" width="180" fixed="left" sortable show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="150" :sort-by="(r) => r.customName || r.name || ''" sortable>
+        <el-table-column
+          label="名称"
+          width="132"
+          :sort-by="(r) => r.customName || r.name || ''"
+          sortable
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
             <!--
-              行内编辑：点即改。设备名常被上报成统一型号名，而改名是高频操作，
-              弹窗多一步没必要。回车或失焦保存。
+              按需编辑：常驻输入框会在每行渲染「点击修改」占位符，一屏几十行全是灰字，很脏。
+              改为平时显示文本、点击才换成输入框。
             -->
             <el-input
+              v-if="row._editing"
               v-model="row.customName"
               size="small"
-              placeholder="点击修改"
-              :disabled="namePending.has(row.id)"
-              @focus="onNameFocus(row)"
+              class="name-input"
               @keyup.enter="saveName(row)"
+              @keyup.esc="cancelName(row)"
               @blur="saveName(row)"
             />
+            <span
+              v-else
+              class="name-text is-editable"
+              :class="{ 'is-empty': !row.customName }"
+              title="点击修改名称"
+              @click="startNameEdit(row)"
+            >{{ row.customName || row.name || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="流传输" width="104" align="center">
+        <el-table-column label="流传输模式" width="112" align="center">
           <template #default="{ row }">
-            <!-- 行内切换：对齐 LiveGBS 的流传输模式直接切换，只影响后续点播 -->
-            <el-radio-group
-              :model-value="(row.mediaTransport || 'UDP').toUpperCase()"
-              size="small"
-              class="transport-radio"
+            <!--
+              用 el-dropdown（文字 + 箭头）而非 el-select：
+              select 在表格里是个带边框的输入框，一屏几十行全是灰框，很脏；
+              文字下拉既清爽又保留了切换能力。
+
+              【坑】el-dropdown 在表格里多行复用时，@command 只回传被选项的值，
+              不知道自己属于哪一行。实测点第 5 行的菜单，改的却是第 1 行。
+              解决：命令值带上设备编码（`设备编码|模式标识`），
+              由 handleTransportCommand 拆开，自己去对应行上应用。
+            -->
+            <el-dropdown
+              trigger="click"
               :disabled="transportPending.has(row.id)"
-              @change="(v) => changeTransport(row, v)"
+              @command="handleTransportCommand"
             >
-              <el-radio-button value="UDP">UDP</el-radio-button>
-              <el-radio-button value="TCP">TCP</el-radio-button>
-            </el-radio-group>
+              <span class="transport-link" :class="{ 'is-busy': transportPending.has(row.id) }">
+                {{ transportText(row) }}
+                <el-icon class="transport-arrow"><ArrowDown /></el-icon>
+              </span>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="opt in TRANSPORT_OPTIONS"
+                    :key="opt.value"
+                    :command="row.id + '|' + opt.value"
+                    :disabled="opt.value === transportLabel(row)"
+                  >
+                    {{ opt.label }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
-        <el-table-column prop="channelCount" label="通道数" width="76" align="center" sortable>
-          <template #default="{ row }">{{ row.channelCount ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="在线状态" width="120" align="center">
+        <el-table-column prop="channelCount" label="通道数" width="88" align="center" sortable>
           <template #default="{ row }">
-            <!-- 对齐参考站：状态文字点击查看状态记录，图标点击查看流量统计 -->
+            <el-link v-if="row.channelCount" type="primary" class="count-link" @click="viewChannels(row)">
+              {{ row.channelCount }}
+            </el-link>
+            <span v-else class="text-dim">0</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="在线状态" width="116" align="center">
+          <template #default="{ row }">
             <div class="status-cell">
               <span
                 class="badge is-clickable"
                 :class="row.online ? 'is-online' : 'is-offline'"
-                title="点击查看状态记录"
-                @click="openStatusLog(row)"
+                title="点击查看设备详情"
+                @click="openDetail(row)"
               >{{ row.online ? '在线' : '离线' }}</span>
-              <el-icon
-                class="traffic-icon"
-                title="点击查看流量统计"
-                @click="openStreamLog(row)"
-              >
+              <el-icon class="traffic-icon" title="点击查看设备详情" @click="openDetail(row)">
                 <Histogram />
               </el-icon>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" align="center">
+
+        <el-table-column label="出口 IP" width="196" show-overflow-tooltip>
           <template #default="{ row }">
-            <!--
-              LiveGBS 风格操作组：文字按钮更明确。
-              ＞「更新通道」仅在线设备（离线拉不动目录）；
-              ＞「删除」仅离线设备（防误删在线设备，对齐 LiveGBS）。
-            -->
+            <span class="mono" :class="{ 'text-dim': !row.endpoint }">{{ row.endpoint || '—' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="最近心跳" width="152" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="text-muted">{{ row.lastKeepaliveAt || '—' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="操作" width="232" align="center" fixed="right">
+          <template #default="{ row }">
+            <!-- 「更新通道」仅在线设备可用；「删除」仅离线设备可用（防误删在线设备）。 -->
             <div class="row-actions">
               <el-button link type="primary" @click="viewChannels(row)">查看通道</el-button>
-              <el-button v-if="row.online" link :loading="busy === row.id" @click="collect(row)">更新通道</el-button>
+              <el-button
+                v-if="row.online"
+                link
+                class="act-collect"
+                :loading="busy === row.id"
+                @click="collect(row)"
+              >更新通道</el-button>
               <el-button link class="act-edit" @click="openEdit(row)">编辑</el-button>
               <el-button v-if="!row.online" link type="danger" @click="remove(row)">删除</el-button>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="厂商 / 型号" min-width="130" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="text-muted">{{ [row.manufacturer, row.model].filter(Boolean).join(' / ') || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="IP 地址" min-width="130" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.remoteIp || '—' }}</span></template>
-        </el-table-column>
-        <el-table-column label="最后注册" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="text-muted">{{ row.lastRegisterAt || '—' }}</span>
           </template>
         </el-table-column>
         <template #empty>
@@ -155,10 +191,9 @@
               <el-input v-model="form.customName" placeholder="留空则用设备上报名称" />
             </el-form-item>
             <el-form-item label="流传输模式">
-              <el-radio-group v-model="form.mediaTransport">
-                <el-radio-button value="TCP">TCP</el-radio-button>
-                <el-radio-button value="UDP">UDP</el-radio-button>
-              </el-radio-group>
+              <el-select v-model="form.transportMode" style="width: 100%">
+                <el-option v-for="opt in TRANSPORT_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+              </el-select>
             </el-form-item>
             <el-form-item label="字符集">
               <el-select v-model="form.charset" placeholder="默认" clearable style="width: 100%">
@@ -195,62 +230,20 @@
       </template>
     </el-dialog>
 
-    <!-- 设备状态记录（对齐参考站：点击在线/离线文字查看） -->
-    <el-dialog
-      v-model="statusLogDialog"
-      :title="'设备状态记录 · ' + (statusLogTarget?.customName || statusLogTarget?.name || statusLogTarget?.id || '')"
-      width="580px"
-    >
-      <el-table v-loading="statusLogLoading" :data="statusLogRows" size="small" max-height="420">
-        <el-table-column prop="createdAt" label="时间" width="180">
-          <template #default="{ row }"><span class="mono">{{ row.createdAt }}</span></template>
-        </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
-          <template #default="{ row }">
-            <span
-              class="badge"
-              :class="String(row.status || '').toUpperCase() === 'ON' ? 'is-online' : 'is-offline'"
-            >{{ String(row.status || '').toUpperCase() === 'ON' ? '在线' : '离线' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
-        <template #empty>
-          <el-empty description="暂无状态记录" :image-size="64" />
-        </template>
-      </el-table>
-      <div class="dialog-foot-tip">记录保留 {{ statusLogReserveDays }} 天，由平台定时清理</div>
-    </el-dialog>
-
-    <!-- 流量统计（嵌入式 ZLMediaKit 无计数接口，弹窗如实说明） -->
-    <el-dialog
-      v-model="streamLogDialog"
-      :title="'流量统计 · ' + (streamLogTarget?.customName || streamLogTarget?.name || streamLogTarget?.id || '')"
-      width="520px"
-    >
-      <el-empty
-        v-if="!streamLogRows.length"
-        :description="streamLogNote || '暂无流量数据'"
-        :image-size="72"
-      />
-      <el-table v-else :data="streamLogRows" size="small" max-height="380">
-        <el-table-column prop="time" label="时间" min-width="170" />
-        <el-table-column prop="channelId" label="通道" min-width="170">
-          <template #default="{ row }"><span class="mono">{{ row.channelId }}</span></template>
-        </el-table-column>
-        <el-table-column prop="bytes" label="流量(字节)" width="120" align="right" />
-      </el-table>
-    </el-dialog>
+    <!-- 设备详情：状态记录 / 流量统计 / 移动轨迹 / 会话列表 -->
+    <DeviceDetailDialog v-model:visible="detailVisible" :device="detailTarget" />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { deviceApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
+import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -260,12 +253,6 @@ const loading = ref(false)
 const busy = ref('')
 const saving = ref(false)
 const query = reactive({ q: '', online: null })
-
-/** 设备总数（来自分页器，全量口径）。 */
-const totalCount = computed(() => pager.total ?? 0)
-
-/** 当前页在线设备数。 */
-const onlineCount = computed(() => devices.value.filter((d) => d.online).length)
 
 /** 重置筛选条件并重新查询。 */
 function resetQuery() {
@@ -284,7 +271,8 @@ const editDialog = ref(false)
 const editTarget = ref(null)
 const form = reactive({
   customName: '',
-  mediaTransport: '',
+  /** 流传输模式标识，取值同 TRANSPORT_OPTIONS 的 value。 */
+  transportMode: 'UDP',
   charset: '',
   catalogInterval: 0,
   subscribeInterval: 0,
@@ -298,7 +286,7 @@ const form = reactive({
 const serverSip = computed(() => auth.serverInfo?.sip || '—')
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 20,
+  pageSize: 10,
   load: () => load()
 })
 
@@ -313,8 +301,9 @@ async function load() {
       ...d,
       // 记录上次已保存的值，用于判断是否真的改过
       _savedName: d.customName || '',
-      // 是否处于「正在编辑」状态：仅此状态下的失焦才触发保存
-      _editing: false
+      // 编辑态：仅点击名称时才置 true，避免常驻输入框
+      _editing: false,
+      _draftName: d.customName || ''
     }))
     setTotal(data?.deviceCount ?? devices.value.length)
   } catch (e) {
@@ -335,66 +324,74 @@ function viewChannels(row) {
   router.push({ path: '/channels', query: { serial: row.id } })
 }
 
-/** 行内切换流传输模式（UDP/TCP，只影响后续点播发流方式）。 */
+/**
+ * 流传输模式选项。
+ *
+ * <p>TCP 分被动/主动：被动收流由平台主动发 INVITE，设备回推；
+ * 主动推流则设备建流推给平台。模式会写进 SIP 协商，填错会协商失败。
+ */
+const TRANSPORT_OPTIONS = [
+  { value: 'UDP', label: 'UDP', transport: 'UDP', mode: 'passive' },
+  { value: 'TCP', label: 'TCP 被动', transport: 'TCP', mode: 'passive' },
+  { value: 'TCP_ACTIVE', label: 'TCP 主动', transport: 'TCP', mode: 'active' }
+]
+
+/** 设备当前的流传输模式标识。 */
+function transportLabel(row) {
+  const transport = (row.mediaTransport || 'UDP').toUpperCase()
+  if (transport !== 'TCP') return 'UDP'
+  return row.mediaTransportMode === 'active' ? 'TCP_ACTIVE' : 'TCP'
+}
+
+/** 设备当前的流传输模式显示文案。 */
+function transportText(row) {
+  return TRANSPORT_OPTIONS.find((o) => o.value === transportLabel(row))?.label || 'UDP'
+}
+
+/**
+ * 处理流传输下拉的命令。
+ *
+ * <p>命令值格式为 {@code 设备编码|模式标识}。
+ * 必须自带设备编码：表格里多行共用 el-dropdown，命令本身不携带行信息。
+ */
+function handleTransportCommand(cmd) {
+  const sep = String(cmd).indexOf('|')
+  if (sep < 0) return
+  const deviceId = cmd.slice(0, sep)
+  const mode = cmd.slice(sep + 1)
+  const row = devices.value.find((d) => d.id === deviceId)
+  if (!row) return
+  changeTransport(row, mode)
+}
+
+/** 切换流传输模式（只影响后续点播发流方式）。 */
 async function changeTransport(row, value) {
-  const old = row.mediaTransport || 'UDP'
+  const opt = TRANSPORT_OPTIONS.find((o) => o.value === value)
+  if (!opt) return
+  const old = transportLabel(row)
   if (value === old) return
   transportPending.add(row.id)
   try {
-    await deviceApi.setMediaTransport(row.id, value)
-    row.mediaTransport = value
-    ElMessage.success(`已切换为 ${value}（对下次点播生效）`)
+    await deviceApi.setMediaTransport(row.id, opt.transport, opt.mode)
+    row.mediaTransport = opt.transport
+    row.mediaTransportMode = opt.mode
+    ElMessage.success(`已切换为 ${opt.label}（对下次点播生效）`)
   } catch (e) {
-    row.mediaTransport = old
     ElMessage.error(e.message || '切换失败')
   } finally {
     transportPending.delete(row.id)
   }
 }
 
-/* ---------------- 状态记录 / 流量统计（对齐参考站：点击状态查看） ---------------- */
+/* ---------------- 设备详情弹窗 ---------------- */
 
-const statusLogDialog = ref(false)
-const statusLogTarget = ref(null)
-const statusLogLoading = ref(false)
-const statusLogRows = ref([])
-const statusLogReserveDays = ref(30)
+const detailVisible = ref(false)
+const detailTarget = ref(null)
 
-/** 打开设备状态记录弹窗（点击「在线/离线」文字触发）。 */
-async function openStatusLog(row) {
-  statusLogTarget.value = row
-  statusLogRows.value = []
-  statusLogDialog.value = true
-  statusLogLoading.value = true
-  try {
-    const data = await deviceApi.statusLog({ serial: row.id, limit: 200 })
-    statusLogRows.value = data?.logList || []
-    statusLogReserveDays.value = data?.logReserveDays ?? 30
-  } catch (e) {
-    ElMessage.error(e.message || '加载状态记录失败')
-  } finally {
-    statusLogLoading.value = false
-  }
-}
-
-const streamLogDialog = ref(false)
-const streamLogTarget = ref(null)
-const streamLogRows = ref([])
-const streamLogNote = ref('')
-
-/** 打开流量统计弹窗（点击状态旁图表图标触发）。 */
-async function openStreamLog(row) {
-  streamLogTarget.value = row
-  streamLogRows.value = []
-  streamLogNote.value = ''
-  streamLogDialog.value = true
-  try {
-    const data = await deviceApi.streamLog({ serial: row.id })
-    streamLogRows.value = data?.list || []
-    streamLogNote.value = data?.note || ''
-  } catch (e) {
-    ElMessage.error(e.message || '加载流量统计失败')
-  }
+/** 打开设备详情（状态记录 / 流量统计 / 移动轨迹 / 会话列表）。 */
+function openDetail(row) {
+  detailTarget.value = row
+  detailVisible.value = true
 }
 
 /* ---------------- 导出设备列表（CSV） ---------------- */
@@ -448,22 +445,27 @@ async function collect(row) {
   }
 }
 
-/**
- * 进入编辑态。
- *
- * <p><b>必须有这个状态</b>：{@code el-input} 的 blur 在「仅聚焦一下就离开」时
- * 也会触发。若不区分是否真的编辑过，点一下单元格（或点行内其它按钮导致失焦）
- * 就会把 customName 当成空值保存，把设备名清掉。
- */
-function onNameFocus(row) {
+/** 进入名称编辑态。 */
+function startNameEdit(row) {
+  if (row._editing) return
   row._editing = true
+  row._draftName = row.customName || ''
+  nextTick(() => {
+    const input = document.querySelector('.name-input input')
+    if (input) input.focus()
+  })
+}
+
+/** 放弃编辑，还原原值。 */
+function cancelName(row) {
+  row.customName = row._draftName || ''
+  row._editing = false
 }
 
 /**
  * 行内保存名称。
  *
- * <p>两个守卫：未进入编辑态不保存；值未变化不保存 ——
- * 否则表格里点一下别处就会打一次接口。
+ * <p>值未变化时不发请求：否则点一下别处就会打一次接口。
  */
 async function saveName(row) {
   if (!row._editing) {
@@ -492,7 +494,7 @@ async function saveName(row) {
 function openEdit(row) {
   editTarget.value = row
   form.customName = row.customName || ''
-  form.mediaTransport = row.mediaTransport || ''
+  form.transportMode = transportLabel(row)
   form.charset = row.charset || ''
   form.catalogInterval = row.catalogInterval ?? 0
   form.subscribeInterval = row.subscribeInterval ?? 0
@@ -510,7 +512,11 @@ async function doSave() {
   try {
     const payload = { serial: editTarget.value.id, custom_name: form.customName }
     // 后端对 null 是「不改」，传空串会真的清空，所以可选字段只在有值时下发
-    if (form.mediaTransport) payload.media_transport = form.mediaTransport
+    const transport = TRANSPORT_OPTIONS.find((o) => o.value === form.transportMode)
+    if (transport) {
+      payload.media_transport = transport.transport
+      payload.media_transport_mode = transport.mode
+    }
     if (form.charset) payload.charset = form.charset
     payload.catalog_interval = form.catalogInterval ?? 0
     payload.subscribe_interval = form.subscribeInterval ?? 0
@@ -575,6 +581,16 @@ onMounted(load)
   color: var(--warning-600, #d48806);
 }
 
+/*
+  「更新通道」按钮在 loading 时，Element 会把文字换成 spinner 图标，
+  按钮宽度随之变窄 —— 行内其它内容被挤动，整行跟着抖动。
+  这里给一个固定宽度，文字与图标都在其中居中。
+*/
+.row-actions .act-collect {
+  width: 62px;
+  justify-content: center;
+}
+
 /* 状态列：可点击的状态徽标 + 流量图标 */
 .status-cell {
   display: inline-flex;
@@ -585,7 +601,7 @@ onMounted(load)
   cursor: pointer;
 }
 .traffic-icon {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--ink-400, #909399);
   cursor: pointer;
 }
@@ -596,20 +612,79 @@ onMounted(load)
 /* 弹窗底部说明 */
 .dialog-foot-tip {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-400, #909399);
 }
 
-/* 行内流传输切换：紧凑分段按钮（比下拉在窄列里更清晰、可见当前值） */
-.transport-radio :deep(.el-radio-button__inner) {
-  padding: 3px 8px;
+/* 行内名称：平时是文本，编辑时才换成输入框 */
+.name-text.is-editable {
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 0.15s, color 0.15s;
+  /* 单行显示：名称过长时靠 ellipsis 截断，绝不换行撑高行 */
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.name-text.is-editable:hover {
+  color: var(--brand-500, #2f5c94);
+  border-bottom-color: var(--brand-300, #93b4e3);
+}
+.name-text.is-empty {
+  color: var(--text-tertiary, #a8abb2);
+}
+
+/*
+  编辑态的输入框必须严格限制在单元格内：
+  el-input 默认 min-width 会把列撑宽，表格（fit 布局）随之重排。
+  table-layout="fixed" 之外再加这层约束，双保险。
+*/
+.name-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.name-input :deep(.el-input__wrapper) {
+  padding: 0 8px;
+  min-height: 28px;
+}
+
+.name-input :deep(.el-input__inner) {
+  height: 26px;
+  font-size: var(--fs-sm);
+  padding: 0;
+}
+
+/* 流传输：文字 + 箭头，点开是下拉菜单（对齐 LiveGBS） */
+.transport-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  user-select: none;
+}
+
+.transport-link:hover {
+  text-decoration: underline;
+}
+
+.transport-link.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.transport-arrow {
   font-size: 11px;
-  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
 }
-.transport-radio :deep(.el-radio-button:first-child .el-radio-button__inner) {
-  border-radius: 5px 0 0 5px;
-}
-.transport-radio :deep(.el-radio-button:last-child .el-radio-button__inner) {
-  border-radius: 0 5px 5px 0;
+
+/* 通道数：可点击跳转到通道管理 */
+.count-link {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 </style>

@@ -11,7 +11,7 @@ import { computed, reactive } from 'vue'
  * <p>用法：
  * <pre>{@code
  * const { pager, offset, reset, setTotal, onPageChange, onSizeChange } =
- *   usePagination({ pageSize: 20, load })
+ *   usePagination({ pageSize: 10, load })
  *
  * async function load() {
  *   const data = await api.list({ start: offset.value, limit: pager.size })
@@ -23,7 +23,7 @@ import { computed, reactive } from 'vue'
  * @param pageSize 初始每页条数
  * @param load     翻页 / 改每页条数后要重新执行的加载函数
  */
-export function usePagination({ pageSize = 20, load } = {}) {
+export function usePagination({ pageSize = 10, load } = {}) {
   const pager = reactive({
     page: 1,
     size: pageSize,

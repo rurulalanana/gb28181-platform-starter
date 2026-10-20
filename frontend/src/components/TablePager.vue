@@ -51,6 +51,6 @@ defineEmits(['page-change', 'size-change'])
 
 .table-pager .total {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 </style>

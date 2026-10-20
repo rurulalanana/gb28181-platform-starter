@@ -414,7 +414,7 @@ onUnmounted(() => {
 .dc-title {
   padding: 12px 14px 6px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--ink-700);
   letter-spacing: 0.02em;
@@ -449,13 +449,13 @@ onUnmounted(() => {
 }
 
 .gauge-pct {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--ink-700);
 }
 
 .gauge-caption {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   line-height: 1.7;
   color: var(--ink-500);
   text-align: center;
@@ -488,13 +488,13 @@ onUnmounted(() => {
 }
 
 .disk-path {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--ink-700);
 }
 
 .disk-nums {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .disk-bar {
@@ -519,7 +519,7 @@ onUnmounted(() => {
 .empty-hint {
   text-align: center;
   color: var(--ink-400);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 30px 0;
 }
 </style>

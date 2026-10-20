@@ -786,12 +786,12 @@ onUnmounted(() => {
 }
 
 .overlay-text {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: rgba(255, 255, 255, 0.5);
 }
 
 .overlay-hint {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: rgba(255, 255, 255, 0.28);
 }
 
@@ -838,7 +838,7 @@ onUnmounted(() => {
   line-height: 24px;
   min-width: 32px;
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-family: var(--mono);
   font-weight: 600;
   border-color: var(--line);
@@ -879,7 +879,7 @@ onUnmounted(() => {
   margin-bottom: 8px;
   border: 1px solid var(--line-soft, #ebeef5);
   border-radius: 8px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   background: var(--bg-sunken, #f8fafc);
 }
 .ptz-target .ellipsis {
@@ -889,7 +889,7 @@ onUnmounted(() => {
 .ptz-target-cell {
   flex-shrink: 0;
   color: var(--ink-400, #909399);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* 固定枪机提示：云台面板整体置灰时给出原因，避免用户以为是故障 */
@@ -899,7 +899,7 @@ onUnmounted(() => {
   border-radius: var(--r-sm);
   background: var(--warning-50, #fdf6ec);
   color: var(--warning-600, #b88230);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.45;
 }
 
@@ -913,7 +913,7 @@ onUnmounted(() => {
 }
 
 .panel-title {
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -1006,7 +1006,7 @@ onUnmounted(() => {
 }
 
 .ch-name {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-primary);
   font-weight: 500;
 }
@@ -1024,14 +1024,14 @@ onUnmounted(() => {
 }
 
 .ch-offline {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   flex-shrink: 0;
 }
 
 /* 轮播设置弹窗 */
 .rotate-tip {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
   margin-bottom: var(--sp-3);
 }
@@ -1061,7 +1061,7 @@ onUnmounted(() => {
   padding: var(--sp-4) 0;
   text-align: center;
   color: var(--text-tertiary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .rotate-sec {
@@ -1069,7 +1069,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -1105,7 +1105,7 @@ onUnmounted(() => {
   border-bottom: 2px solid transparent;
   background: transparent;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--ink-500);
   cursor: pointer;
 }
@@ -1132,7 +1132,7 @@ onUnmounted(() => {
   border-radius: var(--r-sm);
   background: transparent;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--ink-600);
   cursor: pointer;
   text-align: left;
@@ -1151,7 +1151,7 @@ onUnmounted(() => {
 }
 
 .ch-group-name {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 500;
   color: var(--ink-700);
 }
@@ -1163,7 +1163,7 @@ onUnmounted(() => {
 
 .ch-group-count {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--ink-400);
 }
 

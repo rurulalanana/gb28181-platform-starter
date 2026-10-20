@@ -77,6 +77,22 @@
   --sp-10: 40px;
   --sp-12: 48px;
 
+  /*
+    ---------- 字号刻度 ----------
+    只保留 5 档。早先全站混用 11 / 11.5 / 12 / 12.5 / 13 / 13.5 / 14px，
+    同一屏出现七八种字号，看着「不伦不类」。现在按语义收敛：
+      fs-xs   12px  辅助说明、次要标签
+      fs-sm   13px  表格正文、控件
+      fs-md   14px  表格表头、导航、按钮、输入框
+      fs-lg   16px  卡片小标题
+      fs-xl   18px  页面标题
+  */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+
   /* ---------- 圆角（控制台偏方正，不用大圆角） ---------- */
   --r-sm: 3px;
   --r-md: 5px;
@@ -95,8 +111,8 @@
   --sidebar-w: 216px;
   --sidebar-w-collapsed: 60px;
   --header-h: 52px;
-  --control-h: 30px;        /* 输入/按钮统一高度 */
-  --row-h: 34px;            /* 表格行高 */
+  --control-h: 32px;        /* 输入/按钮统一高度 */
+  --row-h: 44px;            /* 表格行高：10 行正好铺满一屏工作区 */
 
   --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
     'PingFang SC', monospace;
@@ -132,7 +148,7 @@
   --el-fill-color-lighter: var(--bg-sunken);
 
   --el-border-radius-base: var(--r-md);
-  --el-font-size-base: 13px;
+  --el-font-size-base: 14px;
   --el-box-shadow-light: var(--sh-md);
   --el-box-shadow: var(--sh-md);
 }
@@ -153,7 +169,7 @@ body,
 
 body {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.55;
   color: var(--text-primary);
   background: var(--bg-app);
@@ -164,9 +180,11 @@ body {
 /* 数据类文本：编码、IP、端口、时间、SSRC —— 等宽 + 等宽数字，成列对齐 */
 .mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.1px;
+  /* 编码/IP 这类文本必须单行：换行会撑高表格行，行高一变整张表就跟着抖 */
+  white-space: nowrap;
 }
 
 .num {
@@ -214,7 +232,12 @@ body {
   gap: var(--sp-4);
 }
 
-/* 需要铺满内容区高度的页面（如视频墙、总览）加这个修饰 */
+/*
+  列表页通用：铺满内容区高度。
+  表格页（设备/通道/报警等）加 is-fill 后，卡片会吃掉剩余高度，
+  10 行 × 44px 正好占满一屏；行数更多时表格内部滚动，
+  页面本身不出现外层滚动条（页面头部与分页条始终可见）。
+*/
 .page.is-fill {
   /*
    * 用 flex:1 而非 height:100%。
@@ -228,6 +251,34 @@ body {
 
 .page.is-fill > * {
   min-height: 0;
+}
+
+/* 铺满高度时，承载表格的卡片要能伸缩并让表格内部滚动 */
+.page.is-fill > .el-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.page.is-fill > .el-card > .el-card__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.page.is-fill > .el-card > .el-card__body > .el-table {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 表格内部滚动时，表头保持吸顶 */
+.page.is-fill .el-table__header-wrapper {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-surface);
 }
 
 .page-header {
@@ -247,7 +298,7 @@ body {
 
 .page-title {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   letter-spacing: -0.1px;
   color: var(--text-primary);
@@ -255,7 +306,7 @@ body {
 }
 
 .page-subtitle {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -285,7 +336,7 @@ body {
 
 .el-card.box-centered > .el-card__header .card-title {
   justify-content: center;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 650;
   color: var(--text-primary);
 }
@@ -301,7 +352,7 @@ body {
   display: flex;
   align-items: center;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--text-primary);
   border-bottom: 1px solid var(--line);
   background: transparent;
@@ -329,14 +380,14 @@ body {
   align-items: center;
   gap: 7px;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--text-primary);
 }
 
 /* 卡片标题的图标只做定位，不做装饰色 */
 .card-title .el-icon {
   color: var(--text-tertiary);
-  font-size: 14px;
+  font-size: var(--fs-md);
 }
 
 /* 标题前后加一条延伸线，让卡片头部有"仪表分区"感 */
@@ -363,7 +414,7 @@ body {
   background: var(--ink-100);
   color: var(--ink-600);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
 
@@ -397,12 +448,12 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 
 .kpi-label .el-icon {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--text-tertiary);
 }
 
@@ -421,14 +472,14 @@ body {
 
 .kpi-unit {
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   letter-spacing: 0;
   color: var(--text-tertiary);
 }
 
 .kpi-foot {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   white-space: nowrap;
   overflow: hidden;
@@ -468,13 +519,13 @@ body {
 }
 
 .rate-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 
 .rate-value {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.3px;
   color: var(--text-primary);
@@ -539,7 +590,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   color: var(--ink-500);
   background: var(--ink-50);
   border: 1px solid var(--line);
@@ -559,14 +610,14 @@ body {
 }
 
 .quick-title {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.4;
 }
 
 .quick-desc {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -575,7 +626,7 @@ body {
 
 .quick-arrow {
   color: var(--ink-300);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   opacity: 0;
   transform: translateX(-3px);
   transition: opacity 0.15s ease, transform 0.15s ease;
@@ -609,7 +660,7 @@ body {
 }
 
 .kv-row dt {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
   flex-shrink: 0;
 }
@@ -617,7 +668,7 @@ body {
 .kv-row dd {
   margin: 0;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-primary);
   text-align: right;
   min-width: 0;
@@ -626,11 +677,16 @@ body {
 
 /* ==================== 表格 ==================== */
 
+/*
+  字号与行高对齐 LiveGBS：表头 14px、正文 13.5px、行高 44px。
+  早先表头只有 11.5px、行高 36px，一屏只能放下十几行且看着局促；
+  10 行 × 44px 正好铺满一屏的工作区，信息密度与可读性平衡最好。
+*/
 .el-table {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   --el-table-border-color: var(--line-soft);
   --el-table-header-bg-color: transparent;
-  --el-table-header-text-color: var(--ink-500);
+  --el-table-header-text-color: var(--ink-600);
   --el-table-row-hover-bg-color: #f6f8fc;
   --el-table-text-color: var(--ink-800);
 }
@@ -638,17 +694,18 @@ body {
 /* 表头：小号灰字 + 一条底线，去掉整块灰底 */
 .el-table th.el-table__cell {
   background: transparent !important;
-  height: 34px;
+  height: 44px;
   padding: 0;
   font-weight: 600;
-  font-size: 11.5px;
-  letter-spacing: 0.02em;
-  color: var(--ink-500);
+  font-size: var(--fs-md);
+  letter-spacing: 0.01em;
+  color: var(--ink-600);
   border-bottom: 1px solid var(--line) !important;
 }
-
 .el-table th.el-table__cell .cell {
   padding: 0 var(--sp-3);
+  /* 表头不换行：「通道数」这类标题在窄列里换行会把表头撑成两行 */
+  white-space: nowrap;
 }
 
 .el-table td.el-table__cell {
@@ -659,7 +716,7 @@ body {
 
 .el-table .cell {
   padding: 0 var(--sp-3);
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 .el-table__inner-wrapper::before {
@@ -669,16 +726,16 @@ body {
 /* 表格里的输入框/开关：压到行高以内，避免表格看起来像表单 */
 .el-table .el-input__wrapper,
 .el-table .el-select__wrapper {
-  min-height: 26px;
+  min-height: 30px;
 }
 
 .el-table .el-input__inner,
 .el-table .el-select__placeholder {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .el-table .el-button.is-link {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .table-footer {
@@ -687,7 +744,7 @@ body {
   justify-content: flex-end;
   gap: var(--sp-3);
   margin-top: var(--sp-3);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -762,7 +819,7 @@ body {
 /* 筛选栏里的说明文字推到最右，作为"操作提示"而非表单标签 */
 .filter-bar-tip {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-tertiary);
 }
 
@@ -786,7 +843,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   line-height: 18px;
   white-space: nowrap;
@@ -815,7 +872,7 @@ body {
   background: var(--ink-50);
   border: 1px solid var(--line);
   color: var(--ink-600);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .badge.is-plain::before {
@@ -884,8 +941,8 @@ body {
   white-space: nowrap;
 }
 
-.text-xs { font-size: 11.5px; }
-.text-sm { font-size: 12px; }
+.text-xs { font-size: var(--fs-xs); }
+.text-sm { font-size: var(--fs-xs); }
 
 .mt-1 { margin-top: var(--sp-1); }
 .mt-2 { margin-top: var(--sp-2); }
@@ -914,18 +971,19 @@ body {
   font-weight: 500;
   border-radius: var(--r-sm);
   height: var(--control-h);
-  padding: 0 12px;
+  padding: 0 14px;
+  font-size: var(--fs-md);
   box-shadow: none;
 }
 
 .el-button--small {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 12px;
+  height: 30px;
+  padding: 0 11px;
+  font-size: var(--fs-sm);
 }
 
 .el-button--large {
-  height: 34px;
+  height: 36px;
 }
 
 /* 主按钮：实色，不做渐变和投影 */
@@ -966,6 +1024,7 @@ body {
   border-radius: var(--r-md);
   box-shadow: 0 0 0 1px var(--line) inset;
   background: var(--white);
+  font-size: var(--fs-md);
   transition: box-shadow 0.15s ease;
 }
 
@@ -1015,7 +1074,7 @@ body {
   margin: 0;
   border-bottom: 1px solid var(--line);
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
 }
 
 .el-dialog__body {
@@ -1032,7 +1091,7 @@ body {
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--line);
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   color: var(--text-primary);
 }
 
@@ -1042,7 +1101,7 @@ body {
 
 .el-tabs__item {
   font-weight: 500;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .el-tabs__nav-wrap::after {
@@ -1051,9 +1110,9 @@ body {
 }
 
 .el-pagination {
-  --el-pagination-font-size: 12.5px;
-  --el-pagination-button-height: 26px;
-  --el-pagination-button-width: 26px;
+  --el-pagination-font-size: var(--fs-md);
+  --el-pagination-button-height: 30px;
+  --el-pagination-button-width: 30px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1077,7 +1136,7 @@ body {
 
 .el-empty__description p {
   color: var(--text-tertiary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .el-empty {
@@ -1105,7 +1164,7 @@ body {
 }
 
 .el-message-box__title {
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 
@@ -1116,7 +1175,7 @@ body {
 
 .el-tree {
   --el-tree-node-hover-bg-color: var(--ink-50);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   background: transparent;
 }
 
@@ -1137,7 +1196,7 @@ body {
 }
 
 .el-dropdown-menu__item {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 
@@ -1148,14 +1207,14 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
 
 .top-readout .val {
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -1188,7 +1247,7 @@ body {
   background: var(--white);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--ink-700);
 }
 
@@ -1217,13 +1276,13 @@ body {
   margin-top: var(--sp-4);
   padding: 10px 0 4px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-400);
   border-top: 1px solid var(--line);
 }
 
 .app-footer .mono {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* ==================== 环形读数（参考站「通道信息」的甜甜圈） ==================== */
@@ -1286,7 +1345,7 @@ body {
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--ink-800);
   font-variant-numeric: tabular-nums;
@@ -1295,7 +1354,7 @@ body {
 /* 读数下方的说明：在线数 / 总数（参考站同款两行） */
 .gauge-caption {
   text-align: center;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   color: var(--ink-600);
 }
@@ -1341,13 +1400,13 @@ body {
 
 .mini-bar .bar-val {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--ink-700);
 }
 
 .mini-bar .bar-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-500);
   white-space: nowrap;
 }
@@ -1355,7 +1414,7 @@ body {
 /* 服务器信息 box 里的分组小标题 */
 .box-subtitle {
   padding: 0 var(--sp-4) 6px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--ink-400);
 }
 
@@ -1390,7 +1449,7 @@ body {
     display: none;
   }
   .page-title {
-    font-size: 16px;
+    font-size: var(--fs-lg);
   }
   .kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

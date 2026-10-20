@@ -401,7 +401,7 @@ async function toggleTalk() {
 }
 
 .preset-label {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -411,7 +411,7 @@ async function toggleTalk() {
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--ink-900);
   margin-bottom: 10px;

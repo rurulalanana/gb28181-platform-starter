@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">报警管理</h2>
@@ -33,7 +33,7 @@
         </el-form-item>
       </el-form>
 
-      <el-table v-loading="loading" :data="alarms" stripe>
+      <el-table v-loading="loading" :data="alarms" stripe table-layout="fixed">
         <el-table-column prop="alarmTime" label="时间" min-width="170" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
@@ -101,7 +101,7 @@ function priorityColor(p) {
 }
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 20,
+  pageSize: 10,
   load: () => load()
 })
 

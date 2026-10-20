@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <header class="page-header">
       <div class="page-title-group">
         <h2 class="page-title">操作日志</h2>
@@ -49,7 +49,7 @@
     </div>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="rows" stripe>
+      <el-table v-loading="loading" :data="rows" stripe table-layout="fixed">
         <el-table-column label="操作名称" width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.operationName" class="op-name">{{ row.operationName }}</span>
@@ -124,7 +124,7 @@ const query = reactive({ method: '', keyword: '', dateRange: null })
 const retainDays = 7
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 50,
+  pageSize: 10,
   load: () => load()
 })
 

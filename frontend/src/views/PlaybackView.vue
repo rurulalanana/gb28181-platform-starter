@@ -43,7 +43,7 @@
         </el-form-item>
       </el-form>
 
-      <el-table v-loading="searching" :data="records" stripe>
+      <el-table v-loading="searching" :data="records" stripe table-layout="fixed">
         <el-table-column label="文件名" min-width="240">
           <template #default="{ row }">
             <span class="mono">{{ shortName(row.filePath) }}</span>

@@ -16,7 +16,7 @@
     </header>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="users" stripe>
+      <el-table v-loading="loading" :data="users" stripe table-layout="fixed">
         <el-table-column prop="username" label="用户名" min-width="140" sortable>
           <template #default="{ row }"><span class="mono">{{ row.username }}</span></template>
         </el-table-column>
@@ -139,7 +139,7 @@ const resetTarget = ref(null)
 const newPassword = ref('')
 
 const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
-  pageSize: 20,
+  pageSize: 10,
   load: () => load()
 })
 
