@@ -31,7 +31,7 @@
       </el-button>
     </div>
 
-      <el-table v-loading="loading" :data="alarms" stripe table-layout="fixed">
+      <el-table ref="tableRef" v-loading="loading" :data="alarms" stripe table-layout="fixed">
         <el-table-column prop="alarmTime" label="时间" width="172" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
@@ -81,9 +81,14 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alarmApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
+import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
 const alarms = ref([])
+
+/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
+const tableRef = ref(null)
+useFillTableRows(tableRef, () => alarms.value.length)
 const loading = ref(false)
 const query = reactive({ priority: null, serial: '' })
 

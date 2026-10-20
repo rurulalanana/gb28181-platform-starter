@@ -126,6 +126,16 @@ CREATE INDEX IF NOT EXISTS idx_gb_channel_channel ON gb_channel (channel_id);
 CREATE INDEX IF NOT EXISTS idx_gb_channel_status ON gb_channel (status);
 CREATE INDEX IF NOT EXISTS idx_gb_channel_parent ON gb_channel (parent_id);
 
+-- 回填通道序号：GB/T 28181—2016 6.1 规定 20 位国标编码末 3 位为通道序号
+-- （如 ...0001 → 1、...0102 → 102），与 LiveGBS 等平台的显示一致。
+-- 目录应答里没有独立的「通道号」字段，早先这一列恒为 0。
+-- 每次启动回填一次：老通道不会等到设备重新注册才更新
+-- （级联下级平台的目录推送是增量的，可能很久不推）。
+UPDATE gb_channel
+SET channel_no = COALESCE(NULLIF(regexp_replace(right(channel_id, 3), '\D', '', 'g'), '')::int, 0)
+WHERE channel_no = 0
+  AND channel_id ~ '[0-9]{3}$';
+
 -- -------------------- 直播流 --------------------
 
 CREATE TABLE IF NOT EXISTS gb_stream (

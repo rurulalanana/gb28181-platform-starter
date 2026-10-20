@@ -14,7 +14,7 @@
 
     <el-card shadow="never">
 
-      <el-table v-loading="loading" :data="list" stripe table-layout="fixed">
+      <el-table ref="tableRef" v-loading="loading" :data="list" stripe table-layout="fixed">
         <el-table-column label="名称" width="132">
           <template #default="{ row }">{{ row.name || '—' }}</template>
         </el-table-column>
@@ -195,9 +195,14 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cascadeApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
+import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
 const list = ref([])
+
+/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
+const tableRef = ref(null)
+useFillTableRows(tableRef, () => list.value.length)
 const loading = ref(false)
 const saving = ref(false)
 const editDialog = ref(false)

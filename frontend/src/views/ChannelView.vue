@@ -34,7 +34,7 @@
         通道号 / 通道国标编号 / 通道名称 / 在线状态 / 按需直播 / 云端录像 /
         子节点数 / 厂家 / 云台类型 / 位置 / 更新时间 / 创建时间 / 操作
       -->
-      <el-table v-loading="loading" :data="channels" stripe table-layout="fixed">
+      <el-table ref="tableRef" v-loading="loading" :data="channels" stripe table-layout="fixed">
         <el-table-column prop="channel" label="通道号" min-width="64" align="center" sortable>
           <template #default="{ row }">
             <span class="text-muted">{{ row.channel ?? '—' }}</span>
@@ -136,25 +136,35 @@
         <el-table-column label="云台类型" min-width="108" align="center">
           <template #default="{ row }">
             <!--
-              可直接在列表里改：设备普遍不报或恒报 0（未知），
-              而现场实际支持云台时需要在预览弹窗里用云台面板，
-              所以把这里做成可编辑入口（改完立刻影响预览弹窗是否显示云台）。
+              与设备管理的「流传输模式」保持一致：文字 + 箭头，点开是下拉菜单。
+              用 el-select 的话一屏几十行全是灰框输入框，很脏。
+
+              【坑】el-dropdown 在表格里多行复用时，@command 只回传被选项的值，
+              不知道自己属于哪一行（实测点第 5 行的菜单，改的却是第 1 行）。
+              解决：命令值带上通道编码，由 handlePtzCommand 拆开去对应行上应用。
             -->
-            <el-select
-              :model-value="row.ptzType ?? 0"
-              :loading="ptzPending.has(row.id)"
+            <el-dropdown
+              trigger="click"
               :disabled="ptzPending.has(row.id)"
-              size="small"
-              style="width: 108px"
-              @change="(val) => changePtzType(row, val)"
+              @command="handlePtzCommand"
             >
-              <el-option
-                v-for="(label, value) in PTZ_TYPES"
-                :key="value"
-                :label="label"
-                :value="Number(value)"
-              />
-            </el-select>
+              <span class="ptz-link" :class="{ 'is-busy': ptzPending.has(row.id) }">
+                {{ ptzText(row) }}
+                <el-icon class="ptz-arrow"><ArrowDown /></el-icon>
+              </span>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="(label, value) in PTZ_TYPES"
+                    :key="value"
+                    :command="row.id + '|' + value"
+                    :disabled="Number(value) === (row.ptzType ?? 0)"
+                  >
+                    {{ label }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
 
@@ -180,7 +190,11 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" min-width="252" align="center" class-name="op-col">
+        <!--
+          操作列固定在右侧：表格列多（参考站同款 13 列）必然超宽，
+          不固定的话横向滚动才能看到按钮，操作入口等于藏起来了。
+        -->
+        <el-table-column label="操作" min-width="252" align="center" class-name="op-col" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="preview(row)">
               <el-icon><VideoPlay /></el-icon> 播放
@@ -319,6 +333,7 @@ import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
+import { useFillTableRows } from '@/composables/useFillTableRows'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TablePager from '@/components/TablePager.vue'
 import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
@@ -331,6 +346,10 @@ const route = useRoute()
 const channels = ref([])
 const loading = ref(false)
 const query = reactive({ q: '', online: null, serial: '' })
+
+/** 行高随表体可用高度自适应，10 条数据正好铺满表格区。 */
+const tableRef = ref(null)
+useFillTableRows(tableRef, () => channels.value.length)
 
 /** 正在切换云端录像开关的通道编码集合（用于开关 loading / 防重复点击）。 */
 const recordPending = reactive(new Set())
@@ -374,6 +393,26 @@ const renameValue = ref('')
  * <p>与后端 {@code gb_channel.ptz_type} 的取值一致。
  */
 const PTZ_TYPES = { 0: '未知', 1: '球机', 2: '半球', 3: '固定枪机', 4: '遥控枪机' }
+
+/** 云台类型显示文案。 */
+function ptzText(row) {
+  return PTZ_TYPES[row.ptzType ?? 0] || '未知'
+}
+
+/**
+ * 处理云台类型下拉菜单的命令。
+ *
+ * <p>命令值形如「通道编码|类型」，因为 el-dropdown 不知道命令来自哪一行。
+ */
+function handlePtzCommand(cmd) {
+  const sep = cmd.lastIndexOf('|')
+  if (sep < 0) return
+  const channelId = cmd.slice(0, sep)
+  const type = Number(cmd.slice(sep + 1))
+  const row = channels.value.find((c) => c.id === channelId)
+  if (!row) return
+  changePtzType(row, type)
+}
 
 /**
  * 该类型是否支持云台控制。
@@ -515,8 +554,11 @@ function closePreview() {
 /**
  * 修改通道的云台类型。
  *
- * <p>{@code v-model} 已先行改值：失败时必须回滚，否则下拉显示与后端不一致。
- * 另外后端已改为「目录同步时设备报 0 不覆盖」，所以这里改的值不会被设备
+ * <p>下拉菜单不是 v-model，值不会自动改到行对象上，
+ * 所以成功后要显式写回，否则列表显示的还是旧值。
+ * 失败时回滚，保证显示与后端一致。
+ *
+ * <p>另外后端已改为「目录同步时设备报 0 不覆盖」，所以这里改的值不会被设备
  * 下一次注册冲回未知。
  */
 async function changePtzType(row, type) {
@@ -528,6 +570,7 @@ async function changePtzType(row, type) {
       code: row.id,
       ptz_type: type
     })
+    row.ptzType = type
     ElMessage.success(`云台类型已改为「${PTZ_TYPES[type] ?? type}」`)
   } catch (e) {
     row.ptzType = previous
@@ -741,6 +784,29 @@ onUnmounted(() => player.stop())
 /* 国标编号：20 位等宽字符，用小一号字才塞得进 168px 的列 */
 .code-sm {
   font-size: var(--fs-xs);
+}
+
+/* 云台类型：文字 + 箭头，点开是下拉菜单（与设备管理的流传输模式一致） */
+.ptz-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: var(--accent-ink);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  user-select: none;
+}
+.ptz-link:hover {
+  text-decoration: underline;
+}
+.ptz-link.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.ptz-arrow {
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 
 /* 名称按需编辑：平时是文本，点击才换成输入框 */

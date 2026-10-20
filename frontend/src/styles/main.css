@@ -263,9 +263,9 @@ body {
 }
 
 /*
-  卡片主体：表格按内容自适应，分页条被推到最底部。
-  flex:0 1 auto 而不是 1 —— 让表格只占内容所需高度，
-  多出来的空间落在分页条上方（页面背景），而不是表格内部留白。
+  卡片主体：表格吃掉除分页条外的全部高度，分页条固定贴在卡片底部。
+  卡片本身已被上面规则拉满，表格若只按内容高度（fit-content），
+  页面下方就会剩一大片空白 —— 表格区必须跟着卡片一起撑满。
 */
 .page.is-fill > .el-card > .el-card__body {
   flex: 1;
@@ -275,9 +275,18 @@ body {
   overflow: hidden;
 }
 
+/*
+  表格撑满卡片剩余高度。
+  height:0 是关键 —— Element 的 .el-table 默认 height:fit-content，
+  在 flex 列容器里会被内容顶开；height:0 + flex:1 才能让 flex-basis 归零、
+  纯粹按剩余空间分配，表格才会真正吃满可用高度。
+  内部结构（inner-wrapper 是 height:100% 的 flex 列，body-wrapper 是 flex:1）
+  会自动把多出来的高度分给表体，表头仍固定在顶部。
+*/
 .page.is-fill > .el-card > .el-card__body > .el-table {
-  flex: 0 1 auto;
+  flex: 1;
   min-height: 0;
+  height: 0;
 }
 
 /* 表格内部滚动时，表头保持吸顶 */

@@ -160,6 +160,7 @@ public class DeviceService {
         virtual.setName(device.displayName());
         virtual.setStatus(device.getStatus());
         virtual.setPtzType(device.getPtzType());
+        virtual.setChannelNo(channelNoOf(device.getDeviceId()));
         return virtual;
     }
 
@@ -582,6 +583,7 @@ public class DeviceService {
         }
         channel.setDeviceId(device.getDeviceId());
         channel.setName(CharsetFix.repair(item.getName()));
+        channel.setChannelNo(channelNoOf(item.getDeviceId()));
         channel.setManufacturer(CharsetFix.repair(item.getManufacturer()));
         channel.setModel(CharsetFix.repair(item.getModel()));
         channel.setOwner(null);
@@ -627,6 +629,28 @@ public class DeviceService {
             channelMapper.insert(channel);
         } else {
             channelMapper.updateById(channel);
+        }
+    }
+
+    /**
+     * 从通道国标编号推导通道序号。
+     *
+     * <p>GB/T 28181—2016 6.1 规定 20 位国标编码的末 7 位为序号，
+     * 设备侧习惯把其中的末 3 位当作「通道号」展示（如 {@code ...0001} → 1、
+     * {@code ...0102} → 102），与 LiveGBS 等平台的显示一致。
+     *
+     * <p>目录应答里没有独立的「通道号」字段，早先这一列恒为 0。
+     * 取不到数字时返回 0，不抛异常 —— 通道编码可能被自定义成非数字串。
+     */
+    private static int channelNoOf(String channelId) {
+        if (channelId == null || channelId.length() < 3) {
+            return 0;
+        }
+        String tail = channelId.substring(channelId.length() - 3);
+        try {
+            return Integer.parseInt(tail);
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 

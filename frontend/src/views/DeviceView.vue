@@ -40,7 +40,7 @@
         默认的 fit 布局会测量每列内容最大宽度，行内编辑的 input 一出现
         （或某个操作按钮加载态变化），列宽就会重排，整张表跟着跳。
       -->
-      <el-table v-loading="loading" :data="devices" stripe table-layout="fixed">
+      <el-table ref="tableRef" v-loading="loading" :data="devices" stripe table-layout="fixed">
         <el-table-column prop="id" label="设备国标编号" width="180" fixed="left" sortable show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
@@ -255,6 +255,7 @@ import { useRouter } from 'vue-router'
 import { deviceApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
+import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
@@ -262,6 +263,10 @@ const auth = useAuthStore()
 const router = useRouter()
 
 const devices = ref([])
+
+/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
+const tableRef = ref(null)
+useFillTableRows(tableRef, () => devices.value.length)
 const loading = ref(false)
 const busy = ref('')
 const saving = ref(false)

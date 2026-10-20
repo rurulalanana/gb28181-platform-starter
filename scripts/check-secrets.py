@@ -62,6 +62,12 @@ def is_placeholder(value: str) -> bool:
     # *** / xxx 之类的掩码
     if set(v) <= {"*", "x", "X", "#"}:
         return True
+    # 尖括号占位：<token>、<your-password>（多见于文档与 SQL 注释）
+    if re.search(r"<[^>\s][^>]*>", v):
+        return True
+    # 含中文：多半是注释/说明文字（SQL 的 COMMENT ON、文档示例），不是凭据字面量
+    if re.search(r"[\u4e00-\u9fff]", v):
+        return True
     # 明显是变量名/占位键（全大写下划线，如 DB_PASSWORD、GB_DB_PASSWORD）
     if re.fullmatch(r"[A-Z_][A-Z0-9_]*", v):
         # 例外：AKIAIOSFODNN7EXAMPLE 这类全大写但混有数字的，是 AWS 密钥的典型格式
@@ -147,7 +153,10 @@ def main() -> int:
                 continue
             # 注释行、文档示例行不算
             stripped = line.strip()
-            if stripped.startswith(("#", "//", "*", "<!--")):
+            if stripped.startswith(("#", "//", "*", "<!--", "--", "/*")):
+                continue
+            # SQL 的 COMMENT ON ... IS '说明文字'：整行都是注释
+            if re.match(r"(?i)comment\s+on\b", stripped):
                 continue
             problems.append(f"{rel}:{i}: {stripped[:110]}")
 

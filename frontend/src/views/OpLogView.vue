@@ -40,7 +40,7 @@
     </div>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="rows" stripe table-layout="fixed">
+      <el-table ref="tableRef" v-loading="loading" :data="rows" stripe table-layout="fixed">
         <el-table-column label="操作名称" width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.operationName" class="op-name">{{ row.operationName }}</span>
@@ -107,8 +107,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { opLogApi } from '@/api'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
+import { useFillTableRows } from '@/composables/useFillTableRows'
 
 const rows = ref([])
+
+/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
+const tableRef = ref(null)
+useFillTableRows(tableRef, () => rows.value.length)
 const loading = ref(false)
 const query = reactive({ method: '', keyword: '', dateRange: null })
 /** 保留天数（与后端 gb28181.starter.oplog-retain-days 对应，仅用于页面提示）。 */
