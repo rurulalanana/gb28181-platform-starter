@@ -1,19 +1,16 @@
 <template>
   <div>
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">用户管理</h2>
-        <p class="page-subtitle">平台账号、角色与密码管理</p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load">
+
+    <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
+    <div class="filter-bar">
+      <span class="filter-bar-spacer" />
+      <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button size="small" type="primary" @click="openEdit(null)">
+      </el-button>
+      <el-button size="small" type="primary" @click="openEdit(null)">
         <el-icon><Plus /></el-icon> 新增用户
-        </el-button>
-      </div>
-    </header>
+      </el-button>
+    </div>
 
     <el-card shadow="never">
       <el-table v-loading="loading" :data="users" stripe table-layout="fixed">

@@ -288,42 +288,6 @@ body {
   background: var(--bg-surface);
 }
 
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  flex-wrap: wrap;
-}
-
-.page-title-group {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.page-title {
-  margin: 0;
-  font-size: var(--fs-xl);
-  font-weight: 600;
-  letter-spacing: -0.1px;
-  color: var(--text-primary);
-  line-height: 1.35;
-}
-
-.page-subtitle {
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
-
-.page-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-}
-
 /* ==================== 面板（替代 Element 卡片外观） ==================== */
 
 .el-card {
@@ -1487,45 +1451,7 @@ body {
   .el-card__body {
     padding: var(--sp-3);
   }
-  .page-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .page-actions {
-    justify-content: flex-start;
-  }
-  .filter-bar {
-    padding: 0 0 var(--sp-3);
-  }
-  .filter-bar .el-input,
-  .filter-bar .el-select {
-    width: 100% !important;
-  }
-  .filter-bar-spacer,
-  .filter-bar-tip {
-    display: none;
-  }
-  .page-title {
-    font-size: var(--fs-lg);
-  }
-  .kpi-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .kpi {
-    padding: var(--sp-3) var(--sp-4);
-  }
-  .kpi + .kpi {
-    box-shadow: none;
-  }
-  .kpi-value {
-    font-size: 22px;
-  }
-  .quick-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* 打印：去掉一切浮层装饰 */
+  /* 打印：去掉一切浮层装饰 */
 @media print {
   .el-card,
   .kpi-grid,

@@ -1,36 +1,34 @@
 <template>
   <div class="page live-page is-fill">
+
+    <!-- 工具条：分屏/协议/轮播/全屏，与其它页保持同一套工具条 -->
+    <div class="filter-bar">
+      <span class="filter-bar-spacer" />
+      <el-radio-group v-model="gridSize" size="small">
+        <el-radio-button :value="1">1</el-radio-button>
+        <el-radio-button :value="4">4</el-radio-button>
+        <el-radio-button :value="6">6</el-radio-button>
+        <el-radio-button :value="9">9</el-radio-button>
+        <el-radio-button :value="16">16</el-radio-button>
+      </el-radio-group>
+      <el-select v-model="proto" style="width: 158px" size="small" @change="onProtoChange">
+        <el-option label="WebSocket-FLV" value="wsflv" />
+        <el-option label="WebRTC（低延迟）" value="webrtc" />
+      </el-select>
+      <el-button
+        size="small"
+        class="rotate-btn"
+        :class="{ 'is-on': rotating }"
+        title="选择轮巡播放通道"
+        @click="rotating ? stopRotate() : openRotateDialog()"
+      >
+        <el-icon><RefreshRight /></el-icon> {{ rotating ? '停止轮播' : '轮播' }}
+      </el-button>
+      <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
+        <el-icon><FullScreen /></el-icon> 全屏
+      </el-button>
+    </div>
     <!-- 页头 -->
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">实时预览</h2>
-      </div>
-      <div class="page-actions">
-        <el-radio-group v-model="gridSize" size="small">
-          <el-radio-button :value="1">1</el-radio-button>
-          <el-radio-button :value="4">4</el-radio-button>
-          <el-radio-button :value="6">6</el-radio-button>
-          <el-radio-button :value="9">9</el-radio-button>
-          <el-radio-button :value="16">16</el-radio-button>
-        </el-radio-group>
-        <el-select v-model="proto" style="width: 158px" size="small" @change="onProtoChange">
-          <el-option label="WebSocket-FLV" value="wsflv" />
-          <el-option label="WebRTC（低延迟）" value="webrtc" />
-        </el-select>
-        <el-button
-          size="small"
-          class="rotate-btn"
-          :class="{ 'is-on': rotating }"
-          title="选择轮巡播放通道"
-          @click="rotating ? stopRotate() : openRotateDialog()"
-        >
-          <el-icon><RefreshRight /></el-icon> {{ rotating ? '停止轮播' : '轮播' }}
-        </el-button>
-        <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
-          <el-icon><FullScreen /></el-icon> 全屏
-        </el-button>
-      </div>
-    </header>
 
     <!-- 主体：设备树 + 视频墙 + 云台 -->
     <div class="live-body">
@@ -833,7 +831,7 @@ onUnmounted(() => {
 }
 
 /* 分屏切换（1/4/6/9/16）压到与其它控件同高，避免顶栏高低不齐 */
-.page-actions :deep(.el-radio-button__inner) {
+.filter-bar :deep(.el-radio-button__inner) {
   height: 26px;
   line-height: 24px;
   min-width: 32px;
@@ -844,11 +842,11 @@ onUnmounted(() => {
   border-color: var(--line);
 }
 
-.page-actions :deep(.el-radio-button:first-child .el-radio-button__inner) {
+.filter-bar :deep(.el-radio-button:first-child .el-radio-button__inner) {
   border-radius: var(--r-md) 0 0 var(--r-md);
 }
 
-.page-actions :deep(.el-radio-button:last-child .el-radio-button__inner) {
+.filter-bar :deep(.el-radio-button:last-child .el-radio-button__inner) {
   border-radius: 0 var(--r-md) var(--r-md) 0;
 }
 

@@ -1,47 +1,36 @@
 <template>
   <div class="page">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">设备录像</h2>
-        <p class="page-subtitle">选择通道后按时间段检索设备侧录像，支持回放与下载</p>
-      </div>
-    </header>
 
     <el-card shadow="never">
-      <el-form :inline="true" class="search-form">
-        <el-form-item label="通道">
-          <el-select
-            v-model="query.channelKey"
-            placeholder="选择通道"
-            filterable
-            style="width: 260px"
-            @change="onChannelChange"
-          >
-            <el-option
-              v-for="c in channels"
-              :key="c.deviceId + '/' + c.id"
-              :label="`${c.customName || c.name || c.id}${c.deviceOnline ? '' : '（离线）'}`"
-              :value="c.deviceId + '/' + c.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="时间范围">
-          <el-date-picker
-            v-model="range"
-            type="datetimerange"
-            range-separator="至"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            style="width: 380px"
-            value-format="YYYY-MM-DD HH:mm:ss"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="searching" @click="search">
-            <el-icon><Search /></el-icon> 检索
-          </el-button>
-        </el-form-item>
-      </el-form>
+    <!-- 工具条：筛选条件在左，一行放完 -->
+    <div class="filter-bar">
+      <el-select
+        v-model="query.channelKey"
+        placeholder="选择通道"
+        filterable
+        style="width: 260px"
+        @change="onChannelChange"
+      >
+        <el-option
+          v-for="c in channels"
+          :key="c.deviceId + '/' + c.id"
+          :label="`${c.customName || c.name || c.id}${c.deviceOnline ? '' : '（离线）'}`"
+          :value="c.deviceId + '/' + c.id"
+        />
+      </el-select>
+      <el-date-picker
+        v-model="range"
+        type="datetimerange"
+        range-separator="至"
+        start-placeholder="开始时间"
+        end-placeholder="结束时间"
+        style="width: 380px"
+        value-format="YYYY-MM-DD HH:mm:ss"
+      />
+      <el-button type="primary" :loading="searching" @click="search">
+        <el-icon><Search /></el-icon> 检索
+      </el-button>
+    </div>
 
       <el-table v-loading="searching" :data="records" stripe table-layout="fixed">
         <el-table-column label="文件名" min-width="240">

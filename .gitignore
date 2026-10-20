@@ -15,3 +15,15 @@ npm-debug.log*
 
 # 本机 frp 启动脚本（含本地绝对路径，不入库）
 frp.bat
+
+# ============ 本地敏感配置（严禁入库） ============
+# 数据库口令、密钥等一律走环境变量（GB_DB_PASSWORD / GB_DB_URL ...），
+# 本地覆盖写进下面这些文件，它们已在 .gitignore 中。
+# 模板见 src/main/resources/application.example.yml
+.env
+.env.*
+!.env.example
+src/main/resources/application-local.yml
+src/main/resources/application-local.yaml
+src/main/resources/application-*.local.yml
+src/main/resources/application-*.local.yaml

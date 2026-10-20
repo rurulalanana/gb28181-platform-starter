@@ -8,9 +8,12 @@ spring:
   jackson:
     default-property-inclusion: non_null
   datasource:
-    url: jdbc:postgresql://160.202.254.65:25432/gb28181
-    username: postgres
-    password: ***REMOVED_DB_PASSWORD***
+    # 【不要把密码写在这里】
+    # 本文件会被打进 jar 并提交到 Git 仓库，写死等于公开凭据。
+    # 密码一律通过环境变量注入；下方默认值只留给本地开发。
+    url: ${GB_DB_URL:jdbc:postgresql://160.202.254.65:25432/gb28181}
+    username: ${GB_DB_USERNAME:postgres}
+    password: ${GB_DB_PASSWORD:}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 10

@@ -1,20 +1,11 @@
 <template>
   <div class="page is-fill">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">设备管理</h2>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load">
-          <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button size="small" title="导出设备列表（CSV）" @click="exportCsv">
-          <el-icon><Download /></el-icon> 导出
-        </el-button>
-      </div>
-    </header>
 
-    <!-- 筛选栏 -->
+    <!--
+      工具条：筛选条件在左，操作按钮在右，一行放完。
+      早先分成「页头放刷新/导出」+「下面一条筛选栏」两行，
+      白白多占一行竖向空间，且页头与筛选栏离得远，操作与条件不在同一视觉区。
+    -->
     <div class="filter-bar">
       <el-input
         v-model="query.q"
@@ -33,6 +24,13 @@
         <el-icon><Search /></el-icon> 查询
       </el-button>
       <el-button @click="resetQuery">重置</el-button>
+      <span class="filter-bar-spacer" />
+      <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+      </el-button>
+      <el-button size="small" title="导出设备列表（CSV）" @click="exportCsv">
+        <el-icon><Download /></el-icon> 导出
+      </el-button>
     </div>
 
     <el-card shadow="never">

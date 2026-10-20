@@ -1,37 +1,35 @@
 <template>
   <div class="page is-fill">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">报警管理</h2>
-        <p class="page-subtitle">设备上报的告警事件，按级别与时间检索处理</p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load">
-        <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button size="small" type="danger" plain @click="clearAll">
-        <el-icon><Delete /></el-icon> 清空报警
-        </el-button>
-      </div>
-    </header>
 
     <el-card shadow="never">
-      <el-form :inline="true" class="search-form">
-        <el-form-item label="报警级别">
-          <el-select v-model="query.priority" placeholder="全部级别" clearable style="width: 160px">
-            <el-option label="一级（紧急）" value="1" />
-            <el-option label="二级（重要）" value="2" />
-            <el-option label="三级（一般）" value="3" />
-            <el-option label="四级（提示）" value="4" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="设备编码">
-          <el-input v-model="query.serial" placeholder="设备编码" clearable style="width: 200px" />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="search">查询</el-button>
-        </el-form-item>
-      </el-form>
+    <!-- 工具条：筛选条件在左，操作按钮在右，一行放完 -->
+    <div class="filter-bar">
+      <el-select v-model="query.priority" placeholder="全部级别" clearable style="width: 160px">
+        <el-option label="一级（紧急）" value="1" />
+        <el-option label="二级（重要）" value="2" />
+        <el-option label="三级（一般）" value="3" />
+        <el-option label="四级（提示）" value="4" />
+      </el-select>
+      <el-input
+        v-model="query.serial"
+        placeholder="设备编码"
+        clearable
+        style="width: 200px"
+        @keyup.enter="search"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-button type="primary" @click="search">
+        <el-icon><Search /></el-icon> 查询
+      </el-button>
+      <span class="filter-bar-spacer" />
+      <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+      </el-button>
+      <el-button size="small" type="danger" plain @click="clearAll">
+        <el-icon><Delete /></el-icon> 清空报警
+      </el-button>
+    </div>
 
       <el-table v-loading="loading" :data="alarms" stripe table-layout="fixed">
         <el-table-column prop="alarmTime" label="时间" width="172" sortable>

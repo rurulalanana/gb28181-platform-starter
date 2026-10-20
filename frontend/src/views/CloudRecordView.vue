@@ -1,61 +1,50 @@
 <template>
   <div>
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">云端录像</h2>
-        <p class="page-subtitle">平台侧录制归档与时间轴检索</p>
-      </div>
-      <div class="page-actions">
-        <el-radio-group v-model="viewMode" size="small">
-          <el-radio-button value="list">列表视图</el-radio-button>
-          <el-radio-button value="timeline">时间轴视图</el-radio-button>
-        </el-radio-group>
-      </div>
-    </header>
 
     <el-card shadow="never">
-      <el-form :inline="true" class="search-form">
-        <el-form-item label="通道">
-          <el-select
-            v-model="selectedChannel"
-            placeholder="选择有录像的通道"
-            filterable
-            style="width: 300px"
-            :loading="loadingChannels"
-            @change="onChannelChange"
-          >
-            <el-option
-              v-for="opt in channelOptions"
-              :key="opt.value"
-              :label="opt.label"
-              :value="opt.value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="日期">
-          <el-date-picker
-            v-model="period"
-            type="date"
-            placeholder="选择日期"
-            value-format="YYYY-MM-DD"
-            style="width: 160px"
-            @change="loadDaily"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="loadingDaily" @click="loadDaily">
-            <el-icon><Search /></el-icon> 查询
-          </el-button>
-          <el-button
-            type="danger"
-            plain
-            :disabled="!selectedChannel || !records.length"
-            @click="removeDaily"
-          >
-            <el-icon><Delete /></el-icon> 删除当日
-          </el-button>
-        </el-form-item>
-      </el-form>
+    <!-- 工具条：筛选条件在左，视图切换与操作在右，一行放完 -->
+    <div class="filter-bar">
+      <el-select
+        v-model="selectedChannel"
+        placeholder="选择有录像的通道"
+        filterable
+        style="width: 300px"
+        :loading="loadingChannels"
+        @change="onChannelChange"
+      >
+        <el-option
+          v-for="opt in channelOptions"
+          :key="opt.value"
+          :label="opt.label"
+          :value="opt.value"
+        />
+      </el-select>
+      <el-date-picker
+        v-model="period"
+        type="date"
+        placeholder="选择日期"
+        value-format="YYYY-MM-DD"
+        style="width: 160px"
+        @change="loadDaily"
+      />
+      <el-button type="primary" :loading="loadingDaily" @click="loadDaily">
+        <el-icon><Search /></el-icon> 查询
+      </el-button>
+      <span class="filter-bar-spacer" />
+      <el-radio-group v-model="viewMode" size="small">
+        <el-radio-button value="list">列表视图</el-radio-button>
+        <el-radio-button value="timeline">时间轴视图</el-radio-button>
+      </el-radio-group>
+      <el-button
+        type="danger"
+        plain
+        size="small"
+        :disabled="!selectedChannel || !records.length"
+        @click="removeDaily"
+      >
+        <el-icon><Delete /></el-icon> 删除当日
+      </el-button>
+    </div>
 
       <!-- 本月有录像的日子 -->
       <div v-if="monthFlags" class="month-flags">

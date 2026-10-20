@@ -1,16 +1,13 @@
 <template>
   <div class="page">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">系统设置</h2>
-        <p class="page-subtitle">平台运行参数、服务端口与账号安全配置</p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" @click="loadServer">
-          <el-icon><Refresh /></el-icon> 刷新信息
-        </el-button>
-      </div>
-    </header>
+
+    <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
+    <div class="filter-bar">
+      <span class="filter-bar-spacer" />
+      <el-button size="small" @click="loadServer">
+        <el-icon><Refresh /></el-icon> 刷新信息
+      </el-button>
+    </div>
 
     <el-row :gutter="18">
       <!-- 服务器信息 -->

@@ -1,21 +1,5 @@
 <template>
   <div class="page is-fill">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">操作日志</h2>
-        <p class="page-subtitle">
-          记录接口调用：方式、资源路径、远端地址、结果与用时（保留 {{ retainDays }} 天，自动清理）
-        </p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load">
-          <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button size="small" type="danger" plain :disabled="!pager.total" @click="clearAll">
-          <el-icon><Delete /></el-icon> 清空
-        </el-button>
-      </div>
-    </header>
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
@@ -45,6 +29,13 @@
       </el-input>
       <el-button type="primary" @click="search">
         <el-icon><Search /></el-icon> 查询
+      </el-button>
+      <span class="filter-bar-spacer" />
+      <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+      </el-button>
+      <el-button size="small" type="danger" plain :disabled="!pager.total" @click="clearAll">
+        <el-icon><Delete /></el-icon> 清空
       </el-button>
     </div>
 

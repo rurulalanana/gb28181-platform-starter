@@ -1,45 +1,33 @@
 <template>
   <div class="page is-fill">
-    <header class="page-header">
-      <div class="page-title-group">
-        <h2 class="page-title">通道管理</h2>
-        <p class="page-subtitle">共 {{ pager.total ?? 0 }} 路通道</p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="loading" @click="load">
-        <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-      </div>
-    </header>
 
     <el-card shadow="never">
-      <el-form :inline="true" class="search-form">
-        <el-form-item label="搜索">
-          <el-input
-            v-model="query.q"
-            placeholder="通道编码 / 名称"
-            clearable
-            style="width: 220px"
-            @keyup.enter="search"
-          >
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-        </el-form-item>
-        <el-form-item label="状态">
-          <el-select v-model="query.online" placeholder="全部" clearable style="width: 130px">
-            <el-option label="在线" :value="true" />
-            <el-option label="离线" :value="false" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="query.serial" label="设备">
-          <el-tag closable type="info" @close="clearSerialFilter">
-            <span class="mono">{{ query.serial }}</span>
-          </el-tag>
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="search">查询</el-button>
-        </el-form-item>
-      </el-form>
+    <!-- 工具条：筛选条件在左，操作按钮在右，一行放完 -->
+    <div class="filter-bar">
+      <el-input
+        v-model="query.q"
+        placeholder="通道编码 / 名称"
+        clearable
+        style="width: 220px"
+        @keyup.enter="search"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-select v-model="query.online" placeholder="全部状态" clearable style="width: 130px">
+        <el-option label="在线" :value="true" />
+        <el-option label="离线" :value="false" />
+      </el-select>
+      <el-tag v-if="query.serial" closable type="info" @close="clearSerialFilter">
+        <span class="mono">{{ query.serial }}</span>
+      </el-tag>
+      <el-button type="primary" @click="search">
+        <el-icon><Search /></el-icon> 查询
+      </el-button>
+      <span class="filter-bar-spacer" />
+      <el-button size="small" :loading="loading" @click="load">
+        <el-icon><Refresh /></el-icon> 刷新
+      </el-button>
+    </div>
 
       <el-table v-loading="loading" :data="channels" stripe table-layout="fixed">
         <el-table-column prop="id" label="通道编码" width="196" sortable>
