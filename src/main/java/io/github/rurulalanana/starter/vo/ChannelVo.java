@@ -93,6 +93,12 @@ public class ChannelVo {
     /** 子节点数。 */
     private Integer subCount;
 
+    /** 最近更新时间（yyyy-MM-dd HH:mm:ss）。 */
+    private String updatedAt;
+
+    /** 记录创建时间（yyyy-MM-dd HH:mm:ss）。 */
+    private String createdAt;
+
     /** 当前流 ID，非空表示正在直播。 */
     private String streamId;
 

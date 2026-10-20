@@ -46,6 +46,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -84,6 +86,9 @@ public class DeviceController {
     private final ChannelRecordPolicy recordPolicy;
     private final GbDeviceGroupMapper groupMapper;
     private final Gb28181Properties props;
+
+    /** 列表时间字段统一格式。 */
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // ==================== 设备 ====================
 
@@ -1006,6 +1011,8 @@ public class DeviceController {
         vo.setSubCount(0);
         vo.setStreamId(c.getStreamId());
         vo.setNumOutputs(c.getStreamId() == null ? 0 : 1);
+        vo.setUpdatedAt(formatTime(c.getUpdateTime()));
+        vo.setCreatedAt(formatTime(c.getCreateTime()));
         // 正在直播时附带播放地址，前端可直接取用
         if (c.getStreamId() != null && !c.getStreamId().isBlank()) {
             // 用 (设备编码, 通道编码) 精确定位：通道编码跨设备可重复
@@ -1020,6 +1027,11 @@ public class DeviceController {
             }
         }
         return vo;
+    }
+
+    /** 时间格式化，null 安全。 */
+    private static String formatTime(LocalDateTime time) {
+        return time == null ? null : TIME_FORMATTER.format(time);
     }
 
     private List<TreeNodeVo> buildGroupLevel(String parentCode,
