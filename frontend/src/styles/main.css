@@ -234,9 +234,10 @@ body {
 
 /*
   列表页通用：铺满内容区高度。
-  表格页（设备/通道/报警等）加 is-fill 后，卡片会吃掉剩余高度，
-  10 行 × 44px 正好占满一屏；行数更多时表格内部滚动，
-  页面本身不出现外层滚动条（页面头部与分页条始终可见）。
+  表格页（设备/通道/报警等）加 is-fill 后：
+    - 卡片吃掉剩余高度，分页条始终贴在卡片底部
+    - 表格自身高度按内容自适应：数据少时不留大片空白，
+      数据多时超出可用高度才在表格内部滚动（页面不出现外层滚动条）
 */
 .page.is-fill {
   /*
@@ -253,7 +254,7 @@ body {
   min-height: 0;
 }
 
-/* 铺满高度时，承载表格的卡片要能伸缩并让表格内部滚动 */
+/* 承载表格的卡片：撑满高度，内部按「表格 + 分页条」两段分配 */
 .page.is-fill > .el-card {
   display: flex;
   flex-direction: column;
@@ -261,15 +262,21 @@ body {
   min-height: 0;
 }
 
+/*
+  卡片主体：表格按内容自适应，分页条被推到最底部。
+  flex:0 1 auto 而不是 1 —— 让表格只占内容所需高度，
+  多出来的空间落在分页条上方（页面背景），而不是表格内部留白。
+*/
 .page.is-fill > .el-card > .el-card__body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .page.is-fill > .el-card > .el-card__body > .el-table {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
 }
 
@@ -277,7 +284,7 @@ body {
 .page.is-fill .el-table__header-wrapper {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 5;
   background: var(--bg-surface);
 }
 
@@ -685,7 +692,12 @@ body {
 .el-table {
   font-size: var(--fs-md);
   --el-table-border-color: var(--line-soft);
-  --el-table-header-bg-color: transparent;
+  /*
+    表头背景不能是 transparent：Element 会用这个变量给固定列表头填色
+    （.is-scrolling-none th.el-table-fixed-column--left 等），
+    设成透明时横向滚动就能透过标题看到下层内容。
+  */
+  --el-table-header-bg-color: var(--bg-surface);
   --el-table-header-text-color: var(--ink-600);
   --el-table-row-hover-bg-color: #f6f8fc;
   --el-table-text-color: var(--ink-800);
@@ -736,6 +748,51 @@ body {
 
 .el-table .el-button.is-link {
   font-size: var(--fs-sm);
+}
+
+/*
+  固定列（左右）必须不透明，否则横向滚动时下层单元格会透出来，
+  表现为「透过标题看到盖住的标题」。
+
+  Element 对固定列表头用的是 `background: inherit`（继承 header-wrapper），
+  而 header-wrapper 是透明的，所以固定列表头实际是透明的。
+  它的选择器权重又高于普通规则，这里直接用 !important 压过去 ——
+  固定列必须不透明是硬性要求，不值得为权重纠缠。
+*/
+.el-table.el-table td.el-table-fixed-column--left,
+.el-table.el-table td.el-table-fixed-column--right {
+  z-index: 3;
+  background-color: var(--bg-surface) !important;
+}
+
+.el-table.el-table th.el-table-fixed-column--left,
+.el-table.el-table th.el-table-fixed-column--right,
+.el-table.el-table__header-wrapper tr th.el-table-fixed-column--left,
+.el-table.el-table__header-wrapper tr th.el-table-fixed-column--right {
+  z-index: 4;
+  background-color: var(--bg-surface) !important;
+}
+
+/* 斑马纹行里的固定列要跟着变深，否则固定列会浮在条纹上。
+   颜色取 Element 的实际条纹色（--el-fill-color-lighter = #fafafa），
+   否则固定列会比所在行浅一档，一眼就能看出断层。 */
+.el-table.el-table .el-table__row--striped td.el-table-fixed-column--left,
+.el-table.el-table .el-table__row--striped td.el-table-fixed-column--right {
+  background-color: var(--el-fill-color-lighter) !important;
+}
+
+/* 固定列的阴影边：滚动时提示「下面还有内容」，比纯色块更易读 */
+.el-table th.el-table-fixed-column--right::after,
+.el-table td.el-table-fixed-column--right::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: -1px;
+  width: 6px;
+  transform: translateX(100%);
+  pointer-events: none;
+  background: linear-gradient(to left, rgba(14, 22, 33, 0.08), transparent);
 }
 
 .table-footer {

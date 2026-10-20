@@ -68,7 +68,7 @@
             <span class="mono">{{ row.resource }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="远端地址" min-width="130" show-overflow-tooltip>
+        <el-table-column label="远端地址" width="140" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono">{{ row.remoteAddr || '—' }}</span>
           </template>

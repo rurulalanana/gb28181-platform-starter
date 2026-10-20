@@ -18,18 +18,18 @@
     <el-card shadow="never">
 
       <el-table v-loading="loading" :data="list" stripe table-layout="fixed">
-        <el-table-column label="名称" min-width="120">
+        <el-table-column label="名称" width="132">
           <template #default="{ row }">{{ row.name || '—' }}</template>
         </el-table-column>
         <el-table-column label="平台编码" min-width="190">
           <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="对端地址" min-width="160">
+        <el-table-column label="对端地址" width="168">
           <template #default="{ row }">
             <span class="mono">{{ row.host ? row.host + ':' + row.port : '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="本地地址" min-width="160">
+        <el-table-column label="本地地址" width="168">
           <template #default="{ row }">
             <span class="mono">{{ row.localHost ? row.localHost + ':' + row.localPort : '—' }}</span>
           </template>

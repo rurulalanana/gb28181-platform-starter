@@ -20,7 +20,7 @@
         <el-table-column prop="username" label="用户名" min-width="140" sortable>
           <template #default="{ row }"><span class="mono">{{ row.username }}</span></template>
         </el-table-column>
-        <el-table-column label="昵称" min-width="120">
+        <el-table-column label="昵称" width="132">
           <template #default="{ row }">{{ row.nickname || '—' }}</template>
         </el-table-column>
         <el-table-column label="角色" width="110" align="center">
@@ -37,12 +37,12 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="lastLoginTime" label="最后登录" min-width="170" sortable>
+        <el-table-column prop="lastLoginTime" label="最后登录" width="176" sortable>
           <template #default="{ row }">
             <span class="text-muted">{{ row.lastLoginAt || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="创建时间" min-width="170">
+        <el-table-column label="创建时间" width="176">
           <template #default="{ row }">
             <span class="text-muted">{{ row.createdAt || '—' }}</span>
           </template>

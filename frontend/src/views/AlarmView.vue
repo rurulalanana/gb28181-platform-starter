@@ -34,7 +34,7 @@
       </el-form>
 
       <el-table v-loading="loading" :data="alarms" stripe table-layout="fixed">
-        <el-table-column prop="alarmTime" label="时间" min-width="170" sortable>
+        <el-table-column prop="alarmTime" label="时间" width="172" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
         <el-table-column prop="alarmPriority" label="级别" width="100" align="center" sortable>
@@ -44,13 +44,13 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="设备" min-width="190">
+        <el-table-column label="设备" width="196">
           <template #default="{ row }"><span class="mono">{{ row.deviceId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="通道" min-width="190">
+        <el-table-column label="通道" width="196">
           <template #default="{ row }"><span class="mono">{{ row.channelId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="报警方式" min-width="110">
+        <el-table-column label="报警方式" width="116">
           <template #default="{ row }">{{ row.alarmMethodName || '—' }}</template>
         </el-table-column>
         <el-table-column label="描述" min-width="180" show-overflow-tooltip>

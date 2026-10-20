@@ -112,7 +112,8 @@
             </el-dropdown>
           </template>
         </el-table-column>
-        <el-table-column prop="channelCount" label="通道数" width="88" align="center" sortable>
+        <!-- 通道数不排序：数字排序用处不大，而排序箭头会把「通道数」表头挤到换行 -->
+        <el-table-column prop="channelCount" label="通道数" width="88" align="center">
           <template #default="{ row }">
             <el-link v-if="row.channelCount" type="primary" class="count-link" @click="viewChannels(row)">
               {{ row.channelCount }}
@@ -137,13 +138,13 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="出口 IP" width="196" show-overflow-tooltip>
+        <el-table-column label="出口 IP" min-width="186" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono" :class="{ 'text-dim': !row.endpoint }">{{ row.endpoint || '—' }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="最近心跳" width="152" show-overflow-tooltip>
+        <el-table-column label="最近心跳" width="168" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="text-muted">{{ row.lastKeepaliveAt || '—' }}</span>
           </template>

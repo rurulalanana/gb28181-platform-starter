@@ -42,13 +42,13 @@
       </el-form>
 
       <el-table v-loading="loading" :data="channels" stripe table-layout="fixed">
-        <el-table-column prop="id" label="通道编码" min-width="190" sortable>
+        <el-table-column prop="id" label="通道编码" width="196" sortable>
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
-        <el-table-column label="名称" min-width="140" :sort-by="(r) => r.customName || r.name || ''" sortable>
+        <el-table-column label="名称" width="148" :sort-by="(r) => r.customName || r.name || ''" sortable>
           <template #default="{ row }">{{ row.customName || row.name || '—' }}</template>
         </el-table-column>
-        <el-table-column label="所属设备" min-width="230">
+        <el-table-column label="所属设备" min-width="240">
           <template #default="{ row }">
             <span class="device-ref">
               <span class="mono">{{ row.deviceId }}</span>
