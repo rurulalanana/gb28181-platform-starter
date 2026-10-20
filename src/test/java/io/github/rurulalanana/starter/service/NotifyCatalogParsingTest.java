@@ -111,4 +111,40 @@ class NotifyCatalogParsingTest {
         org.junit.jupiter.api.Assertions.assertNull(result,
                 "增量推送只到 1/5 时不得收口，否则会误删未上报的通道");
     }
+
+    @Test
+    @DisplayName("真实报文里的 <Event>DELETE</Event> 必须被解析出来并路由到删除列表")
+    void shouldParseEventDeleteFromRealPayload() {
+        // 模拟下级平台删除通道时推送的报文（抓包实测格式：根元素为 <Response>）
+        String xml = "<?xml version=\"1.0\" encoding=\"GB2312\"?>\n"
+                + "<Response>\n"
+                + "  <CmdType>Catalog</CmdType>\n"
+                + "  <SN>1621896</SN>\n"
+                + "  <DeviceID>34020000002000000006</DeviceID>\n"
+                + "  <SumNum>1</SumNum>\n"
+                + "  <DeviceList Num=\"1\">\n"
+                + "    <Item>\n"
+                + "      <DeviceID>34020000001320000001</DeviceID>\n"
+                + "      <Name>灯花水库库区球机</Name>\n"
+                + "      <Event>DELETE</Event>\n"
+                + "    </Item>\n"
+                + "  </DeviceList>\n"
+                + "</Response>\n";
+
+        ManscdpMessage msg = ManscdpXml.parse(xml);
+        List<CatalogItem> items = SipEventBridge.parseCatalog(msg);
+
+        assertEquals(1, items.size());
+        assertEquals("DELETE", items.get(0).getEvent(),
+                "<Event> 必须被解析出来，否则下级删通道时本级会把通道加回来");
+
+        CatalogPager pager = new CatalogPager();
+        CatalogPager.Result result = pager.accept(
+                msg.getDeviceId(), msg.getSn(), msg.intOf("SumNum"), items);
+
+        assertNotNull(result);
+        assertEquals(0, result.items().size(), "删除项不能进 upsert 列表");
+        assertEquals(1, result.removed().size());
+        assertEquals("34020000001320000001", result.removed().get(0));
+    }
 }

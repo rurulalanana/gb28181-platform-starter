@@ -153,4 +153,98 @@ class CatalogPagerTest {
         assertEquals(2, r.items().size());
         assertTrue(r.complete());
     }
+
+    // ==================== <Event>DELETE 删除推送 ====================
+
+    /** 造一个带 <Event> 的目录项。 */
+    private static CatalogItem eventItem(String id, String event) {
+        return CatalogItem.builder().deviceId(id).name("ch-" + id).event(event).build();
+    }
+
+    @Test
+    @DisplayName("Event=DELETE 的条目不进 upsert 列表，而是进入待删除列表")
+    void shouldRouteDeleteEventToRemovedList() {
+        CatalogPager pager = new CatalogPager();
+        String dev = "34020000002000000006";
+
+        CatalogPager.Result r = pager.accept(dev, 1, 1,
+                List.of(eventItem("34020000001320000001", "DELETE")));
+
+        assertNotNull(r, "删除推送也必须收口");
+        assertEquals(0, r.items().size(), "删除项不能混进 upsert 列表，否则会把已删通道加回来");
+        assertEquals(1, r.removed().size(), "删除项必须进入待删除列表");
+        assertEquals("34020000001320000001", r.removed().get(0));
+    }
+
+    @Test
+    @DisplayName("Event 大小写不敏感（delete/DELETE 都认）")
+    void shouldAcceptDeleteEventCaseInsensitively() {
+        CatalogPager pager = new CatalogPager();
+
+        CatalogPager.Result r = pager.accept("dev", 1, 1,
+                List.of(eventItem("ch-1", "delete")));
+
+        assertNotNull(r);
+        assertEquals(0, r.items().size());
+        assertEquals(1, r.removed().size());
+    }
+
+    @Test
+    @DisplayName("同一批次内先 ADD 后 DELETE：最终只剩删除项")
+    void shouldLetLaterDeleteWinOverEarlierAdd() {
+        CatalogPager pager = new CatalogPager();
+        String dev = "dev";
+        String ch = "ch-1";
+
+        // 第 1 帧：新增
+        assertNull(pager.accept(dev, 1, 2, List.of(eventItem(ch, "ADD"))));
+        // 第 2 帧：同一通道被删除
+        CatalogPager.Result r = pager.accept(dev, 1, 2, List.of(eventItem(ch, "DELETE")));
+
+        assertNotNull(r);
+        assertEquals(0, r.items().size(), "后到的 DELETE 应覆盖先前的 ADD");
+        assertEquals(1, r.removed().size());
+    }
+
+    @Test
+    @DisplayName("同一批次内先 DELETE 后 ADD：最终只剩 upsert 项")
+    void shouldLetLaterAddWinOverEarlierDelete() {
+        CatalogPager pager = new CatalogPager();
+        String dev = "dev";
+        String ch = "ch-1";
+
+        assertNull(pager.accept(dev, 1, 2, List.of(eventItem(ch, "DELETE"))));
+        CatalogPager.Result r = pager.accept(dev, 1, 2, List.of(eventItem(ch, "ADD")));
+
+        assertNotNull(r);
+        assertEquals(1, r.items().size(), "后到的 ADD 应覆盖先前的 DELETE");
+        assertEquals(0, r.removed().size(), "已撤销的删除不应残留");
+    }
+
+    @Test
+    @DisplayName("删除项同样消耗 SumNum 配额：1 条删除即收口")
+    void shouldCountRemovedTowardSumNum() {
+        CatalogPager pager = new CatalogPager();
+
+        // SumNum=1 但只收到 1 条删除 —— 必须收口，不能一直等
+        CatalogPager.Result r = pager.accept("dev", 1, 1,
+                List.of(eventItem("ch-1", "DELETE")));
+
+        assertNotNull(r, "删除项也算进度，SumNum=1 时应立即收口");
+        assertTrue(r.complete());
+        assertEquals(1, r.removed().size());
+    }
+
+    @Test
+    @DisplayName("Event=ADD/UPDATE 的条目照常进入 upsert 列表")
+    void shouldTreatAddAndUpdateAsUpsert() {
+        CatalogPager pager = new CatalogPager();
+
+        CatalogPager.Result r = pager.accept("dev", 1, 2,
+                List.of(eventItem("ch-1", "ADD"), eventItem("ch-2", "UPDATE")));
+
+        assertNotNull(r);
+        assertEquals(2, r.items().size());
+        assertEquals(0, r.removed().size());
+    }
 }

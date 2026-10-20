@@ -56,8 +56,13 @@ public class CatalogPager {
      * @param sumNum   设备自报的总条数（{@code SumNum}），0 表示设备未提供。
      *                 带上它才能从日志区分「下级只共享了 2 个」和「下级共享 4 个但我们只收到 2 个」。
      * @param frames   本次批次实际收到的应答帧数（诊断分页上报风格）。
+     * @param removed  本批次内被 {@code <Event>DELETE</Event>} 标记的通道编码，
+     *                 需要从库里删除。<b>与 {@code items} 互斥</b>：
+     *                 同一编码若先 ADD 后 DELETE，最终只出现在 removed 里；
+     *                 先 DELETE 后 ADD 则只出现在 items 里（后到的状态覆盖先前的）。
      */
-    public record Result(List<CatalogItem> items, boolean complete, int sumNum, int frames) {
+    public record Result(List<CatalogItem> items, boolean complete, int sumNum, int frames,
+                         List<String> removed) {
     }
 
     /** 正在聚合的批次，key = {@code deviceId#sn}。 */
@@ -71,6 +76,22 @@ public class CatalogPager {
         private final long startedAt = System.currentTimeMillis();
         /** 已累积的条目，按设备编码去重（标准要求设备编码全局唯一）。 */
         private final Map<String, CatalogItem> items = new LinkedHashMap<>();
+        /** 被 {@code <Event>DELETE</Event>} 标记、待删除的通道编码。 */
+        private final java.util.LinkedHashSet<String> removed = new java.util.LinkedHashSet<>();
+        /**
+         * 已处理过的条目标记，格式 {@code 通道编码|类型}，用于计算收口进度。
+         *
+         * <p><b>为什么不能直接用 {@code items.size()}</b>：同一批次内先 ADD 后 DELETE
+         * 同一通道时，净状态数始终是 1（先在 items 里，后被移进 removed），
+         * 用它判断进度会导致「永远收不齐」，只能等 8 秒超时。
+         * 而完全不去重又会退化成「设备重传同一帧就算进度」，
+         * 使重复条目把 SumNum 撑爆。两级语义必须分开：
+         * <ul>
+         *   <li>{@code items} / {@code removed} —— <b>净状态</b>，同一通道只留最终状态</li>
+         *   <li>{@code seen} —— <b>处理计数</b>，同一 (通道, 变更类型) 只算一次</li>
+         * </ul>
+         */
+        private final java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
         /** 收到的应答帧数（诊断用：可区分「单帧多条」与「多帧各一条」两种上报风格）。 */
         private int frames;
 
@@ -101,7 +122,23 @@ public class CatalogPager {
             batch.frames++;
             if (items != null) {
                 for (CatalogItem it : items) {
-                    if (it != null && it.getDeviceId() != null && !it.getDeviceId().isBlank()) {
+                    if (it == null || it.getDeviceId() == null || it.getDeviceId().isBlank()) {
+                        continue;
+                    }
+                    boolean del = isDelete(it);
+                    // 进度计数：同一 (通道, 变更类型) 只算一次，重复重传不撑大 SumNum
+                    if (!batch.seen.add(it.getDeviceId() + "|" + (del ? "DEL" : "UPS"))) {
+                        continue;
+                    }
+                    if (del) {
+                        // <Event>DELETE</Event>：下级已删除该通道。
+                        // 若仍当 upsert 处理，下级删掉的通道会被本级「加回来」，
+                        // 形成永远删不掉的幽灵通道。
+                        batch.items.remove(it.getDeviceId());
+                        batch.removed.add(it.getDeviceId());
+                    } else {
+                        // 后到的 ADD/UPDATE 覆盖先前的 DELETE 状态
+                        batch.removed.remove(it.getDeviceId());
                         batch.items.putIfAbsent(it.getDeviceId(), it);
                     }
                 }
@@ -111,13 +148,15 @@ public class CatalogPager {
             // 而它们实际上都是单帧全量上报，直接收口即可。
             if (batch.sumNum <= 0) {
                 pending.remove(key);
-                return new Result(new ArrayList<>(batch.items.values()), false, 0, batch.frames);
+                return new Result(new ArrayList<>(batch.items.values()), false, 0,
+                        batch.frames, new ArrayList<>(batch.removed));
             }
-            boolean complete = batch.items.size() >= batch.sumNum;
+            // 收口条件按「已处理的条目数」算：删除项同样消耗 SumNum 配额
+            boolean complete = batch.seen.size() >= batch.sumNum;
             boolean expired = System.currentTimeMillis() - batch.startedAt > WINDOW_MS;
             if (!complete && !expired) {
-                log.debug("目录分页累积中: device={} sn={} 已收={}/{}", deviceId, sn,
-                        batch.items.size(), batch.sumNum);
+                log.debug("目录分页累积中: device={} sn={} 已收={}/{}",
+                        deviceId, sn, batch.seen.size(), batch.sumNum);
                 return null;
             }
             pending.remove(key);
@@ -125,16 +164,31 @@ public class CatalogPager {
                 // 少报通常意味着设备侧过滤（权限/离线通道不报），不是错误；
                 // 但需要在日志里留痕，便于排查「通道数与设备侧不一致」
                 log.info("目录分页未收齐即收口: device={} sn={} 已收={}/{} 帧数={}",
-                        deviceId, sn, batch.items.size(), batch.sumNum, batch.frames);
+                        deviceId, sn, batch.seen.size(), batch.sumNum, batch.frames);
+            }
+            if (!batch.removed.isEmpty()) {
+                log.info("目录推送含删除: device={} 待删除通道={}", deviceId, batch.removed);
             }
             if (log.isDebugEnabled()) {
-                log.debug("目录分页收口: device={} sn={} 帧数={} 条目={} SumNum={} 收齐={} 设备编码={}",
-                        deviceId, sn, batch.frames, batch.items.size(), batch.sumNum,
-                        complete, batch.items.keySet());
+                log.debug("目录分页收口: device={} sn={} 帧数={} 条目={} 删除={} SumNum={} 收齐={}",
+                        deviceId, sn, batch.frames, batch.items.size(), batch.removed.size(),
+                        batch.sumNum, complete);
             }
             return new Result(new ArrayList<>(batch.items.values()), complete,
-                    batch.sumNum, batch.frames);
+                    batch.sumNum, batch.frames, new ArrayList<>(batch.removed));
         }
+    }
+
+    /**
+     * 判断目录项是否为删除通知。
+     *
+     * <p>GB/T 28181 附录 A.2.4：{@code <Event>} 取 {@code ADD}/{@code UPDATE}/
+     * {@code DELETE}/{@code ON}/{@code OFF}，仅在通知类报文中出现。
+     * 大小写不敏感——实测平台（LiveGBS、大华）两种写法都出现过。
+     */
+    private static boolean isDelete(CatalogItem item) {
+        String event = item.getEvent();
+        return event != null && "DELETE".equalsIgnoreCase(event.trim());
     }
 
     /**

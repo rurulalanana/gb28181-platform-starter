@@ -505,6 +505,39 @@ public class DeviceService {
                 .eq(GbChannel::getChannelId, deviceId));
     }
 
+    /**
+     * 删除下级平台已删除的通道（{@code <Event>DELETE</Event>} 推送）。
+     *
+     * <p>国标附录 A.2.4：下级删除通道时推送 {@code <Event>DELETE</Event>}，
+     * 本级若不处理，这条通道会一直残留在库里（「幽灵通道」）：
+     * 通道数偏大、点播时得到「设备未注册」、级联共享时把已下线通道推给上级。
+     *
+     * @param deviceId  通道所属设备
+     * @param channelId 通道编码
+     * @return 实际删除行数
+     */
+    @Transactional
+    public int removeChannel(String deviceId, String channelId) {
+        if (deviceId == null || deviceId.isBlank() || channelId == null || channelId.isBlank()) {
+            return 0;
+        }
+        int removed = channelMapper.delete(Wrappers.<GbChannel>lambdaQuery()
+                .eq(GbChannel::getDeviceId, deviceId)
+                .eq(GbChannel::getChannelId, channelId));
+        if (removed > 0) {
+            // 通道数按库里实际行数回填
+            GbDevice device = findDevice(deviceId);
+            if (device != null) {
+                device.setChannelCount(countChannels(deviceId));
+                device.setUpdateTime(LocalDateTime.now());
+                deviceMapper.updateById(device);
+            }
+            log.info("下级删除通道已同步: device={} channel={} 剩余通道={}",
+                    deviceId, channelId, countChannels(deviceId));
+        }
+        return removed;
+    }
+
     /** 处理设备信息应答（{@code DeviceInfo} 查询结果），更新设备属性。 */
     @Transactional
     public void saveDeviceInfo(String deviceId, ManscdpMessage msg) {

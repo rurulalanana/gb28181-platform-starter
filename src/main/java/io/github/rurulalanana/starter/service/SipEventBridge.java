@@ -137,9 +137,15 @@ public class SipEventBridge implements SipCallback {
         if (merged == null) {
             return;
         }
-        asyncExecutor.run("目录同步落库",
-                () -> deviceService.saveCatalog(deviceId, merged.items(), merged.complete(),
-                        merged.sumNum(), merged.frames()));
+        asyncExecutor.run("目录同步落库", () -> {
+            // 应答里混有 <Event>DELETE</Event> 时也要真正删通道：
+            // 收齐时全量快照逻辑本就会删掉未上报的通道，但没收齐时只能靠这里。
+            for (String removedId : merged.removed()) {
+                deviceService.removeChannel(deviceId, removedId);
+            }
+            deviceService.saveCatalog(deviceId, merged.items(), merged.complete(),
+                    merged.sumNum(), merged.frames());
+        });
     }
 
     /** 把 MANSCDP 的 {@code <DeviceList><Item>} 解析为 {@link CatalogItem}。 */
@@ -177,6 +183,8 @@ public class SipEventBridge implements SipCallback {
                     .managementUnit(textChild(item, "Info", "ManagementUnit"))
                     .contactInfo(textChild(item, "Info", "ContactInfo"))
                     .recordSaveDays(intOfChild(item, "Info", "RecordSaveDays"))
+                    // 目录项变更类型（ADD/UPDATE/DELETE/ON/OFF），仅通知类报文携带
+                    .event(text(item, "Event"))
                     .build();
             if (ci.getDeviceId() != null && !ci.getDeviceId().isBlank()) {
                 out.add(ci);
@@ -247,6 +255,9 @@ public class SipEventBridge implements SipCallback {
      *
      * <p>推送是<b>增量通知</b>：只包含发生变化的条目，因此恒以
      * {@code fullSnapshot=false} 落库，只做 upsert，绝不清理未提到的通道。
+     *
+     * <p>唯一例外是 {@code <Event>DELETE</Event>}：它明确表示下级删除了该通道，
+     * 必须真正从库里删除，否则幽灵通道永远留着。
      */
     private void handlePushedCatalog(String deviceId, ManscdpMessage msg, String source) {
         List<CatalogItem> items = parseCatalog(msg);
@@ -259,11 +270,20 @@ public class SipEventBridge implements SipCallback {
         if (merged == null) {
             return;
         }
-        log.info("收到目录变更推送: device={} 来源={} 条目={} 下级自报={} 帧数={}",
-                deviceId, source, merged.items().size(), merged.sumNum(), merged.frames());
-        asyncExecutor.run("目录推送落库",
-                () -> deviceService.saveCatalog(deviceId, merged.items(), false,
-                        merged.sumNum(), merged.frames()));
+        log.info("收到目录变更推送: device={} 来源={} 条目={} 删除={} 下级自报={} 帧数={}",
+                deviceId, source, merged.items().size(), merged.removed().size(),
+                merged.sumNum(), merged.frames());
+        // 先删后存：同一批次里若先 ADD 后 DELETE，聚合器已保证只剩删除项；
+        // 反之（先 DELETE 后 ADD）则只剩 upsert 项，两者不会同时命中同一编码。
+        asyncExecutor.run("目录推送落库", () -> {
+            for (String removedId : merged.removed()) {
+                deviceService.removeChannel(deviceId, removedId);
+            }
+            if (!merged.items().isEmpty()) {
+                deviceService.saveCatalog(deviceId, merged.items(), false,
+                        merged.sumNum(), merged.frames());
+            }
+        });
     }
 
     @Override
