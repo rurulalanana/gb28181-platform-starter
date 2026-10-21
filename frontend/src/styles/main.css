@@ -224,6 +224,36 @@ body {
   background-clip: content-box;
 }
 
+/* ==================== 表格固定列阴影 ==================== */
+
+/*
+ * 消除「表格明明放得下，却多出一条横向滚动条」的问题。
+ *
+ * <p>Element Plus 给固定右列画阴影用的是伪元素：
+ * <pre>
+ * .el-table td.el-table-fixed-column--right::after {
+ *   content: ""; position: absolute; right: 0; width: 6px;
+ *   transform: translate(100%);   ← 整条挪到单元格外侧
+ * }
+ * </pre>
+ * 这 6px 伸到表格右边界之外，浏览器把它算进「可滚动溢出」，
+ * 于是 scrollWidth 比 clientWidth 多 6px —— 表格内容明明一列不差，
+ * 却冒出一条只能横移 6px、什么也看不到的横向滚动条。
+ * 设备管理 / 通道管理 / 云端录像列表都有这个现象（与视口宽度无关，
+ * 恒定多 6px）。
+ *
+ * <p>修法：把阴影挪回单元格内侧（transform 取消平移）。
+ * 阴影仍是「固定列右缘外侧一条渐变」，只是往左挪了 6px，
+ * 视觉几乎无差别，但不再撑出滚动溢出。
+ *
+ * <p>左列的 ::before 同理（10px，left:-10px），它向左溢出，
+ * 浏览器不会为左侧溢出生成滚动条，保留原样即可。
+ */
+.el-table th.el-table-fixed-column--right::after,
+.el-table td.el-table-fixed-column--right::after {
+  transform: none !important;
+}
+
 /* ==================== 页面骨架 ==================== */
 
 .page {

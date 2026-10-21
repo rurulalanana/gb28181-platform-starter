@@ -80,9 +80,24 @@ export const cloudRecordApi = {
   removeChannel: (params) => post('/cloudrecord/removechannel', params),
   removeDaily: (params) => post('/cloudrecord/removedaily', params),
   setImportant: (params) => post('/cloudrecord/setimportant', params),
+  share: (params) => post('/cloudrecord/share', params),
+  /**
+   * 服务端抓拍：拉流 + ffmpeg 解码，返回快照地址。
+   *
+   * <p>超时给到 60 秒：级联设备收到 INVITE 后可能几十秒才开始推流，
+   * 服务端要等流上线才能解码。
+   */
+  snapGrab: (params) => post('/cloudrecord/snap/grab', params, undefined, 60000),
   download: (serial, code, period) => get(`/cloudrecord/download/${serial}/${code}/${period}`),
   video: (operate, serial, code, starttime, endtime) =>
-    get(`/cloudrecord/video/${operate}/${serial}/${code}/${starttime}/${endtime}/video.mp4`)
+    get(`/cloudrecord/video/${operate}/${serial}/${code}/${starttime}/${endtime}/video.mp4`),
+  // 录像计划（对齐 LiveGBS 的 /cloudrecord/plan/*）
+  planList: (params) => get('/cloudrecord/plan/list', params),
+  planSave: (params) => post('/cloudrecord/plan/save', params),
+  planEnable: (params) => post('/cloudrecord/plan/enable', params),
+  planRemove: (params) => post('/cloudrecord/plan/remove', params),
+  planChannelList: (params) => get('/cloudrecord/plan/channellist', params),
+  planSetChannels: (params) => post('/cloudrecord/plan/setchannels', params)
 }
 
 /** 平台实时录像接口（`/api/v1/record/*`）。 */

@@ -65,6 +65,6 @@ export function get(url, params) {
   return http.get(url, { params })
 }
 
-export function post(url, params, data) {
-  return http.post(url, data, { params })
+export function post(url, params, data, timeout) {
+  return http.post(url, data, { params, timeout })
 }

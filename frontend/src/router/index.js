@@ -11,6 +11,13 @@ const routes = [
     meta: { public: true, title: '登录' }
   },
   {
+    // 录像分享页：免登录，凭签名令牌观看某段录像
+    path: '/share/:token',
+    name: 'share',
+    component: () => import('@/views/ShareView.vue'),
+    meta: { public: true, title: '录像分享' }
+  },
+  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
@@ -48,8 +55,29 @@ const routes = [
       {
         path: 'cloud',
         name: 'cloud',
-        component: () => import('@/views/CloudRecordView.vue'),
+        component: () => import('@/views/CloudRecordChannelView.vue'),
         meta: { title: '云端录像', icon: 'mdi-cloud' }
+      },
+      {
+        // 云端录像详情：某通道的时间轴视图（对齐 LiveGBS 的 timeview）
+        path: 'cloud/detail',
+        name: 'cloud-detail',
+        component: () => import('@/views/CloudRecordDetailView.vue'),
+        meta: { title: '云端录像详情', hidden: true }
+      },
+      {
+        // 云端录像列表视图：独立表格页（对齐 LiveGBS 的 listview）
+        path: 'cloud/detail/list',
+        name: 'cloud-detail-list',
+        component: () => import('@/views/CloudRecordListView.vue'),
+        meta: { title: '云端录像列表', hidden: true }
+      },
+      {
+        // 录像计划：定义哪些通道在什么时段录云端录像（对齐 LiveGBS）
+        path: 'cloud/plans',
+        name: 'cloud-plans',
+        component: () => import('@/views/CloudRecordPlanView.vue'),
+        meta: { title: '录像计划', hidden: true }
       },
       {
         path: 'alarms',

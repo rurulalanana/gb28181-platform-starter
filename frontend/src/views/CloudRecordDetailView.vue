@@ -1,0 +1,956 @@
+<template>
+  <!--
+    布局对齐 LiveGBS 的「云端录像 / 时间轴视图」页
+    （路由 #/cloudrecord/timeview/<设备编码>/<通道编码>）：
+
+      标题（居中）
+      工具条：左 返回/分享页/下载，右 日期选择器 + 列表视图
+      播放器（居中，最大 700px，16:9）+ 可拖动进度条
+      时间轴（整宽，无录像段列表 —— 列表在独立页面）
+
+    注意不要用 .page.is-fill —— 那个类会把卡片压进一屏高度，
+    播放器会被挤成扁条（实测过）。
+  -->
+  <div class="page detail-page">
+    <el-card shadow="never" class="detail-card">
+      <!-- 标题：居中，对齐 LiveGBS 的 h4.text-center -->
+      <div class="box-title">
+        云端录像({{ channelName }})-时间轴视图
+      </div>
+
+      <!-- 工具条：左 返回/分享页/下载，右 日期选择器 + 列表视图 -->
+      <div class="filter-bar">
+        <el-button size="small" @click="goBack">
+          <el-icon><ArrowLeft /></el-icon> 返回
+        </el-button>
+        <el-button size="small" :disabled="!playingRecord" @click="shareCurrent">
+          <el-icon><Share /></el-icon> 分享页
+        </el-button>
+        <el-button size="small" :disabled="!playingRecord?.downloadUrl" @click="downloadCurrent">
+          <el-icon><Download /></el-icon> 下载
+        </el-button>
+        <span class="filter-bar-spacer" />
+
+        <!--
+          日期选择器：用日历组件（el-date-picker）承载「本月有录像的日期」。
+
+          <b>没有录像的日期直接禁用</b>（disabledDate）—— 选了也是空，
+          不如让用户一眼看出哪天有录像。面板里再用 #default 槽把
+          有录像的日期标成蓝底，禁用不了的日期是灰的。
+        -->
+        <el-date-picker
+          v-model="period"
+          type="date"
+          placeholder="选择日期"
+          value-format="YYYY-MM-DD"
+          class="date-picker"
+          :clearable="false"
+          :disabled-date="isDisabledDate"
+        >
+          <template #default="cell">
+            <div class="cal-cell" :class="{ 'has-record': isRecordDay(cell) }">
+              {{ cell.text }}
+            </div>
+          </template>
+        </el-date-picker>
+
+        <!-- 列表视图：跳到独立的表格页（对齐 LiveGBS 的 #/cloudrecord/listview/...） -->
+        <el-button size="small" @click="goListView">
+          <el-icon><Tickets /></el-icon> 列表视图
+        </el-button>
+      </div>
+
+      <!-- 播放器：居中，最大 700px（对齐 LiveGBS 的 .player-wrapper max-width:700px） -->
+      <div class="player-wrap">
+        <div class="video-box">
+          <!--
+            直接用原生 <video> 播 MP4，不用 jessibuca：
+            实测本机 Chrome/Electron 148 能解 H265（canPlayType 返回 probably，
+            实测能出 2560x1440 画面），而原生 video 天然支持 HTTP Range
+            → 拖动进度条直接定位，不需要服务端做 seek。
+
+            token 拼在 URL 上：<video src> 请求带不了自定义头。
+          -->
+          <!--
+            直接用原生 <video> 播 MP4，不用 jessibuca：
+            浏览器解不了 H265（服务端已转成 720p H264），而原生 video
+            天然支持 HTTP Range → 拖动进度条直接定位。
+
+            autoplay 用<b>属性</b>而不是 JS 调 play()：
+            JS 调 play() 会被 Chrome 的省电策略 abort
+            （AbortError: video-only background media was paused to save power），
+            属性方式则能正常自动播放。
+
+            token 拼在 URL 上：<video src> 请求带不了自定义头。
+          -->
+          <video
+            v-if="playingRecord"
+            ref="videoEl"
+            class="video-element"
+            :src="playUrl"
+            controls
+            autoplay
+            muted
+            preload="metadata"
+            playsinline
+            @timeupdate="onTimeUpdate"
+            @loadedmetadata="onLoadedMetadata"
+            @ended="onEnded"
+            @error="onVideoError"
+          />
+          <div v-else class="player-tip">
+            <el-icon :size="34"><VideoPlay /></el-icon>
+            <span>点击下方时间轴上的录像段点播</span>
+          </div>
+        </div>
+
+        <div v-if="playingRecord" class="player-bar">
+          <span class="mono">{{ fmtTs(playingRecord.startAt) }}</span>
+          <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
+          <span class="filter-bar-spacer" />
+          <el-button size="small" type="danger" plain @click="stopPlay">
+            <el-icon><SwitchButton /></el-icon> 停止点播
+          </el-button>
+          <el-button size="small" :disabled="!playingRecord.downloadUrl" @click="download(playingRecord)">
+            <el-icon><Download /></el-icon> 下载本段
+          </el-button>
+          <el-button size="small" type="danger" plain :disabled="!records.length" @click="removeDaily">
+            <el-icon><Delete /></el-icon> 删除当日
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 时间轴：24 小时轨道 + 录像段色条（对齐 LiveGBS 的 .time-rule） -->
+      <div v-loading="loadingDaily" class="timeline-wrap">
+        <div class="timeline">
+          <div class="tl-scale">
+            <span
+              v-for="h in 24"
+              :key="h"
+              class="tl-hour"
+              :style="{ left: ((h - 1) / 24 * 100) + '%' }"
+            >
+              {{ String(h - 1).padStart(2, '0') }}
+            </span>
+          </div>
+
+          <div class="tl-track">
+            <el-tooltip
+              v-for="seg in timelineSegments"
+              :key="seg.record.recordId"
+              :content="segTitle(seg)"
+              placement="top"
+              :show-after="120"
+            >
+              <div
+                class="tl-seg"
+                :class="{
+                  'is-playing': playingRecord?.recordId === seg.record.recordId,
+                  'is-important': seg.record.important
+                }"
+                :style="{ left: seg.left + '%', width: seg.width + '%' }"
+                @click="play(seg.record)"
+              />
+            </el-tooltip>
+
+            <div v-if="nowPercent != null" class="tl-now" :style="{ left: nowPercent + '%' }">
+              <span class="tl-now-label">{{ nowText }}</span>
+            </div>
+
+            <span v-if="!records.length" class="tl-track-empty">当日无云端录像</span>
+          </div>
+        </div>
+
+        <div class="timeline-foot">
+          <span v-if="records.length">共 <b>{{ records.length }}</b> 段录像</span>
+          <span v-else class="text-muted">当日无云端录像</span>
+          <span class="text-muted">{{ timelineSummary }}</span>
+        </div>
+      </div>
+    </el-card>
+  </div>
+</template>
+
+<script setup>
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { cloudRecordApi } from '@/api'
+
+const route = useRoute()
+const router = useRouter()
+
+/** 通道标识：设备编码 / 通道编码。 */
+const serial = computed(() => String(route.query.serial || ''))
+const code = computed(() => String(route.query.code || ''))
+
+/** 初始日期：URL 上带了 period 就用它（从列表页跳过来时）。 */
+const period = ref(String(route.query.period || todayString()))
+const records = ref([])
+const monthFlags = ref('')
+const channelName = ref('')
+const loadingDaily = ref(false)
+
+/**
+ * 本月有录像的日期（只保留有录像的天，31 个空按钮太吵）。
+ *
+ * <p>现在这行按钮已被日历组件取代 —— 这些标记用于在日期选择器的
+ * 面板里高亮「有录像」的日期格（见模板里的 #default 槽）。
+ */
+const recordDays = computed(() =>
+  monthFlags.value
+    .split('')
+    .map((flag, idx) => (flag === '1' ? idx + 1 : 0))
+    .filter(Boolean)
+)
+
+/**
+ * 判断某个日期是否在「有录像」的月份里。
+ *
+ * <p>日历面板逐格调用（28~42 次），所以用 Set 而不是数组 includes。
+ *
+ * <p>Element 的日期格子对象结构（见 element-plus 的 use-basic-date-table）：
+ * <ul>
+ *   <li>{@code text}   —— 日号</li>
+ *   <li>{@code dayjs}  —— dayjs 日期对象</li>
+ *   <li>{@code type}   —— normal / prev / next（prev/next 是相邻月的日期）</li>
+ * </ul>
+ * 用 dayjs 取完整日期再比对，prev/next 的格子自然不会误高亮。
+ *
+ * @param cell 日期格子对象
+ */
+const recordDaySet = computed(() => new Set(recordDays.value))
+
+function isRecordDay(cell) {
+  if (!cell) return false
+  let dateStr = ''
+  if (cell.dayjs && typeof cell.dayjs.format === 'function') {
+    dateStr = cell.dayjs.format('YYYY-MM-DD')
+  } else if (typeof cell === 'string') {
+    dateStr = cell
+  } else if (cell.value) {
+    dateStr = String(cell.value)
+  }
+  if (!dateStr) return false
+  // 标记只对已加载的那个月有效；面板翻到别的月就不高亮
+  if (dateStr.slice(0, 7) !== flagsMonth.value) return false
+  return recordDaySet.value.has(Number(dateStr.slice(8, 10)))
+}
+
+/**
+ * 日历里禁用「没有录像」的日期。
+ *
+ * <p>Element 的 date-picker 会用这个函数决定某天能否选中：
+ * 返回 true = 禁用（灰掉、点不动）。
+ *
+ * <p>判据：当天不在「本月有录像」的标记里，且不是今天之前（历史月份没数据）。
+ * 实际上更严格的判据是「该日有录像」，但我们只加载了当前月的标记，
+ * 所以：
+ * <ul>
+ *   <li>当前月：按标记判（有录像才可选）；</li>
+ *   <li>其它月份：标记未知，一律不禁用（让用户能翻月去看）。</li>
+ * </ul>
+ *
+ * @param date 日期（Element 传 Date 对象）
+ */
+function isDisabledDate(date) {
+  if (!date) return false
+  const d = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(d.getTime())) return false
+  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  // 只对已加载标记的那个月做判定
+  if (ym !== flagsMonth.value) return false
+  return !recordDaySet.value.has(d.getDate())
+}
+
+/** 跳到列表视图（独立页面，对齐 LiveGBS 的 #/cloudrecord/listview/...）。 */
+function goListView() {
+  router.push({
+    path: '/cloud/detail/list',
+    query: { serial: serial.value, code: code.value, period: period.value }
+  })
+}
+
+/**
+ * 日期变了就重新加载。
+ *
+ * <p><b>用 watch 而不是只靠 @change</b>：el-date-picker 用了 #default 槽
+ * 自定义格子渲染后，Element 内部的 pick 流程与默认不完全一致，
+ * 实测 @change 不触发（modelValue 变了但没有请求发出）。
+ * watch modelValue 最可靠。
+ */
+watch(period, async (value, old) => {
+  if (!value || value === old) return
+  const month = value.slice(0, 7).replace('-', '')
+  if (month !== loadedMonth.value) {
+    await loadMonthFlags()
+  }
+  await loadDaily()
+})
+
+/** 视图模式：timeline=时间轴视图，list=列表视图。 */
+const viewMode = ref('timeline')
+
+const playingRecord = ref(null)
+
+/** 原生 video 元素。 */
+const videoEl = ref(null)
+/** 播放状态（展示用）。 */
+const playState = ref('空闲')
+const playStateType = computed(() => {
+  if (playState.value === '播放中') return 'success'
+  if (playState.value === '播放异常') return 'danger'
+  return 'info'
+})
+
+/**
+ * 录像文件的播放地址。
+ *
+ * <p>token 拼在 URL 上：{@code <video src>} 请求带不了自定义头，
+ * Sa-Token 会从 query 参数里读 token（配置 {@code is-read-body: true}）。
+ */
+const playUrl = computed(() => {
+  if (!playingRecord.value?.recordId) return ''
+  const token = localStorage.getItem('gb_token') || ''
+  return `/api/v1/cloudrecord/file/${playingRecord.value.recordId}?Authorization=${encodeURIComponent(token)}`
+})
+
+/** 播放/暂停。 */
+function togglePlay() {
+  const v = videoEl.value
+  if (!v) return
+  if (v.paused) {
+    v.play().catch(() => {})
+  } else {
+    v.pause()
+  }
+}
+
+/** video 的 timeupdate：更新播放状态。 */
+function onTimeUpdate() {
+  const v = videoEl.value
+  if (!v) return
+  playState.value = v.paused ? '已暂停' : '播放中'
+}
+
+/**
+ * 元数据加载完：更新状态。
+ *
+ * <p>自动播放靠 {@code autoplay} <b>属性</b>（见模板注释），
+ * 这里只更新状态文案，不重复调 play()。
+ */
+function onLoadedMetadata() {
+  playState.value = '播放中'
+}
+
+function onEnded() {
+  playState.value = '播放结束'
+}
+
+/** 播放失败（如浏览器不支持该编码）。 */
+function onVideoError() {
+  const v = videoEl.value
+  const code = v?.error?.code
+  playState.value = '播放异常'
+  ElMessage.error(
+    code === 4
+      ? '浏览器不支持该视频编码（可能是 H265），请用 Chrome/Edge 并安装 HEVC 解码器'
+      : '播放失败'
+  )
+}
+
+function todayString() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/* ==================== 时间轴 ==================== */
+
+const nowPercent = ref(null)
+const nowText = ref('')
+let nowTimer = null
+
+function updateNow() {
+  if (period.value === todayString()) {
+    const d = new Date()
+    const secs = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()
+    nowPercent.value = (secs / 86400) * 100
+    nowText.value = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  } else {
+    nowPercent.value = null
+    nowText.value = ''
+  }
+}
+
+function parseCompactTs(v) {
+  const t = String(v || '').trim()
+  if (!/^\d{14}$/.test(t)) return null
+  return new Date(
+    +t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8),
+    +t.slice(8, 10), +t.slice(10, 12), +t.slice(12, 14)
+  )
+}
+
+const timelineSegments = computed(() => {
+  const out = []
+  for (const r of records.value) {
+    const start = parseCompactTs(r.startAt)
+    if (!start) continue
+    const secs = start.getHours() * 3600 + start.getMinutes() * 60 + start.getSeconds()
+    let duration = r.duration
+    if (!duration && r.endTime) {
+      const end = parseCompactTs(r.endTime)
+      if (end && end > start) duration = Math.round((end - start) / 1000)
+    }
+    if (!duration || duration <= 0) duration = 30
+    out.push({
+      record: r,
+      left: (secs / 86400) * 100,
+      width: Math.max((duration / 86400) * 100, 0.22)
+    })
+  }
+  return out
+})
+
+function segTitle(seg) {
+  const r = seg.record
+  const bits = [fmtTs(r.startAt)]
+  if (r.endTime) bits.push('至 ' + fmtTs(r.endTime))
+  if (r.duration != null) bits.push(r.duration + ' 秒')
+  if (r.fileSize) bits.push(formatSize(r.fileSize))
+  bits.push('点击点播')
+  return bits.join(' · ')
+}
+
+const timelineSummary = computed(() => {
+  let secs = 0
+  for (const r of records.value) {
+    if (r.duration) {
+      secs += r.duration
+      continue
+    }
+    const s = parseCompactTs(r.startAt)
+    const e = parseCompactTs(r.endTime)
+    if (s && e && e > s) secs += Math.round((e - s) / 1000)
+  }
+  if (!secs) return ''
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  return `合计约 ${h ? h + ' 小时 ' : ''}${m} 分钟`
+})
+
+/* ==================== 数据加载 ==================== */
+
+function fmtTs(v) {
+  if (!v) return '—'
+  const t = String(v).trim()
+  if (t.length !== 14 || !/^\d{14}$/.test(t)) return t
+  return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)} ${t.slice(8, 10)}:${t.slice(10, 12)}:${t.slice(12, 14)}`
+}
+
+function formatSize(size) {
+  if (!size) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let n = size
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
+}
+
+const UPLOAD_TEXT = { NONE: '无需上传', PENDING: '待上传', UPLOADED: '已上传', FAILED: '上传失败' }
+
+function uploadText(state) {
+  return UPLOAD_TEXT[state] || '—'
+}
+
+function uploadColor(state) {
+  if (state === 'UPLOADED') return 'success'
+  if (state === 'PENDING') return 'warning'
+  if (state === 'FAILED') return 'danger'
+  return 'info'
+}
+
+async function loadDaily() {
+  if (!serial.value || !code.value) {
+    ElMessage.warning('缺少通道参数')
+    return
+  }
+  loadingDaily.value = true
+  try {
+    const data = await cloudRecordApi.queryDaily({
+      serial: serial.value,
+      code: code.value,
+      period: period.value.replace(/-/g, '')
+    })
+    records.value = data?.list || []
+    if (data?.name) channelName.value = data.name
+  } catch (e) {
+    ElMessage.error(e.message || '查询失败')
+  } finally {
+    loadingDaily.value = false
+    updateNow()
+  }
+}
+
+async function loadMonthFlags() {
+  if (!serial.value || !code.value) return
+  const month = period.value.slice(0, 7).replace('-', '')
+  loadedMonth.value = month
+  flagsMonth.value = period.value.slice(0, 7)
+  try {
+    const data = await cloudRecordApi.queryMonthly({ serial: serial.value, code: code.value, period: month })
+    monthFlags.value = data?.flag || ''
+  } catch (e) {
+    monthFlags.value = ''
+  }
+}
+
+/** 当前 monthFlags 对应的月份（YYYYMM），用于判断是否需要重新拉标记。 */
+const loadedMonth = ref('')
+
+/** 当前 monthFlags 对应的月份（YYYY-MM），日历高亮时比对用。 */
+const flagsMonth = ref('')
+
+function onViewChange() {
+  // 两种视图共用同一份数据，无需重新请求
+}
+
+function goBack() {
+  router.push('/cloud')
+}
+
+/* ==================== 点播 / 下载 / 删除 ==================== */
+
+/**
+ * 点播一段录像。
+ *
+ * <p>直接把 MP4 交给原生 {@code <video>} 播 —— 不再走 ZLM 转协议：
+ * 浏览器能解 H265，且原生 video 支持 Range，拖进度条直接定位。
+ */
+async function play(record) {
+  try {
+    const data = await cloudRecordApi.play(record.recordId)
+    playingRecord.value = { ...record, ...data }
+    playState.value = '加载中…'
+    // 视频元素还没挂载时，等 nextTick 再播
+    await nextTick()
+    videoEl.value?.load()
+  } catch (e) {
+    ElMessage.error(e.message || '点播失败')
+    playingRecord.value = null
+  }
+}
+
+function stopPlay() {
+  const v = videoEl.value
+  if (v) {
+    try {
+      v.pause()
+      v.removeAttribute('src')
+      v.load()
+    } catch (e) {
+      // 忽略
+    }
+  }
+  playingRecord.value = null
+  playState.value = '空闲'
+}
+
+function download(record) {
+  const url = record.downloadUrl
+  if (!url) {
+    ElMessage.warning('该录像暂不可下载（可能仍在录制）')
+    return
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    window.open(url, '_blank')
+    return
+  }
+  const token = localStorage.getItem('gb_token') || ''
+  fetch(url, { headers: { Authorization: token } })
+    .then((resp) => {
+      if (!resp.ok) throw new Error('下载失败 HTTP ' + resp.status)
+      return resp.blob()
+    })
+    .then((blob) => {
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = record.fileName || record.name || 'record.mp4'
+      link.click()
+      URL.revokeObjectURL(link.href)
+    })
+    .catch((e) => ElMessage.error(e.message || '下载失败'))
+}
+
+/** 工具条上的「下载」：下载当前正在点播的那一段。 */
+function downloadCurrent() {
+  if (playingRecord.value) download(playingRecord.value)
+}
+
+/**
+ * 生成分享链接。
+ *
+ * <p>分享页免登录（凭签名令牌），把这一段录像分享给不登录平台的人看。
+ */
+async function shareCurrent() {
+  if (!playingRecord.value?.recordId) {
+    ElMessage.warning('请先点播一段录像')
+    return
+  }
+  try {
+    const data = await cloudRecordApi.share({ recordId: playingRecord.value.recordId })
+    const link = location.origin + (data?.url || '')
+    try {
+      await navigator.clipboard.writeText(link)
+      ElMessage.success('分享链接已复制：' + link)
+    } catch (e) {
+      // 剪贴板不可用（非 HTTPS / 权限），退化为提示用户手动复制
+      ElMessageBox.alert(link, '分享链接', { confirmButtonText: '知道了' })
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '生成分享链接失败')
+  }
+}
+
+async function toggleImportant(record) {
+  try {
+    await cloudRecordApi.setImportant({
+      serial: serial.value,
+      code: code.value,
+      period: record.startAt,
+      important: !record.important
+    })
+    record.important = !record.important
+    ElMessage.success(record.important ? '已标记为重要' : '已取消重要标记')
+  } catch (e) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+async function removeOne(record) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除该录像（${fmtTs(record.startAt)}）？文件将同时删除。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    await cloudRecordApi.remove({ serial: serial.value, code: code.value, period: record.startAt })
+    ElMessage.success('已删除')
+    loadDaily()
+    loadMonthFlags()
+  } catch (e) {
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+async function removeDaily() {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 ${period.value} 当天的全部录像？`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    const data = await cloudRecordApi.removeDaily({
+      serial: serial.value,
+      code: code.value,
+      period: period.value.replace(/-/g, '')
+    })
+    ElMessage.success(`已删除 ${data?.deleted ?? 0} 条`)
+    loadDaily()
+    loadMonthFlags()
+  } catch (e) {
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+onMounted(async () => {
+  await loadMonthFlags()
+  await loadDaily()
+  updateNow()
+  nowTimer = setInterval(updateNow, 30000)
+  // 从列表页跳过来带了 ?play=<recordId> → 自动起播那一段
+  const wantPlay = String(route.query.play || '')
+  if (wantPlay) {
+    const target = records.value.find((r) => r.recordId === wantPlay)
+    if (target) {
+      await play(target)
+    }
+  }
+})
+
+onUnmounted(() => {
+  if (nowTimer) clearInterval(nowTimer)
+})
+</script>
+
+<style scoped>
+/*
+ * 表格与工具条沿用全局样式（.filter-bar / .el-table），
+ * 与「设备管理」「通道管理」保持一致，这里只补标题与时间轴。
+ */
+.box-title {
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 4px 0 12px;
+}
+
+/* ==================== 播放器 ==================== */
+
+/*
+ * 播放器居中，最大 700px —— 对齐 LiveGBS 的
+ * `.player-wrapper { max-width: 700px; margin: 0 auto }`。
+ *
+ * <p><b>为什么不用 .page.is-fill</b>：那个类会让卡片「吃掉一屏高度」，
+ * 内部再放播放器 + 时间轴 + 分段表，播放器就会被 flex 挤成扁条
+ * （实测画面被压成一条）。本页内容本来就要滚动，故不撑满。
+ */
+.player-wrap {
+  max-width: 700px;
+  margin: 0 auto 16px;
+}
+
+.player-tip {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+  pointer-events: none;
+}
+
+/*
+ * 原生 <video>：铺满 .video-box。
+ *
+ * <p>不用 object-fit: contain —— 录像是固定比例的，铺满即可；
+ * 若容器比例与视频不一致，contain 会留黑边，cover 会裁边。
+ */
+.video-element {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  display: block;
+}
+
+/* 点播控制条：播放器下方一行 */
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+/* ==================== 日历 ==================== */
+
+/*
+ * 日期选择器里的日期格：当天有录像的用蓝底高亮，一眼看出「哪天有录像」。
+ *
+ * <p>Element 的日期面板逐格渲染，走 #default 槽
+ * （basic-cell-render 里 renderSlot(slots,'default',cell)），
+ * 所以可以完全接管格子的渲染。
+ */
+.cal-cell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.cal-cell.has-record {
+  background: var(--brand-500);
+  color: #fff;
+  font-weight: 600;
+}
+
+/*
+ * 没有录像的日期：Element 会给 td 加 .disabled，但默认样式太淡
+ * （opacity 仍是 1、cursor 还是 pointer），看不出来点不了。
+ * 这里明确置灰 + 禁止点击。
+ */
+.date-picker :deep(.el-date-table td.disabled .cal-cell) {
+  color: var(--text-disabled, #c0c4cc);
+  cursor: not-allowed;
+  background: transparent;
+  text-decoration: line-through;
+  text-decoration-color: var(--line);
+}
+
+.date-picker :deep(.el-date-table td.disabled) {
+  cursor: not-allowed;
+}
+
+.date-picker {
+  width: 160px;
+}
+
+/* ==================== 时间轴 ==================== */
+
+.timeline-wrap {
+  padding: 4px 0 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 时间轴轨道本身只占固定高度，下方跟分段表 */
+.seg-table {
+  margin-top: 14px;
+}
+
+/* 列表视图：给个高度，表格内部滚动，页面不被拉得很长 */
+.detail-table {
+  height: 420px;
+}
+
+.timeline {
+  padding: 4px 2px 0;
+  user-select: none;
+}
+
+.tl-scale {
+  position: relative;
+  height: 20px;
+  margin: 0 8px;
+}
+
+.tl-hour {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+}
+
+.tl-track {
+  position: relative;
+  height: 50px;
+  margin: 0 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  /*
+   * 两层刻度，对齐 LiveGBS 的 .time-day（288 个 5 分钟小格 + 小时线）：
+   *   细线 = 每 5 分钟一格（100% / 288）
+   *   粗线 = 每小时（100% / 24）
+   */
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      var(--line-soft) 0 1px,
+      transparent 1px calc(100% / 288)
+    ),
+    repeating-linear-gradient(
+      to right,
+      var(--line) 0 1px,
+      transparent 1px calc(100% / 24)
+    );
+  overflow: visible;
+}
+
+.tl-seg {
+  position: absolute;
+  top: 9px;
+  height: 32px;
+  background: var(--brand-400);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+
+.tl-seg:hover {
+  filter: brightness(1.12);
+  box-shadow: 0 2px 8px rgba(31, 76, 176, 0.35);
+}
+
+.tl-seg.is-important {
+  background: var(--warning-500);
+}
+
+.tl-seg.is-playing {
+  background: var(--online-500);
+  box-shadow: 0 0 0 2px rgba(23, 145, 79, 0.28);
+}
+
+.tl-track-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.tl-now {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  background: var(--danger-500);
+  pointer-events: none;
+}
+
+.tl-now-label {
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  color: #fff;
+  background: var(--danger-500);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.timeline-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 8px 0;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+.star {
+  cursor: pointer;
+}
+
+/* 分段表的操作列：三个文字按钮排成一行，不换行 */
+.seg-table :deep(.el-button.is-link) {
+  font-size: 12.5px;
+  margin-left: 8px;
+}
+
+.seg-table :deep(.cell) {
+  white-space: nowrap;
+}
+</style>
