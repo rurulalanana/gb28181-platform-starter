@@ -36,7 +36,19 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                         // 登录接口自身
                         "/api/v1/login",
                         // 流地址 / WebRTC 交换（播放器无法携带登录态）
-                        "/api/v1/webrtc/**"
+                        "/api/v1/webrtc/**",
+                        // 录像分享页：分享链接就是给「不登录平台的人」用的，
+                        // 凭签名令牌换取录像信息（见 ShareTokenService）
+                        "/api/v1/cloudrecord/share/**",
+                        // 通道快照图片：直接放进 <img src> 加载，
+                        // 而 <img> 请求带不了 Authorization 头，带鉴权就永远加载不出来。
+                        // 快照本身是公开的通道缩略图，按静态资源处理。
+                        //
+                        // 模式必须是 */* 而非 **：前者只匹配「snap/{serial}/{code}.jpg」
+                        // 两段路径，** 会连「snap/grab」（一段）一起放行 ——
+                        // 抓拍要消耗设备带宽，不能变成匿名可调。
+                        // （grab 接口内部还有一次 StpUtil.checkLogin() 兜底）
+                        "/api/v1/cloudrecord/snap/*/*"
                 );
         // 操作日志：记录 /api/v1/** 的接口调用（排除项在拦截器内部处理）
         registry.addInterceptor(operationLogInterceptor)

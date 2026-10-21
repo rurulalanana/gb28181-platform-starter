@@ -63,6 +63,10 @@ sa-token:
   is-log: false
   is-read-cookie: false
   is-read-header: true
+  # 从「请求参数」里读 token。
+  # <video src="..."> 这类请求带不了自定义头，只能把 token 拼在 URL 上，
+  # 录像文件播放（/cloudrecord/file/{id}）就靠这个通过鉴权。
+  is-read-body: true
 
 gb28181:
   # 平台 20 位编码

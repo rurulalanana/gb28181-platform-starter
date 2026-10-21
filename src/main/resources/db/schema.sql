@@ -201,6 +201,37 @@ CREATE INDEX IF NOT EXISTS idx_gb_record_channel ON gb_record (channel_id, start
 CREATE UNIQUE INDEX IF NOT EXISTS uk_gb_record_file_path
     ON gb_record (file_path) WHERE file_path IS NOT NULL;
 
+-- -------------------- 录像计划（云端录像的时段/星期规则） --------------------
+
+-- 计划定义：名称 + 每周七天的录像时段 + 启用开关。
+-- plan 存 JSON 字符串，结构与 LiveGBS 兼容：
+--   [[{"s1":"00:00","e1":"24:00"}], [], [{"s3":"09:00","e3":"09:30"}], [], [], [], []]
+-- 外层 7 个数组依次是周一~周日；每项是该天的时段列表（一天可多段）。
+CREATE TABLE IF NOT EXISTS gb_record_plan (
+    id          BIGSERIAL PRIMARY KEY,
+    plan_id     VARCHAR(64)  NOT NULL,
+    name        VARCHAR(128) NOT NULL,
+    plan        TEXT         DEFAULT '[[],[],[],[],[],[],[]]',
+    enable      BOOLEAN      DEFAULT TRUE,
+    create_time TIMESTAMP    DEFAULT NOW(),
+    update_time TIMESTAMP    DEFAULT NOW(),
+    UNIQUE (plan_id)
+);
+
+-- 计划与通道的关联：一个计划可挂多个通道，一个通道也可挂多个计划。
+CREATE TABLE IF NOT EXISTS gb_record_plan_channel (
+    id         BIGSERIAL PRIMARY KEY,
+    plan_id    VARCHAR(64)  NOT NULL,
+    device_id  VARCHAR(20),
+    channel_id VARCHAR(20)  NOT NULL,
+    create_time TIMESTAMP   DEFAULT NOW(),
+    UNIQUE (plan_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gb_record_plan_channel_plan
+    ON gb_record_plan_channel (plan_id);
+CREATE INDEX IF NOT EXISTS idx_gb_record_plan_channel_channel
+    ON gb_record_plan_channel (channel_id);
+
 -- -------------------- 设备录像目录（RecordInfo） --------------------
 
 CREATE TABLE IF NOT EXISTS gb_device_record (

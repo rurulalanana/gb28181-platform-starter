@@ -18,4 +18,12 @@ public class CloudChannelVo {
     private Boolean deviceOnline;
     private String updatedAt;
     private String createdAt;
+
+    /**
+     * 快照访问路径（可直接放进 {@code <img src>}）。
+     *
+     * <p>没有快照时为 {@code null}（前端显示占位图）。路径形态与 LiveGBS 的
+     * {@code snap_url} 对齐，便于对照。
+     */
+    private String snapUrl;
 }
