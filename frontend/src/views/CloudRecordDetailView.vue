@@ -64,41 +64,18 @@
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            原生 <video> 直接播 MP4（后端 /api/v1/cloudrecord/file/{recordId}）。
+            xgplayer 挂载点。
 
-            实测（357MB / 1 小时 / moov 在文件尾 / H264）：
-              loadedmetadata @5330ms  dur=3601.68  1280x720
-              canplay        @5330ms  readyState=4  无错误
-            也就是说 moov 在文件尾并不影响播放大文件 —— 浏览器会先发
-            Range: bytes=-N 取尾部索引，再按需取数据，不用整个下完。
-            原生 video 自带进度条与拖动，靠的就是 HTTP Range。
+            录像回放直接播后端 /api/v1/cloudrecord/file/{recordId} 返回的 MP4：
+              - 浏览器靠 HTTP Range 按需拉取，不必整个下载完（实测 357MB /
+                1 小时的文件 loadedmetadata 在 5.3 秒内返回）；
+              - 进度条、拖动、倍速、音量、全屏、截图全部由 xgplayer 自带，
+                不用自己拼一套控件。
 
-            H265 录像由后端 /file 接口自动转成 H264（首次几秒，之后命中缓存），
-            转码期间请求会挂住。
-
-            autoplay 用「属性」而不是 JS 调 play()：
-            JS 调 play() 会被 Chrome 的省电策略 abort
-            （AbortError: video-only background media was paused to save power），
-            属性方式则能正常自动播放。
-
-            token 拼在 URL 上：<video src> 请求带不了自定义头，
-            后端 Sa-Token 配了 is-read-body 从 query 读。
+            token 拼在 URL 上：<video> 发起的请求带不了自定义头，
+            后端 Sa-Token 配了从 query 读（is-read-body）。
           -->
-          <video
-            v-if="playingRecord"
-            ref="videoEl"
-            class="video-element"
-            :src="playUrl"
-            controls
-            autoplay
-            muted
-            preload="metadata"
-            playsinline
-            @timeupdate="onTimeUpdate"
-            @loadedmetadata="onLoadedMetadata"
-            @ended="onEnded"
-            @error="onVideoError"
-          />
+          <div v-if="playingRecord" ref="playerEl" class="video-container" />
           <div v-else class="player-tip">
             <el-icon :size="34"><VideoPlay /></el-icon>
             <span>点击下方时间轴上的录像段点播</span>
@@ -176,6 +153,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import Player from 'xgplayer'
+import 'xgplayer/dist/index.min.css'
 import { cloudRecordApi } from '@/api'
 
 const route = useRoute()
@@ -294,8 +273,11 @@ const viewMode = ref('timeline')
 
 const playingRecord = ref(null)
 
-/** 原生 video 元素。 */
-const videoEl = ref(null)
+/** xgplayer 挂载点。 */
+const playerEl = ref(null)
+/** xgplayer 实例（非响应式，避免 Vue 代理播放器内部对象）。 */
+let xgPlayer = null
+
 /** 播放状态（展示用）。 */
 const playState = ref('空闲')
 const playStateType = computed(() => {
@@ -307,7 +289,7 @@ const playStateType = computed(() => {
 /**
  * 录像文件的播放地址。
  *
- * <p>token 拼在 URL 上：{@code <video src>} 请求带不了自定义头，
+ * <p>token 拼在 URL 上：{@code <video>} 发起的请求带不了自定义头，
  * Sa-Token 会从 query 参数里读 token（配置 {@code is-read-body: true}）。
  */
 const playUrl = computed(() => {
@@ -316,48 +298,60 @@ const playUrl = computed(() => {
   return `/api/v1/cloudrecord/file/${playingRecord.value.recordId}?Authorization=${encodeURIComponent(token)}`
 })
 
-/** 播放/暂停。 */
-function togglePlay() {
-  const v = videoEl.value
-  if (!v) return
-  if (v.paused) {
-    v.play().catch(() => {})
-  } else {
-    v.pause()
-  }
-}
-
-/** video 的 timeupdate：更新播放状态。 */
-function onTimeUpdate() {
-  const v = videoEl.value
-  if (!v) return
-  playState.value = v.paused ? '已暂停' : '播放中'
-}
-
 /**
- * 元数据加载完：更新状态。
+ * 创建/重建播放器。
  *
- * <p>自动播放靠 {@code autoplay} <b>属性</b>（见模板注释），
- * 这里只更新状态文案，不重复调 play()。
+ * <p>每次点播都新建实例：{@code destroy()} 之后 xgplayer 的 DOM 与
+ * 内部 MediaSource 都不可复用，重建比「换 src」可靠。
  */
-function onLoadedMetadata() {
-  playState.value = '播放中'
+function createPlayer() {
+  destroyPlayer()
+  const el = playerEl.value
+  if (!el) return null
+  xgPlayer = new Player({
+    el,
+    url: playUrl.value,
+    // 录像时长有限：不传 isLive，进度条/时间/倍速等点播控件才会出现
+    autoplay: true,
+    // 静音起播：浏览器只允许静音自动播放，用户点音量键即可恢复。
+    // 注意 xgplayer 的顶层配置项是 autoplayMuted（不是 muted）：
+    // muted 只会作为 video 元素属性传下去，不会让浏览器放行自动播放。
+    autoplayMuted: true,
+    lang: 'zh-cn',
+    width: '100%',
+    height: '100%',
+    ignores: ['download', 'testSpeed', 'definition', 'screenShot']
+  })
+
+  const p = xgPlayer
+  // 拖动进度条时 xgplayer 会自己切 Range 请求，这里只同步状态文案
+  p.on('playing', () => {
+    playState.value = '播放中'
+  })
+  p.on('pause', () => {
+    if (playState.value === '播放中') playState.value = '已暂停'
+  })
+  p.on('ended', () => {
+    playState.value = '播放结束'
+  })
+  p.on('error', () => {
+    playState.value = '播放异常'
+    ElMessage.error('播放失败：浏览器可能不支持该视频编码（如 H.265 缺少 HEVC 解码器）')
+  })
+  return p
 }
 
-function onEnded() {
-  playState.value = '播放结束'
-}
-
-/** 播放失败（如浏览器不支持该编码）。 */
-function onVideoError() {
-  const v = videoEl.value
-  const code = v?.error?.code
-  playState.value = '播放异常'
-  ElMessage.error(
-    code === 4
-      ? '浏览器不支持该视频编码（可能是 H265），请用 Chrome/Edge 并安装 HEVC 解码器'
-      : '播放失败'
-  )
+/** 销毁播放器并清空挂载点。 */
+function destroyPlayer() {
+  if (xgPlayer) {
+    try {
+      xgPlayer.destroy()
+    } catch (e) {
+      // 实例可能已释放，忽略
+    }
+    xgPlayer = null
+  }
+  if (playerEl.value) playerEl.value.innerHTML = ''
 }
 
 function todayString() {
@@ -536,20 +530,20 @@ function goBack() {
  * 取文件尾的索引，再按需取数据，不需要整个下完。
  *
  * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
- * 转成 ws-flv/webrtc 地址，供 jessibuca 播放。本页走原生 video，
+ * 转成 ws-flv/webrtc 地址，供「流式」播放用。本页直接播文件，
  * 那些地址一个都用不上；调它反而会让 ZLM 白读一遍文件、多等一个来回。
  *
- * <p><b>H265 录像</b>：浏览器解不了 HEVC，后端 {@code /file} 会自动转一道
- * H264（首次需要几秒，之后命中缓存）。转码期间请求会挂住，
- * 所以这里先把状态置成「加载中…」。
+ * <p><b>H265 录像</b>：浏览器原生支持 HEVC（macOS/Windows 的
+ * Chrome/Edge 通过系统解码器硬解），实测 2560×1440 的 H265 录像
+ * 可以正常播放，<b>不需要服务端转码</b>。
  */
 async function play(record) {
   playingRecord.value = { ...record }
   playState.value = '加载中…'
   try {
-    // 视频元素还没挂载时，等 nextTick 再播
+    // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例
     await nextTick()
-    videoEl.value?.load()
+    createPlayer()
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
     playingRecord.value = null
@@ -560,20 +554,11 @@ async function play(record) {
 /**
  * 停止点播。
  *
- * <p>把 {@code src} 摘掉并 {@code load()}，浏览器会中止对
- * {@code /file/{recordId}} 的 Range 请求，不会继续拉剩下的数据。
+ * <p>直接销毁播放器：xgplayer 会中止对 {@code /file/{recordId}} 的
+ * Range 请求，不会继续拉剩下的数据。
  */
 function stopPlay() {
-  const v = videoEl.value
-  if (v) {
-    try {
-      v.pause()
-      v.removeAttribute('src')
-      v.load()
-    } catch (e) {
-      // 忽略
-    }
-  }
+  destroyPlayer()
   playingRecord.value = null
   playState.value = '空闲'
 }
@@ -718,6 +703,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
+  destroyPlayer()
 })
 </script>
 

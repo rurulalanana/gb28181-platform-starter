@@ -114,7 +114,8 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { deviceApi, playbackApi, systemApi } from '@/api'
-import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 
 const route = useRoute()
@@ -132,9 +133,9 @@ const proto = ref('wsflv')
 const speed = ref(1)
 const mediaHttpPort = ref(null)
 
-/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+/** 播放器容器（xgplayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
-const player = useVideoPlayer(videoContainer)
+const player = useXgPlayer(videoContainer)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)

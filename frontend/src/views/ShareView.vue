@@ -36,7 +36,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useVideoPlayer } from '@/composables/useVideoPlayer'
+import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 
 const route = useRoute()
@@ -47,7 +47,7 @@ const error = ref('')
 const proto = ref('wsflv')
 
 const videoContainer = ref(null)
-const player = useVideoPlayer(videoContainer)
+const player = useXgPlayer(videoContainer)
 const playState = computed(() => player.state.value)
 const playStateType = usePlayerStateType(playState)
 

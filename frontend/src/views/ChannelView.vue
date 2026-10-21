@@ -330,7 +330,8 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, useVideoPlayer } from '@/composables/useVideoPlayer'
+import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -376,9 +377,9 @@ const previewTarget = ref(null)
 const proto = ref('wsflv')
 const mediaHttpPort = ref(null)
 
-/** 播放器容器（jessibuca 在内部创建 canvas，WebRTC 通路创建 video）。 */
+/** 播放器容器（xgplayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
-const player = useVideoPlayer(videoContainer)
+const player = useXgPlayer(videoContainer)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)

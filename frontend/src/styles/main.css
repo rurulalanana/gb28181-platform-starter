@@ -974,10 +974,9 @@ body {
 /*
  * 播放器挂载点。
  *
- * 播放器（jessibuca / WebRTC）自行在容器内创建 canvas 或 video 并管理尺寸，
- * 因此这里只负责撑满 .video-box，**不要**给内部 canvas/video 加 width/height ——
- * jessibuca 会按容器尺寸计算 canvas 的 inline `transform: scale(...)`，
- * 外部覆盖会导致双重缩放（画面缩成小块并偏移到容器外）。
+ * 播放器（xgplayer）自行在容器内创建 video 元素并管理尺寸，
+ * 因此这里只负责撑满 .video-box，**不要**给内部 video 加 width/height ——
+ * 外部覆盖会导致画面缩放基准错乱。
  */
 .video-container {
   position: absolute;
@@ -1499,4 +1498,41 @@ body {
   .quick-card {
     box-shadow: none;
   }
+}
+
+/* ==================== xgplayer 播放器主题 ==================== */
+
+/*
+ * 把 xgplayer 的默认红色主题改成平台品牌色。
+ *
+ * xgplayer 3.x 的主题色写死在编译后的 CSS 里（scss 变量
+ * `$progressPlayedBgImage: linear-gradient(-90deg, #FA1F41, #E31106)`），
+ * 没有暴露 CSS 变量，只能在这里按类名覆盖。
+ *
+ * 覆盖范围：进度条（已播/缓存/滑块）、按钮 hover 态、底部控制条背景。
+ */
+.xgplayer .xgplayer-progress-played {
+  background: linear-gradient(-90deg, var(--brand-400) 0%, var(--brand-600) 100%);
+}
+
+.xgplayer .xgplayer-progress-btn {
+  background: var(--brand-500);
+  border: .5px solid rgba(255, 255, 255, .28);
+  box-shadow: 0 0 4px rgba(44, 98, 214, .45);
+}
+
+.xgplayer .xgplayer-progress-cache {
+  background: rgba(255, 255, 255, .45);
+}
+
+/* 控制条图标默认是白色，hover 时用品牌色，与 Element 按钮的交互态一致 */
+.xgplayer xg-icon:hover .xgplayer-icon,
+.xgplayer xg-icon.xgplayer-active .xgplayer-icon {
+  color: var(--brand-400);
+}
+
+/* 音量/倍速等弹层的强调色 */
+.xgplayer .xgplayer-icon svg path,
+.xgplayer .xgplayer-icon svg rect {
+  transition: fill .15s ease;
 }

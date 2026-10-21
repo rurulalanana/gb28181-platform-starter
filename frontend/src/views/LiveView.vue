@@ -129,13 +129,13 @@
           :class="{ 'is-active': tile.id === activeTileId }"
         >
           <!--
-            注意：不要用 @dblclick —— 播放器（jessibuca）在 canvas 上吞掉了 dblclick，
+            注意：不要用 @dblclick —— 播放器在 video 元素上吞掉了 dblclick，
             冒泡与捕获都收不到；这里用 click 自己判定"双击"（间隔 320ms 内点同一格）。
           -->
           <div class="video-box" @click="onTileClick(tile)">
             <!--
-              jessibuca 会在容器内自建 canvas 渲染（支持 PCMA/PCMU 音频），
-              所以这里不是 <video> 而是普通容器 div。
+              xgplayer 会在容器内自建 video 元素渲染（直播走 MSE + Web Audio，
+              录像回放走原生 video），所以这里不是 <video> 而是普通容器 div。
             -->
             <div :ref="(el) => setContainerRef(tile.id, el)" class="video-container" />
 
@@ -237,7 +237,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, useVideoPlayer, preloadJessibuca } from '@/composables/useVideoPlayer'
+import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { useXgPlayer } from '@/composables/useXgPlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
@@ -253,7 +254,7 @@ const mediaHttpPort = ref(null)
  * 导致取 DOM 元素时拿到的是解包后的值而非 ref，无法再赋值绑定。
  */
 const players = {}
-/** 每格的容器 DOM 引用（jessibuca 在容器内自建 canvas）。 */
+/** 每格的容器 DOM 引用（xgplayer 在容器内自建 video）。 */
 const containerRefs = {}
 /** 播放器状态监听停止句柄。 */
 const stoppers = {}
@@ -487,9 +488,9 @@ function setContainerRef(id, el) {
 /** 获取（或创建）某格的播放器，并绑定当前 DOM 元素与状态监听。 */
 function playerOf(tile) {
   if (!players[tile.id]) {
-    // jessibuca 渲染到容器 div 内，传入容器 ref 供播放器创建 canvas
+    // 播放器渲染到容器 div 内，传入容器 ref 供播放器创建 video
     const containerRef = ref(containerRefs[tile.id])
-    const api = useVideoPlayer(containerRef)
+    const api = useXgPlayer(containerRef)
     players[tile.id] = { api, tile, containerRef }
     // 播放器状态同步到格子（替代轮询）
     stoppers[tile.id] = watch(
@@ -661,9 +662,8 @@ const route = useRoute()
 const router = useRouter()
 
 onMounted(async () => {
-  /* 预热播放器 SDK（js + wasm 约 1.3MB）：用户浏览通道列表时先下载好，
-     点播时几乎零等待（见 useVideoPlayer.preloadJessibuca）。 */
-  preloadJessibuca()
+  /* ws-flv 引擎不需要额外的 SDK 下载（解封装用 xgplayer-transmuxer，
+     音频用浏览器原生 Web Audio），因此不再做播放器预热。 */
   await loadChannels()
   await applyQueryPlay()
 })

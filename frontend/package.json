@@ -14,11 +14,11 @@
     "axios": "^1.7.7",
     "echarts": "^6.1.0",
     "element-plus": "^2.14.7",
-    "jessibuca": "^4.0.0",
-    "mpegts.js": "^1.8.2",
     "pinia": "^2.2.6",
     "vue": "^3.5.13",
-    "vue-router": "^4.4.5"
+    "vue-router": "^4.4.5",
+    "xgplayer": "^3.0.26",
+    "xgplayer-transmuxer": "^3.0.26"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
