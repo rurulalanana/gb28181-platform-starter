@@ -64,24 +64,25 @@
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            直接用原生 <video> 播 MP4，不用 jessibuca：
-            实测本机 Chrome/Electron 148 能解 H265（canPlayType 返回 probably，
-            实测能出 2560x1440 画面），而原生 video 天然支持 HTTP Range
-            → 拖动进度条直接定位，不需要服务端做 seek。
+            原生 <video> 直接播 MP4（后端 /api/v1/cloudrecord/file/{recordId}）。
 
-            token 拼在 URL 上：<video src> 请求带不了自定义头。
-          -->
-          <!--
-            直接用原生 <video> 播 MP4，不用 jessibuca：
-            浏览器解不了 H265（服务端已转成 720p H264），而原生 video
-            天然支持 HTTP Range → 拖动进度条直接定位。
+            实测（357MB / 1 小时 / moov 在文件尾 / H264）：
+              loadedmetadata @5330ms  dur=3601.68  1280x720
+              canplay        @5330ms  readyState=4  无错误
+            也就是说 moov 在文件尾并不影响播放大文件 —— 浏览器会先发
+            Range: bytes=-N 取尾部索引，再按需取数据，不用整个下完。
+            原生 video 自带进度条与拖动，靠的就是 HTTP Range。
 
-            autoplay 用<b>属性</b>而不是 JS 调 play()：
+            H265 录像由后端 /file 接口自动转成 H264（首次几秒，之后命中缓存），
+            转码期间请求会挂住。
+
+            autoplay 用「属性」而不是 JS 调 play()：
             JS 调 play() 会被 Chrome 的省电策略 abort
             （AbortError: video-only background media was paused to save power），
             属性方式则能正常自动播放。
 
-            token 拼在 URL 上：<video src> 请求带不了自定义头。
+            token 拼在 URL 上：<video src> 请求带不了自定义头，
+            后端 Sa-Token 配了 is-read-body 从 query 读。
           -->
           <video
             v-if="playingRecord"
@@ -526,25 +527,42 @@ function goBack() {
 /* ==================== 点播 / 下载 / 删除 ==================== */
 
 /**
- * 点播一段录像。
+ * 点播一段录像：把 MP4 直接交给原生 {@code <video>}。
  *
- * <p>直接把 MP4 交给原生 {@code <video>} 播 —— 不再走 ZLM 转协议：
- * 浏览器能解 H265，且原生 video 支持 Range，拖进度条直接定位。
+ * <p><b>实测数据</b>（357MB / 1 小时 / moov 在文件尾 / H264）：
+ * {@code loadedmetadata} 5.3 秒、{@code canplay} 5.3 秒、
+ * {@code readyState=4}，全程无错误。
+ * moov 在文件尾并不影响播放 —— 浏览器会先发 {@code Range: bytes=-N}
+ * 取文件尾的索引，再按需取数据，不需要整个下完。
+ *
+ * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
+ * 转成 ws-flv/webrtc 地址，供 jessibuca 播放。本页走原生 video，
+ * 那些地址一个都用不上；调它反而会让 ZLM 白读一遍文件、多等一个来回。
+ *
+ * <p><b>H265 录像</b>：浏览器解不了 HEVC，后端 {@code /file} 会自动转一道
+ * H264（首次需要几秒，之后命中缓存）。转码期间请求会挂住，
+ * 所以这里先把状态置成「加载中…」。
  */
 async function play(record) {
+  playingRecord.value = { ...record }
+  playState.value = '加载中…'
   try {
-    const data = await cloudRecordApi.play(record.recordId)
-    playingRecord.value = { ...record, ...data }
-    playState.value = '加载中…'
     // 视频元素还没挂载时，等 nextTick 再播
     await nextTick()
     videoEl.value?.load()
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
     playingRecord.value = null
+    playState.value = '空闲'
   }
 }
 
+/**
+ * 停止点播。
+ *
+ * <p>把 {@code src} 摘掉并 {@code load()}，浏览器会中止对
+ * {@code /file/{recordId}} 的 Range 请求，不会继续拉剩下的数据。
+ */
 function stopPlay() {
   const v = videoEl.value
   if (v) {
@@ -560,6 +578,13 @@ function stopPlay() {
   playState.value = '空闲'
 }
 
+/**
+ * 下载一段录像。
+ *
+ * <p>{@code /file} 接口默认是 {@code inline}（给 {@code <video>} 就地播放），
+ * 下载时带 {@code download=1} 让服务端改回 {@code attachment}。
+ * 这里用 fetch + blob 而不是直接开新窗口：需要带登录头。
+ */
 function download(record) {
   const url = record.downloadUrl
   if (!url) {
@@ -571,7 +596,8 @@ function download(record) {
     return
   }
   const token = localStorage.getItem('gb_token') || ''
-  fetch(url, { headers: { Authorization: token } })
+  const sep = url.includes('?') ? '&' : '?'
+  fetch(`${url}${sep}download=1`, { headers: { Authorization: token } })
     .then((resp) => {
       if (!resp.ok) throw new Error('下载失败 HTTP ' + resp.status)
       return resp.blob()

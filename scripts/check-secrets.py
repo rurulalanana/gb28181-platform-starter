@@ -24,11 +24,16 @@ KNOWN_SECRETS = [
 ]
 
 # 形如 password: 值 / "password": "值" / password=值
+#
+# 分隔符用 (?<![=!<>])[:=](?!=)：
+#   - 前置否定环视排除 <=、>=、!=、==（比较运算不是赋值）
+#   - 后置否定环视排除 == 的第二个 =
+# 否则 `if (token == null) {` 会被误判成「token 的值是 = null」。
 ASSIGN_RE = re.compile(
     r"""(?ix)
     \b(pass(word|wd)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)
-    \s*[:=]\s*
-    ["']?
+    ["']?\s*(?<![=!<>])[:=](?!=)\s*
+    (?P<q>["']?)              # 值的引号：有引号说明是字面量，不是变量引用
     (?P<val>[^\n]{0,160}?)
     (?=\s*[,;}\]\n]|$)
     """
@@ -49,7 +54,7 @@ SKIP_SUFFIX = {
 SKIP_PATH_PARTS = ("static/assets", "node_modules", "dist/", "target/")
 
 
-def is_placeholder(value: str) -> bool:
+def is_placeholder(value: str, quoted: bool = False) -> bool:
     v = value.strip().strip("\"'")
     if not v:
         return True
@@ -89,7 +94,8 @@ def is_placeholder(value: str) -> bool:
             return True
     # 纯变量引用（单个标识符）：payload.password = form.password
     # 要求小写/下划线开头 —— 驼峰开头的裸标识符（MyDbPass2024）更像口令
-    if re.fullmatch(r"[a-z_$][\w$]*", v):
+    # 加了引号的不算变量引用 —— "abc123def456" 是硬编码字面量，不是变量
+    if not quoted and re.fullmatch(r"[a-z_$][\w$]*", v):
         return True
     return False
 

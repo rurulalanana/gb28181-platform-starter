@@ -1,6 +1,14 @@
 server:
   port: 8080
   shutdown: graceful
+  compression:
+    # 开启 gzip：jessibuca 的 decoder.wasm 有 1MB，
+    # 公网链路上未压缩传输实测会被中间网关掐断
+    # （ERR_CONTENT_LENGTH_MISMATCH + 502），压缩后约 350KB 就稳了。
+    # 顺带把前端 JS/CSS 也压了，首屏更快。
+    enabled: true
+    mime-types: application/wasm,application/javascript,text/javascript,text/css,text/html,application/json,application/xml,image/svg+xml
+    min-response-size: 2048
 
 spring:
   application:

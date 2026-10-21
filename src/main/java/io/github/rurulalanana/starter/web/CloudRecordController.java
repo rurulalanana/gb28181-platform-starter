@@ -12,7 +12,6 @@ import io.github.rurulalanana.starter.service.ShareTokenService;
 import io.github.rurulalanana.starter.service.FfmpegSnapService;
 import io.github.rurulalanana.starter.service.SnapCaptureService;
 import io.github.rurulalanana.starter.service.SnapService;
-import io.github.rurulalanana.starter.service.TranscodeService;
 import io.github.rurulalanana.starter.storage.ObjectStorageService;
 import io.github.rurulalanana.starter.vo.CloudChannelListVo;
 import io.github.rurulalanana.starter.vo.CloudChannelVo;
@@ -77,7 +76,6 @@ public class CloudRecordController {
     private final SnapService snapService;
     private final SnapCaptureService snapCaptureService;
     private final ShareTokenService shareTokenService;
-    private final TranscodeService transcodeService;
 
     /** 有云端录像的通道。 */
     @GetMapping("/querychannels")
@@ -332,18 +330,17 @@ public class CloudRecordController {
     }
 
     /**
-     * 录像文件流（供浏览器 {@code <video>} 直接播放）。
+     * 录像文件流：浏览器 {@code <video>} 直接播放，也用于下载。
      *
      * <p><b>为什么用原生 {@code <video>} 而不是 jessibuca</b>：
-     * 实测本机 Chrome/Electron 148 能直接解 H265（{@code canPlayType} 返回
-     * probably，实测能出画面 2560x1440），而原生 video 天然支持
-     * <b>HTTP Range → 拖动进度条直接定位</b>，不需要服务端做 seek。
-     * ZLM 那边反而做不到（MP4 源无索引，{@code mk_media_source_seek_to} 返回 1）。
+     * 原生 video 天然支持 <b>HTTP Range → 拖动进度条直接定位</b>，
+     * 不需要服务端做 seek。实测 357MB / 1 小时 / moov 在文件尾的录像，
+     * {@code canplay} 5.3 秒就绪、{@code readyState=4}，没有任何问题。
      *
-     * <p><b>三点必要的处理</b>：
+     * <p><b>三处处理</b>：
      * <ul>
      *   <li>{@code Content-Disposition: inline} —— 默认的 attachment 会让浏览器
-     *       直接下载而不是播放；</li>
+     *       直接下载而不是播放；下载时加 {@code ?download=1} 换回 attachment；</li>
      *   <li><b>支持 Range</b> —— 拖动进度条时浏览器会发 {@code Range} 请求，
      *       不支持的话每次定位都要重下整个文件；</li>
      *   <li><b>token 走 query</b> —— {@code <video src>} 请求带不了自定义头，
@@ -351,10 +348,13 @@ public class CloudRecordController {
      *       前端把 token 拼在 URL 上即可。</li>
      * </ul>
      *
-     * <p>对象存储中的录像不经过本接口（用 download 接口返回的签名地址）。
+     * <p><b>对象存储里的录像直接 302 到签名地址</b>：文件在 OSS 上，
+     * 再经平台转发一遍纯属浪费（还多一跳延迟）。签名地址自带有效期，
+     * 浏览器拿到后自己直连 OSS。
      */
     @GetMapping("/file/{recordId}")
     public void file(@PathVariable String recordId,
+                     @RequestParam(value = "download", required = false) String download,
                      jakarta.servlet.http.HttpServletRequest request,
                      jakarta.servlet.http.HttpServletResponse response) throws java.io.IOException {
         StpUtil.checkLogin();
@@ -362,32 +362,29 @@ public class CloudRecordController {
         if (record == null) {
             throw BizException.notFound("录像不存在：" + recordId);
         }
+        // 对象存储：302 到签名地址，浏览器直连 OSS，不再经平台转发
         if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())) {
-            throw BizException.badRequest("该录像已归档到对象存储，请使用 download 接口返回的地址");
+            String url = recordService.downloadUrl(record);
+            if (url == null || url.isBlank() || url.startsWith("/api/")) {
+                throw BizException.badRequest("该录像已归档到对象存储，但拿不到可直连的地址");
+            }
+            response.sendRedirect(url);
+            return;
         }
         Path path = Path.of(record.getFilePath());
         if (!Files.exists(path)) {
             throw BizException.notFound("录像文件已丢失：" + record.getFilePath());
         }
-        /*
-         * 优先用「浏览器可播」的转码版（H265 → 720p H264 + faststart）。
-         *
-         * <p>浏览器（Chrome/Electron）实际解不了 H265 —— canPlayType 虽返回 probably，
-         * 播放时报 PIPELINE_ERROR_DECODE。H264 则完全正常，且原生 <video> 支持
-         * HTTP Range → 拖动进度条直接定位。
-         *
-         * <p>转码失败时回退到原文件（宁可让用户看花屏也别看不到）。
-         */
-        String playable = transcodeService.browserPlayable(recordId, record.getFilePath());
-        if (playable != null) {
-            path = Path.of(playable);
-        }
         long size = Files.size(path);
 
+        String fileName = record.getFileName() == null ? recordId
+                : record.getFileName().replace("\"", "");
         response.setContentType("video/mp4");
-        // inline：让浏览器就地播放，而不是弹下载
-        response.setHeader("Content-Disposition", "inline; filename=\""
-                + record.getFileName().replace("\"", "") + "\"");
+        // 默认 inline（让 <video> 就地播放）；带 download=1 时改成 attachment
+        response.setHeader("Content-Disposition",
+                "1".equals(download)
+                        ? "attachment; filename=\"" + fileName + "\""
+                        : "inline; filename=\"" + fileName + "\"");
         // 告诉浏览器支持 Range（拖进度条靠它）
         response.setHeader("Accept-Ranges", "bytes");
 
@@ -401,28 +398,18 @@ public class CloudRecordController {
                 long end = bounds[1];
                 len = end - start + 1;
                 /*
-                 * 从头开始的请求（bytes=0-）直接回 200 + 整个文件，<b>不</b>回 206。
+                 * 按 RFC 9110 §14.4 返回 206 + Content-Range。
                  *
-                 * <p>原因：这些录像 MP4 是「mdat 在前、moov 在尾」的非 faststart 布局，
-                 * Chrome 播它时会先拉全量再按需补尾部。实测：
-                 * <ul>
-                 *   <li>服务端忽略 Range 返回 200 全量 → 浏览器能正常解码；</li>
-                 *   <li>服务端回 206 分片 → Chrome 认为首个响应没拿全，
-                 *       继续发 {@code bytes=3244032-} 补尾部，
-                 *       最终报 {@code PIPELINE_ERROR_DECODE: video decode error}。</li>
-                 * </ul>
-                 * HTTP 规范允许服务端忽略 Range（RFC 9110 §14.2），
-                 * 所以「起点为 0 就回全量」既合规又最稳。
+                 * <p><b>早先这里是「起点为 0 就回 200 全量」</b>，实测反而更慢：
+                 * 回 200 等于告诉浏览器「这就是完整内容」，它没法再发 Range，
+                 * 只能从头到尾把整个文件拉下来才肯播 ——
+                 * 对 1 小时、357MB 的录像就是「必须下完才能看」。
                  *
-                 * <p>非零起点的请求仍然回 206 片段 —— 那是拖进度条真正用到的。
+                 * <p>回 206 之后，浏览器可以先取文件尾（找 moov），
+                 * 再按需取 mdat 区间，秒开。
                  */
-                if (start > 0) {
-                    response.setStatus(jakarta.servlet.http.HttpServletResponse.SC_PARTIAL_CONTENT);
-                    response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + size);
-                } else {
-                    start = 0;
-                    len = size;
-                }
+                response.setStatus(jakarta.servlet.http.HttpServletResponse.SC_PARTIAL_CONTENT);
+                response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + size);
             }
         }
         response.setContentLengthLong(len);
