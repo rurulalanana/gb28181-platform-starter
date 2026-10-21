@@ -74,6 +74,10 @@ export default class WsFlvStream {
     this.appending = false
     this.needInitSegment = true
     this.videoMime = ''
+    /** 是否已经拿到关键帧：没有关键帧不能喂给解码器。 */
+    this.gotKeyframe = false
+    /** 已收到的 FLV 字节数（用于判断「连上了但设备还没推流」）。 */
+    this.receivedBytes = 0
 
     // ---- 音频（Web Audio）----
     this.audioCtx = null
@@ -152,6 +156,7 @@ export default class WsFlvStream {
    */
   _push(chunk) {
     if (this.destroyed || this.failed) return
+    this.receivedBytes += chunk.length
     let tracks
     try {
       tracks = this.demuxer.demuxAndFix(chunk, this.discontinuity, this.contiguous, 0, false)
@@ -226,6 +231,23 @@ export default class WsFlvStream {
         return
       }
       this.needInitSegment = true
+    }
+
+    // 等关键帧再喂数据。
+    //
+    // 直播刚建立时，设备是从当前 GOP 的中间开始推流的，ZLM 拿到的第一个
+    // 视频帧往往是 P 帧而不是 I 帧。此时若把 init segment + 非关键帧喂给
+    // 解码器，会直接抛 MEDIA_ERR_DECODE（video.error.code === 3），画面黑屏。
+    //
+    // 所以在拿到第一个关键帧之前，把这一批样本丢掉继续等下一个 GOP
+    // （GOP 周期通常 2~5 秒）。解封装器内部会把最后一个样本缓存起来，
+    // 下一批再放回来，所以这里清空 samples 不会丢帧。
+    if (!this.gotKeyframe) {
+      if (!videoTrack.samples.some((s) => s.keyframe)) {
+        videoTrack.samples = []
+        return
+      }
+      this.gotKeyframe = true
     }
 
     let result

@@ -42,6 +42,15 @@ export function useXgPlayer(containerRef) {
   let host = null
   /** MediaSource 的 object URL，销毁时必须 revoke。 */
   let objectUrl = null
+  /** 待清理的定时器（等待推流提示等）。 */
+  const waitTimers = []
+  /**
+   * 解码失败的重试次数。
+   *
+   * <p>放在闭包作用域而不是 playFlv 内部：重建播放器会重新走 playFlv，
+   * 计数必须跨重建保留，否则会变成无限重试。
+   */
+  let decodeRetryCount = 0
   /** 销毁标记：异步流程返回后若已停止，丢弃结果。 */
   let disposed = false
 
@@ -51,6 +60,8 @@ export function useXgPlayer(containerRef) {
    * @param {string} streamId 流标识 `<设备编码>/<通道编码>`
    * @param {object} urls     播放地址集合 `{ wsFlv, httpFlv, webrtc }`
    * @param {object} [opts]   `{ proto: 'wsflv'|'webrtc' }`
+   * @param {function} [opts.onFatal] 播放彻底失败时的回调（解码错误重试耗尽后触发）
+   * @param {boolean} [opts._rebuild] 内部重建标记（重建不清空解码重试计数）
    */
   async function play(streamId, urls, opts = {}) {
     if (!streamId) {
@@ -62,16 +73,19 @@ export function useXgPlayer(containerRef) {
     currentStream.value = streamId
     const proto = opts.proto || protocol.value
     protocol.value = proto
+    // 用户主动点播才算「重新开始」，重置解码重试计数；
+    // 内部重建（解码失败自愈）要继续沿用计数，否则会变成无限重试。
+    if (!opts._rebuild) decodeRetryCount = 0
 
     if (proto === 'webrtc') {
       await playWebrtc(streamId)
     } else {
-      await playFlv(urls?.wsFlv || urls?.httpFlv)
+      await playFlv(urls?.wsFlv || urls?.httpFlv, opts.onFatal)
     }
   }
 
   /** 直播通路：自研 ws-flv。 */
-  async function playFlv(url) {
+  async function playFlv(url, onFatal) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -130,11 +144,24 @@ export function useXgPlayer(containerRef) {
           audioInfo.value = info
         } else {
           videoInfo.value = info
+          // 收到视频数据说明设备已经在推流，撤掉「等待设备推流」提示
+          if (state.value === '等待设备推流…') state.value = '缓冲中…'
         }
         stats.value = info
       }
     })
     stream.start()
+
+    // 等待设备推流：设备收到 INVITE 后才开始推 RTP，ZLM 拿到第一帧才注册
+    // 媒体源。这中间有几秒空窗，此时 WebSocket 连上了但收不到任何数据。
+    // 不给提示的话画面格会一直空着，用户以为没点上。
+    const waitTimer = setTimeout(() => {
+      if (disposed || !stream) return
+      if (stream.receivedBytes === 0) {
+        state.value = '等待设备推流…'
+      }
+    }, 4000)
+    waitTimers.push(waitTimer)
 
     // video 的音量/静音按钮由 xgplayer 操作，Web Audio 这条链路要跟着变
     const syncVolume = () => stream?.setVolume(media.muted ? 0 : media.volume)
@@ -146,9 +173,59 @@ export function useXgPlayer(containerRef) {
       playing.value = true
       state.value = '播放中'
     })
-    p.on('pause', () => {
+
+    // 直播不允许暂停：把 media 的 pause 事件拉回来。
+    //
+    // 为什么不能只靠 ignores 去掉 play 插件：键盘空格键走的是
+    // player 自身的 playPause action（keyboard 插件的默认键位），
+    // 不依赖 play 插件；浏览器媒体策略、页面切后台也会触发 pause。
+    // 所以这里做兜底 —— 任何原因导致的暂停都立即恢复播放。
+    media.addEventListener('pause', () => {
+      if (disposed) return
+      // 停止播放时（stop）会主动 pause，那时要放过
+      if (!stream) return
+      media.play().catch(() => {})
+    })
+
+    // 直播不允许变速：倍速按钮已移除，这里再兜底一次，
+    // 防止外部代码或残留的 rate 状态影响直播速度。
+    const resetRate = () => {
+      if (media.playbackRate !== 1) media.playbackRate = 1
+    }
+    media.addEventListener('ratechange', resetRate)
+    resetRate()
+
+    // 解码错误的自愈。
+    //
+    // 国标设备通过公网推流，RTP 丢包很常见（ZLM 日志里的
+    // `rtp丢包` / `packet dropped`）。若丢包正好落在关键帧上，
+    // 硬解会直接失败：
+    //   PIPELINE_ERROR_DECODE: NSOSStatusErrorDomain Code=-12909
+    //   (VTDecompressionOutputCallback)
+    // 一旦 video 元素报错，MediaSource 就废了（不能续用），
+    // 只能整个重建 —— 重新连 WebSocket、重新等一个完整的关键帧。
+    // 网络恢复后的下一个 GOP 通常是好的，所以重建大多能救回来。
+    const MAX_DECODE_RETRY = 3
+    media.addEventListener('error', () => {
+      if (disposed) return
+      // code 3 = MEDIA_ERR_DECODE；其它错误（网络中断等）交给流层处理
+      if (media.error?.code !== 3) return
+      if (decodeRetryCount >= MAX_DECODE_RETRY) {
+        state.value = `播放异常：解码失败（已重试 ${MAX_DECODE_RETRY} 次）`
+        playing.value = false
+        if (onFatal) onFatal()
+        return
+      }
+      decodeRetryCount++
+      state.value = `解码失败，重试中（${decodeRetryCount}/${MAX_DECODE_RETRY}）…`
       playing.value = false
-      if (!disposed && state.value === '播放中') state.value = '已暂停'
+      // 退避一下再重建：立刻重建大概率拿到同一批坏数据
+      const timer = setTimeout(() => {
+        if (disposed) return
+        stop()
+        play(currentStream.value, { wsFlv: url }, { proto: 'wsflv', onFatal, _rebuild: true })
+      }, 1200 * decodeRetryCount)
+      waitTimers.push(timer)
     })
 
     // MSE 起播需要主动拉一次；失败不致命（等数据到了会自动起）
@@ -180,6 +257,13 @@ export function useXgPlayer(containerRef) {
         if (disposed || document.visibilityState !== 'visible') return
         video.play().catch(() => {})
       })
+
+      // 直播不应变速：强制固定 1 倍速
+      const resetRate = () => {
+        if (video.playbackRate !== 1) video.playbackRate = 1
+      }
+      video.addEventListener('ratechange', resetRate)
+      resetRate()
 
       const conn = new RTCPeerConnection({ iceServers: [] })
       pc = conn
@@ -233,6 +317,8 @@ export function useXgPlayer(containerRef) {
   /** 停止并释放资源。 */
   function stop() {
     disposed = true
+    for (const t of waitTimers) clearTimeout(t)
+    waitTimers.length = 0
     if (stream) {
       stream.destroy()
       stream = null
@@ -300,11 +386,20 @@ export function useXgPlayer(containerRef) {
   }
 }
 
-/** xgplayer 通用外观配置：去掉与业务无关的入口，保持界面干净。 */
+/**
+ * xgplayer 通用外观配置：去掉与业务无关的入口，保持界面干净。
+ *
+ * <p>直播场景刻意<b>移除</b> {@code play}（播放/暂停按钮）与
+ * {@code playbackRate}（倍速）：直播是持续流，暂停会让画面卡住却没有意义，
+ * 倍速对直播同样无意义（LiveGBS 等主流平台也都不提供）。
+ *
+ * <p>注意：移除按钮只是去掉 UI 入口，键盘空格（keyboard 插件的
+ * {@code playPause} action）与浏览器媒体策略仍能触发暂停，
+ * 所以还要在 media 上做兜底拦截（见 {@code playFlv}）。
+ */
 function baseUiConfig() {
   return {
-    // 关掉测试网速/下载/画质切换等用不上的控件
-    ignores: ['download', 'testSpeed', 'definition']
+    ignores: ['download', 'testSpeed', 'definition', 'play', 'playbackRate']
   }
 }
 
