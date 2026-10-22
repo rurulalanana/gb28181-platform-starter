@@ -237,42 +237,42 @@ export function useXgPlayer(containerRef) {
     if (!disposed && state.value === '连接中…') state.value = '缓冲中…'
   }
 
-  /** WebRTC 通路（低延迟备用）。 */
+  /**
+   * WebRTC 通路（低延迟备用）。
+   *
+   * <p><b>同样用 xgplayer</b>，UI 与 ws-flv 通路完全一致（控制栏、音量、
+   * 全屏按钮都是同一套）。区别只在媒体源怎么喂：
+   * ws-flv 走 MediaSource 的 blob URL，WebRTC 的流是 {@code MediaStream}，
+   * 必须设到 {@code video.srcObject} 上。
+   *
+   * <p><b>为什么不能把 MediaStream 当 url 传给 xgplayer</b>：xgplayer 的
+   * {@code url} 只接受字符串（内部走 {@code media.src = url}），而
+   * {@code URL.createObjectURL(MediaStream)} 早已被浏览器移除。
+   *
+   * <p><b>为什么先协商再建播放器</b>：xgplayer 创建时会立刻拿 url 去 load。
+   * 如果这时 url 是空串，浏览器会报 {@code MEDIA_ERR_SRC_NOT_SUPPORTED}，
+   * xgplayer 随即显示「不支持的音频/视频格式 请试试刷新」——
+   * 而其实 WebRTC 还在协商，流根本还没到。所以这里先把 SDP 换完、
+   * {@code ontrack} 拿到流，再创建播放器并立刻挂 {@code srcObject}，
+   * 用户不会看到那个误导性的错误画面。
+   */
   async function playWebrtc(streamId) {
     const el = createHost()
     if (!el) return
     state.value = '协商中…'
+
     try {
-      const video = document.createElement('video')
-      video.autoplay = true
-      video.playsInline = true
-      video.muted = true
-      video.controls = true
-      video.style.cssText =
-        'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000'
-      el.appendChild(video)
-
-      // 直播不应被暂停：原生控制条的暂停键点了立即恢复（保留控制条以便调音量）
-      video.addEventListener('pause', () => {
-        if (disposed || document.visibilityState !== 'visible') return
-        video.play().catch(() => {})
-      })
-
-      // 直播不应变速：强制固定 1 倍速
-      const resetRate = () => {
-        if (video.playbackRate !== 1) video.playbackRate = 1
-      }
-      video.addEventListener('ratechange', resetRate)
-      resetRate()
-
       const conn = new RTCPeerConnection({ iceServers: [] })
       pc = conn
-      conn.ontrack = (event) => {
-        if (disposed) return
-        video.srcObject = event.streams[0]
-        playing.value = true
-        state.value = '播放中'
-      }
+
+      // ontrack 在 setRemoteDescription 之后由浏览器回调；用 Promise 等它，
+      // 这样下面创建播放器时流一定已经到手。
+      const streamPromise = new Promise((resolve) => {
+        conn.ontrack = (event) => {
+          resolve(event.streams[0] || new MediaStream([event.track]))
+        }
+      })
+
       conn.onconnectionstatechange = () => {
         if (disposed || !pc) return
         if (conn.connectionState === 'failed' || conn.connectionState === 'disconnected') {
@@ -293,6 +293,61 @@ export function useXgPlayer(containerRef) {
       if (disposed) return
       if (!data || !data.sdp) throw new Error('未获取到 SDP answer')
       await conn.setRemoteDescription({ type: 'answer', sdp: data.sdp })
+
+      // 等轨道到达（最多 8 秒，超时按失败处理）
+      const stream = await Promise.race([
+        streamPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('等待视频轨道超时')), 8000))
+      ])
+      if (disposed) return
+
+      /*
+       * 用「空的 MediaSource」作初始 url：它是<b>合法媒体源</b>，
+       * xgplayer 初始化时不会报「不支持的格式」；随后立刻被 srcObject 接管，
+       * 那个空的 MediaSource 不会再被用到。
+       */
+      const ms = new MediaSource()
+      objectUrl = URL.createObjectURL(ms)
+
+      player.value = new Player({
+        el,
+        url: objectUrl,
+        isLive: true,
+        autoplay: true,
+        autoplayMuted: true,
+        lang: 'zh-cn',
+        width: '100%',
+        height: '100%',
+        ...baseUiConfig()
+      })
+
+      const p = player.value
+      const media = p.media
+
+      // 媒体流挂到 xgplayer 内部的 video 上，控制栏/音量/全屏就都归它管了
+      media.srcObject = stream
+      media.play().catch(() => {})
+
+      // 直播不允许暂停（与 ws-flv 通路一致）：任何原因导致的暂停都立即恢复。
+      media.addEventListener('pause', () => {
+        if (disposed || !media.srcObject) return
+        media.play().catch(() => {})
+      })
+
+      // 直播不允许变速
+      const resetRate = () => {
+        if (media.playbackRate !== 1) media.playbackRate = 1
+      }
+      media.addEventListener('ratechange', resetRate)
+      resetRate()
+
+      p.on('playing', () => {
+        if (disposed) return
+        playing.value = true
+        state.value = '播放中'
+      })
+
+      playing.value = true
       state.value = '播放中'
     } catch (e) {
       if (disposed) return
@@ -305,6 +360,18 @@ export function useXgPlayer(containerRef) {
   /** 切换通路（播放中自动重连）。 */
   async function switchProtocol(proto, urls) {
     if (proto === protocol.value && playing.value) return
+    /*
+     * 目标通路没有可用地址时<b>不要动现有播放器</b>。
+     *
+     * <p>原实现先 stop() 再 play()，一旦 urls 为空（比如流已被空闲巡检关闭、
+     * 查询接口返回 400），播放器就被拆掉了却接不上新的源 ——
+     * 用户看到的是「切个协议画面就没了，也不报错」。
+     */
+    const target = proto === 'webrtc' ? urls?.webrtc : (urls?.wsFlv || urls?.httpFlv)
+    if (!target) {
+      state.value = '缺少播放地址'
+      return
+    }
     protocol.value = proto
     const streamId = currentStream.value
     const wasPlaying = playing.value
@@ -325,6 +392,16 @@ export function useXgPlayer(containerRef) {
     }
     if (player.value) {
       try {
+        /*
+         * WebRTC 通路的 MediaStream 必须显式断开：video 元素只要还持有
+         * srcObject，就会一直挂着那路 track（摄像头/编码器不释放），
+         * 切换协议或重新点播时会有多路残留。
+         * xgplayer 的 destroy() 只清 src 属性，不管 srcObject。
+         */
+        const media = player.value.media
+        if (media && media.srcObject) {
+          media.srcObject = null
+        }
         player.value.destroy()
       } catch (e) {
         // 实例可能已释放
@@ -393,13 +470,31 @@ export function useXgPlayer(containerRef) {
  * {@code playbackRate}（倍速）：直播是持续流，暂停会让画面卡住却没有意义，
  * 倍速对直播同样无意义（LiveGBS 等主流平台也都不提供）。
  *
+ * <h3>为什么必须关掉 {@code closeVideoClick} / {@code closeVideoDblclick}</h3>
+ * <p>xgplayer 默认在 video 元素上接管单击与双击（单击暂停、双击全屏），
+ * 而且它的处理函数里会调 {@code event.stopPropagation()}。这带来两个问题：
+ * <ul>
+ *   <li><b>外层容器的 click 收不到</b> —— 视频墙靠
+ *       {@code .video-box @click} 切换「当前操作格」（active），
+ *       事件被 xgplayer 吞掉后点画面就没反应了；</li>
+ *   <li><b>点画面会暂停直播</b> —— 虽然有 pause 兜底拦截，
+ *       但那一瞬间的暂停/恢复会让画面顿一下。</li>
+ * </ul>
+ * <p>关掉这两个开关后，xgplayer 直接短路返回，既不 preventDefault 也不
+ * stopPropagation，事件正常冒泡到外层容器。双击全屏由业务层自己实现
+ * （视频墙用 320ms 内的两次 click 判定），比播放器内置的更可控。
+ *
  * <p>注意：移除按钮只是去掉 UI 入口，键盘空格（keyboard 插件的
  * {@code playPause} action）与浏览器媒体策略仍能触发暂停，
  * 所以还要在 media 上做兜底拦截（见 {@code playFlv}）。
  */
 function baseUiConfig() {
   return {
-    ignores: ['download', 'testSpeed', 'definition', 'play', 'playbackRate']
+    ignores: ['download', 'testSpeed', 'definition', 'play', 'playbackRate'],
+    // 点画面不暂停、也不拦截事件冒泡（详见上面的说明）
+    closeVideoClick: true,
+    // 双击全屏交给业务层判定，避免与播放器内置行为重复触发
+    closeVideoDblclick: true
   }
 }
 

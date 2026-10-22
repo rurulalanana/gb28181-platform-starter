@@ -129,8 +129,13 @@
           :class="{ 'is-active': tile.id === activeTileId }"
         >
           <!--
-            注意：不要用 @dblclick —— 播放器在 video 元素上吞掉了 dblclick，
-            冒泡与捕获都收不到；这里用 click 自己判定"双击"（间隔 320ms 内点同一格）。
+            点击画面格：切换「当前操作格」（active）与云台目标；
+            320ms 内再次点同一格视为双击 → 该格全屏。
+
+            注意：xgplayer 默认会接管 video 上的单击（暂停）和双击（全屏），
+            并且在处理函数里 stopPropagation —— 那样这个 @click 根本收不到。
+            所以 useXgPlayer 里统一配了 closeVideoClick / closeVideoDblclick，
+            让播放器不再拦截点击事件（详见该文件 baseUiConfig 的说明）。
           -->
           <div class="video-box" @click="onTileClick(tile)">
             <!--
@@ -637,7 +642,19 @@ function clearTile(tile) {
   if (ptzTileId.value === tile.id) ptzTileId.value = 0
 }
 
-/** 切换协议：所有播放中的格子重连。 */
+/**
+ * 切换协议：所有播放中的格子重连。
+ *
+ * <p><b>拿不到播放地址时要重新完整点播，不能直接调 switchProtocol</b>：
+ * 切协议时 {@code stop()} 会断开旧通路的连接，这一瞬间 ZLM 的读者数会归零，
+ * 平台侧的空闲流巡检（{@code reapIdleStreams}，45 秒无观看者即关流）
+ * 有可能刚好在此时执行，把流关掉。之后再查 {@code stream/info} 就是 400，
+ * {@code urls} 为空 —— 而 {@code switchProtocol} 拿到空地址会直接清空播放器，
+ * 表现就是「切回来画面没了，也不报错」。
+ *
+ * <p>所以这里一旦发现流不在了，就走完整的 {@code playTile}（内部会重新
+ * INVITE 拉起设备推流），而不是继续拿空地址去切。
+ */
 async function onProtoChange() {
   const active = visibleTiles.value.filter((t) => t.playing && t.channelKey)
   if (!active.length) return
@@ -645,12 +662,18 @@ async function onProtoChange() {
   for (const tile of active) {
     const streamId = `${tile.serial}/${tile.code}`
     const player = playerOf(tile)
-    let urls = {}
+    let urls = null
     try {
       const info = await streamApi.info(streamId, true)
       urls = resolvePlayUrls(info, mediaHttpPort.value)
     } catch (e) {
-      // 忽略
+      // 流可能已被空闲巡检关闭，下面会重新点播
+    }
+    if (!urls || (!urls.wsFlv && !urls.webrtc)) {
+      // 流不在了：重新完整点播（会重新 INVITE 拉起设备推流）
+      tile.state = '重新点播中…'
+      await playTile(tile)
+      continue
     }
     await player.switchProtocol(proto.value, urls)
     tile.state = player.state.value

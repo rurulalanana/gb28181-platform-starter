@@ -32,7 +32,7 @@
  * @module MseRecordPlayer
  */
 
-import { Mp4Remuxer } from './Mp4Remuxer.js'
+import { Mp4Remuxer, scanParamSets } from './Mp4Remuxer.js'
 
 /** 重建 MediaSource 的最大次数，超过就放弃。 */
 const MAX_REBUILD = 12
@@ -45,6 +45,40 @@ const MOOV_MAX_BYTES = 32 * 1024 * 1024
 
 /** 提前下载的 GOP 数量（保证连续播放不卡顿）。 */
 const PREFETCH_GOP = 2
+
+/**
+ * 缓冲窗口（秒）：只下载「播放位置 + 这个时长」以内的数据。
+ *
+ * <p>不设上限的话，{@code updateend} 会一路触发，几秒钟就把整段几十 MB
+ * 的录像拉到本地 —— 既费流量，也让"按需下载"名存实亡。
+ * 播放推进时由 {@code timeupdate} 续上下载。
+ */
+const LEAD_SECONDS = 20
+
+/**
+ * 修复编码参数集时，最多往前扫几个 GOP。
+ *
+ * <p>GOP 通常 1~2 秒（实测 2 秒），真参数集一般在前几个关键帧就带内出现。
+ * 上限存在的意义是防止"整段都捞不到"时把几十 MB 录像下载干净 ——
+ * 那种情况说明录像真的坏了，再扫也没用。
+ */
+const PARAM_SCAN_GOP = 8
+
+/**
+ * 调试开关。
+ *
+ * <p>容错通路的状态机（下载 → 塞 SourceBuffer → 解码报错 → 重建）不容易
+ * 从现象反推：界面上只看到一个笼统的「容错重建…」。排查时在浏览器控制台
+ * 执行 {@code window.__MSE_DEBUG__ = true} 再点播，就能看到每一步的
+ * 片段序号、播放位置和缓冲区间。生产环境默认关闭，零开销。
+ *
+ * @param {...any} args
+ */
+function dbg(...args) {
+  if (typeof window !== 'undefined' && window.__MSE_DEBUG__) {
+    console.log('[MseRecordPlayer]', ...args)
+  }
+}
 
 /**
  * 按编码给出 MSE 的 MIME。
@@ -102,6 +136,21 @@ export class MseRecordPlayer {
     this.onFatal = options.onFatal || (() => {})
     this.onSkip = options.onSkip || (() => {})
 
+    /**
+     * 首次播放用的 MediaSource（由外部播放器骨架创建）。
+     *
+     * <p>xgplayer 这类外壳要求「构造时就必须有合法媒体源」，
+     * 所以由调用方先建 MediaSource、把 blob URL 交给播放器当 url，
+     * 再把同一个实例传进来，避免本类二次改写 {@code video.src}
+     * 导致播放器手里的地址失效。
+     *
+     * <p>为空时本类自己建（保留脱离播放器独立使用的能力）。
+     */
+    this.initialMediaSource = options.mediaSource || null
+
+    /** 本类自建、销毁时需要 revoke 的 blob URL。 */
+    this.ownedUrls = []
+
     /** 录像地址（已带 token） */
     this.url = ''
     this.fileSize = 0
@@ -121,10 +170,34 @@ export class MseRecordPlayer {
     this.started = false
     this.ms = null
     this.sb = null
-    this.objectUrl = ''
     this._rebuilding = false
     /** 上一次上报的状态（避免重复回调「播放中」）。 */
     this._state = ''
+    /** 是否已有一个片段正在下载（防止 updateend / timeupdate 并发触发重复下载）。 */
+    this._feeding = false
+    /**
+     * 当前那次下载属于哪个 SourceBuffer。
+     *
+     * <p>容错重建会换掉 SourceBuffer，此时上一轮的下载 Promise 还悬在半空。
+     * 如果只用一个布尔守卫，进程就成了：新缓冲的 {@code updateend} 发现
+     * {@code _feeding} 仍是 true 就提前返回，而旧 Promise 落地时又因为
+     * "sb 已换"直接丢弃 —— <b>两边都不喂，播放永久卡死</b>。
+     * 记下归属后，旧的一轮落地时不会去动新一轮的守卫。
+     */
+    this._feedingSb = null
+    /** 已打过「窗口外等待」日志的片段序号（避免每次 timeupdate 刷屏）。 */
+    this._waitLogged = -1
+    /**
+     * 最近一次成功 append 的片段序号。
+     *
+     * <p>解码错误要归因到「哪一段坏了」。绝大多数情况按 {@code currentTime}
+     * 归因是对的（MSE 播到哪儿就在哪儿报错），但<b>容错重建之后</b>
+     * {@code currentTime} 会被 {@code video.src} 重置为 0 —— 这时再按时间归因
+     * 会永远指向第 0 段：它已经在 skipSet 里，于是不会记入新的坏段，
+     * 下一轮又从同一段坏数据开始，原地打转直到重试次数耗尽。
+     * 所以时间归因落到「已跳过的段」时，改用这个字段兜底。
+     */
+    this.lastFedIndex = -1
 
     this._onError = this._onError.bind(this)
     /*
@@ -139,8 +212,33 @@ export class MseRecordPlayer {
       this._state = 'playing'
       this.onState('播放中')
     }
+    /*
+     * 拖动支持。
+     *
+     * <p>按需下载模式下 buffered 只覆盖「已经喂过」的区间，
+     * 用户拖到未下载的位置时浏览器会一直等数据（画面全黑、进度条不动）。
+     * 这里把下载指针拨到目标片段：往前拖直接跳着下载，往回拖清空缓冲重喂。
+     */
+    this._onSeeking = () => {
+      if (this.aborted || this._rebuilding) return
+      this._onSeek()
+    }
+    /*
+     * 播放推进时续下载。
+     *
+     * <p>_feed 有 {@link LEAD_SECONDS} 的缓冲窗口，喂满窗口就停手；
+     * 之后靠 timeupdate（约 4 次/秒）把窗口往前推。没有这个监听，
+     * 画面播到窗口边缘就会卡住不再加载。
+     */
+    this._onTimeUpdate = () => {
+      if (this.aborted || this._rebuilding) return
+      const sb = this.sb
+      if (sb && !sb.updating) this._feed()
+    }
     this.video.addEventListener('error', this._onError)
     this.video.addEventListener('playing', this._onPlaying)
+    this.video.addEventListener('seeking', this._onSeeking)
+    this.video.addEventListener('timeupdate', this._onTimeUpdate)
   }
 
   /** 销毁并释放资源。 */
@@ -148,19 +246,23 @@ export class MseRecordPlayer {
     this.aborted = true
     this.video.removeEventListener('error', this._onError)
     this.video.removeEventListener('playing', this._onPlaying)
+    this.video.removeEventListener('seeking', this._onSeeking)
+    this.video.removeEventListener('timeupdate', this._onTimeUpdate)
     try {
       if (this.ms && this.ms.readyState === 'open') {
         this.ms.endOfStream()
       }
     } catch (e) { /* 已关闭 */ }
-    if (this.objectUrl) {
-      URL.revokeObjectURL(this.objectUrl)
-      this.objectUrl = ''
+    // 只 revoke 自己建的 URL：外部传入的 MediaSource 由调用方负责释放
+    for (const u of this.ownedUrls) {
+      try { URL.revokeObjectURL(u) } catch (e) { /* 忽略 */ }
     }
+    this.ownedUrls.length = 0
     this.chunkCache.clear()
     this.downloading.clear()
     this.sb = null
     this.ms = null
+    this.initialMediaSource = null
     this.video.removeAttribute('src')
   }
 
@@ -186,16 +288,86 @@ export class MseRecordPlayer {
     const index = await this._fetchMoov()
     const remuxer = new Mp4Remuxer(index.bytes, index.offset)
     this.remuxer = remuxer
-    this.initSegment = remuxer.initSegment()
     this.gops = remuxer.gops()
     if (!this.gops.length) {
       throw new Error('录像里没有可播放的画面')
     }
+    /*
+     * 编码参数（hvcC）可能被写坏，必须在建 MediaSource 之前修好：
+     * 一旦 addSourceBuffer 按坏的 codecs 串建好了，后面再改就只能重建。
+     * 见 {@link _recoverParams}。
+     */
+    await this._recoverParams()
+    this.initSegment = remuxer.initSegment()
 
     // ---- 3) 挂上 MSE，开始按需下载 + 播放 ----
     await this._open()
     this.started = true
     this._feed()
+  }
+
+  /**
+   * 修复被写坏的编码参数集（VPS/SPS/PPS）。
+   *
+   * <h3>为什么要修</h3>
+   * <p>ZLM 偶尔会把 <b>整帧</b>当成参数集写进 {@code hvcC}：实测某个录文件的
+   * {@code hvcC} 里 VPS 是 3133 字节（正常 23 字节），首字节还是 {@code 0xC0}
+   * 而不是 {@code 0x40}（forbidden_zero_bit 被置位）。
+   * ffmpeg 解析时在这段字节上直接失败返回，<b>连后面完好的 SPS/PPS 也一并没注册</b>，
+   * 于是每一帧都报 {@code PPS id out of range}；浏览器侧表现就是
+   * 每一段都解不出来 —— 容错跳过所以帮不上忙（全是坏段），最后重建次数耗尽。
+   *
+   * <h3>怎么修</h3>
+   * <p>编码器通常在每个 IDR 前重复 VPS/SPS/PPS，所以真参数集往往还在 mdat 里。
+   * 这里从前往后扫样本（长度前缀 NAL），校验通过就拿来替换。
+   * 实测那个坏文件的第 38 个样本起每个关键帧都带着正确的 23 字节 VPS，
+   * 换进去之后 ffmpeg 从「96 行错误、解不出帧」变成「879 帧、0 错误」。
+   *
+   * <p>扫描上限 {@link PARAM_SCAN_GOP} 个 GOP：GOP 通常 1~2 秒，
+   * 参数集一般在前几个关键帧就出现，没必要为了坏文件把整个录像下下来。
+   *
+   * @returns {Promise<void>}
+   */
+  async _recoverParams() {
+    const remuxer = this.remuxer
+    const needed = new Set(remuxer.needsParamRecovery)
+    if (!needed.size) {
+      return
+    }
+    this.onState('修复编码参数')
+    const limit = Math.min(this.gops.length, PARAM_SCAN_GOP)
+    for (let i = 0; i < limit && needed.size; i++) {
+      let data
+      try {
+        data = await this._fetchGop(i)
+      } catch (e) {
+        continue
+      }
+      if (this.aborted) {
+        return
+      }
+      const g = this.gops[i]
+      for (const s of g.samples) {
+        const from = s.offset - g.dataStart
+        if (from < 0 || from + s.size > data.length) {
+          continue
+        }
+        const found = scanParamSets(data.subarray(from, from + s.size), needed)
+        for (const t of Object.keys(found)) {
+          remuxer.setParamSets(found)
+          needed.delete(Number(t))
+        }
+        if (!needed.size) {
+          break
+        }
+      }
+    }
+    if (needed.size) {
+      // 捞不到就只能用原参数集试一次（有的解码器能容忍缺 VPS）
+      console.warn('[录像] 参数集仍缺失：', [...needed].join(','))
+    } else {
+      dbg('参数集已修复', { sets: Object.keys(remuxer.paramSets) })
+    }
   }
 
   /**
@@ -290,37 +462,111 @@ export class MseRecordPlayer {
   /**
    * 建 MediaSource 并挂到 video 上。
    *
+   * <p>首次优先用外部传入的实例（播放器外壳已经拿它的 blob URL 当媒体源了），
+   * 之后（容错重建）由本类新建。
+   *
    * @returns {Promise<void>}
    */
   _open() {
     return new Promise((resolve, reject) => {
-      const ms = new MediaSource()
-      this.ms = ms
-      this.objectUrl = URL.createObjectURL(ms)
-      this.video.src = this.objectUrl
-      ms.addEventListener('sourceopen', () => {
+      let ms = this.initialMediaSource
+      this.initialMediaSource = null
+      if (!ms) {
         try {
-          /*
-           * 'segments' 保留 fMP4 里的绝对时间戳 → 进度条可以任意拖动。
-           * （'sequence' 会丢掉时间戳，拖动就失效。）
-           */
-          const sb = ms.addSourceBuffer(mimeFor(this.remuxer.codec))
-          sb.mode = 'segments'
-          this.sb = sb
-          sb.addEventListener('updateend', () => {
-            this._ensurePlayable()
-            this._feed()
-          })
-          sb.addEventListener('error', () => {
-            this._skipCurrent('SourceBuffer 错误')
-          })
-          sb.appendBuffer(this.initSegment)
-          resolve()
+          ms = this._newMediaSource()
         } catch (e) {
           reject(e)
+          return
         }
-      }, { once: true })
+      }
+      this.ms = ms
+      const onOpen = () => {
+        dbg('sourceopen 触发')
+        this._attach(ms).then(resolve, reject)
+      }
+      this._publishDuration(ms)
+      if (ms.readyState === 'open') {
+        onOpen()
+        return
+      }
+      dbg('等待 sourceopen', { readyState: ms.readyState })
+      ms.addEventListener('sourceopen', onOpen, { once: true })
       ms.addEventListener('error', () => reject(new Error('MediaSource 打开失败')), { once: true })
+    })
+  }
+
+  /**
+   * 新建 MediaSource 并把 blob URL 设为当前媒体源。
+   *
+   * @returns {MediaSource}
+   */
+  _newMediaSource() {
+    if (typeof window === 'undefined' || !window.MediaSource) {
+      throw new Error('当前浏览器不支持 MSE，无法播放该录像')
+    }
+    const ms = new MediaSource()
+    const url = URL.createObjectURL(ms)
+    this.ownedUrls.push(url)
+    dbg('新建 MediaSource', { prevSrc: (this.video.currentSrc || '').slice(0, 20) })
+    this.video.src = url
+    return ms
+  }
+
+  /**
+   * 把总时长告诉 MediaSource。
+   *
+   * <p><b>为什么必须显式设置</b>：MSE 在 {@code endOfStream()} 之前
+   * {@code duration} 一直是 {@code Infinity}。本播放器是<b>边下边播</b>，
+   * 不可能等全部片段喂完才结束流 —— 那样进度条会一直是"无限长"的转圈状态，
+   * 用户也拖不动。索引（moov）已经给出每段的时长，直接算出来赋给
+   * {@code MediaSource.duration}，进度条立刻就有完整刻度。
+   *
+   * @param {MediaSource} ms
+   */
+  _publishDuration(ms) {
+    if (!this.remuxer || !this.gops.length) return
+    const ts = this.remuxer.timescale || 1
+    const last = this.gops[this.gops.length - 1]
+    const end = (last.startTime + last.duration) / ts
+    if (!Number.isFinite(end) || end <= 0) return
+    const set = () => {
+      try {
+        ms.duration = end
+      } catch (e) { /* 还没 open 时赋值会抛错，下个时机再设 */ }
+    }
+    set()
+    ms.addEventListener('sourceopen', set, { once: true })
+  }
+
+  /**
+   * 创建 SourceBuffer 并灌入初始化段。
+   *
+   * @param {MediaSource} ms
+   * @returns {Promise<void>}
+   */
+  _attach(ms) {
+    return new Promise((resolve, reject) => {
+      try {
+        /*
+         * 'segments' 保留 fMP4 里的绝对时间戳 → 进度条可以任意拖动。
+         * （'sequence' 会丢掉时间戳，拖动就失效。）
+         */
+        const sb = ms.addSourceBuffer(mimeFor(this.remuxer.codec))
+        sb.mode = 'segments'
+        this.sb = sb
+        sb.addEventListener('updateend', () => {
+          this._ensurePlayable()
+          this._feed()
+        })
+        sb.addEventListener('error', () => {
+          this._skipCurrent('SourceBuffer 错误')
+        })
+        sb.appendBuffer(this.initSegment)
+        dbg('初始化段已塞入', { codec: this.remuxer.codec, bytes: this.initSegment.length })
+        resolve()
+      } catch (e) {
+        reject(e)
+      }
     })
   }
 
@@ -332,10 +578,11 @@ export class MseRecordPlayer {
    */
   _feed() {
     const sb = this.sb
-    if (this.aborted || this._rebuilding || !sb || sb.updating) {
+    if (this.aborted || this._rebuilding || !sb || sb.updating || this._feeding) {
       return
     }
-    if (this.nextIndex >= this.gops.length) {
+    const i = this.nextIndex
+    if (i >= this.gops.length) {
       try {
         if (this.ms && this.ms.readyState === 'open') {
           this.ms.endOfStream()
@@ -344,12 +591,31 @@ export class MseRecordPlayer {
       return
     }
 
-    const i = this.nextIndex
     if (this.skipSet.has(i)) {
-      this.nextIndex++
+      this.nextIndex = i + 1
       this._feed()
       return
     }
+
+    /*
+     * 只下到「播放位置 + {@link LEAD_SECONDS}」。
+     *
+     * <p>没有这个窗口的话，{@code updateend} 会一直触发下一段下载，
+     * 几秒钟内就把整段几十 MB 的录像拉完 —— 用户只看了 10 秒，
+     * 流量却已经跑光，拖动也失去了「按需」的意义。
+     * 播放推进由 {@code timeupdate} 事件续上（见构造函数里的监听）。
+     */
+    const ts = this.remuxer.timescale || 1
+    const now = this.video.currentTime || 0
+    if (this.gops[i].startTime / ts > now + LEAD_SECONDS) {
+      // 这个分支每次 timeupdate 都会走到，只在换片段时打一条，避免刷屏
+      if (this._waitLogged !== i) {
+        this._waitLogged = i
+        dbg('窗口外等待', { i, gopTs: +(this.gops[i].startTime / ts).toFixed(2), now: +now.toFixed(2) })
+      }
+      return
+    }
+    this._waitLogged = -1
 
     // 预取后面的片段（不阻塞当前）
     for (let k = i + 1; k <= i + PREFETCH_GOP && k < this.gops.length; k++) {
@@ -358,37 +624,69 @@ export class MseRecordPlayer {
       }
     }
 
-    this.nextIndex++
+    this._feeding = true
+    this._feedingSb = sb
     this._fetchGop(i).then(data => {
+      // 只有还归本轮所有时才释放守卫（旧轮次不许动新一轮的状态）
+      if (this._feedingSb === sb) {
+        this._feeding = false
+        this._feedingSb = null
+      }
       if (this.aborted) {
         return
       }
-      // 下载期间可能已经重建过，丢弃过期结果
+      /*
+       * 下载期间可能已经重建过，丢弃过期结果。
+       *
+       * <p>但<b>必须再唤醒一次 _feed</b>：新的 SourceBuffer 可能正等在这里
+       * （它先前被旧的 _feeding 守卫挡掉了），不叫醒就没人继续喂。
+       */
       if (this.sb !== sb) {
+        this._feed()
+        return
+      }
+      /*
+       * 下载期间可能已有别的 append 在跑（timeupdate 与 updateend 都会触发
+       * _feed）。这时不要动 nextIndex，等那一轮的 updateend 再来喂同一段 ——
+       * 提前自增会直接丢掉这一段。
+       */
+      if (sb.updating) {
         return
       }
       try {
         sb.appendBuffer(this.remuxer.fragment(this.gops[i], i + 1, data))
+        this.nextIndex = i + 1
+        this.lastFedIndex = i
+        dbg('已下发', { i, bytes: data.length, ct: +this.video.currentTime.toFixed(2), rs: this.video.readyState })
       } catch (e) {
         if (e.name === 'QuotaExceededError') {
-          // 缓冲满了：丢掉最早的一段，稍后重试本片段
-          this.nextIndex--
+          // 缓冲满了：丢掉最早的一段，nextIndex 保持不动，等 remove 的 updateend 重试
           try {
             if (sb.buffered.length) {
               sb.remove(0, Math.max(0, sb.buffered.start(0) + 20))
             }
           } catch (e2) { /* 忽略 */ }
-        } else {
-          this.skipSet.add(i)
-          this.onSkip(i, 'append 失败：' + e.name)
-          this._feed()
+          return
         }
+        this.skipSet.add(i)
+        this.nextIndex = i + 1
+        this.onSkip(i, 'append 失败：' + e.name)
+        this._feed()
       }
     }).catch(e => {
+      if (this._feedingSb === sb) {
+        this._feeding = false
+        this._feedingSb = null
+      }
       if (this.aborted) {
         return
       }
+      if (this.sb !== sb) {
+        this._feed()
+        return
+      }
       this.skipSet.add(i)
+      this.nextIndex = i + 1
       this.onSkip(i, '下载失败：' + e.message)
       this._feed()
     })
@@ -411,8 +709,15 @@ export class MseRecordPlayer {
         return
       }
       const start = sb.buffered.start(0)
-      const end = sb.buffered.end(sb.buffered.length - 1)
-      if (v.currentTime < start || v.currentTime > end) {
+      /*
+       * 只处理「播放位置落在缓冲起点之前」。
+       *
+       * <p>早期这里还判 {@code currentTime > 末尾} 并拉回起点，
+       * 那是没有拖动时的权宜做法；一旦支持拖动，
+       * 往前拖到未下载区域会被这句立刻拽回起点 —— 进度条刚拖完就弹回去。
+       * 落在了缓冲之后说明数据还在下载，交给 {@link _onSeek} 处理即可。
+       */
+      if (v.currentTime < start - 0.05) {
         v.currentTime = start
       }
     } catch (e) { /* 还没准备好 */ }
@@ -431,6 +736,7 @@ export class MseRecordPlayer {
      */
     if (this._state !== 'playing' && sb.buffered.length) {
       this._state = 'playing'
+      dbg('可播', { ct: +v.currentTime.toFixed(2), start: +sb.buffered.start(0).toFixed(2), end: +sb.buffered.end(sb.buffered.length - 1).toFixed(2) })
       this.onState('播放中')
     }
   }
@@ -466,7 +772,22 @@ export class MseRecordPlayer {
     if (this.aborted) {
       return
     }
-    const bad = this.gopIndexAt(this.video.currentTime || 0)
+    let bad = this.gopIndexAt(this.video.currentTime || 0)
+    /*
+     * 归因兜底（见 {@link lastFedIndex} 的说明）：
+     * 时间归因指向的片段已经跳过了，说明真正的坏段是更后面、
+     * 刚刚被下发的那一段 —— 改成它，否则会在同一段上无限重建。
+     */
+    if (this.skipSet.has(bad) && this.lastFedIndex > bad) {
+      bad = this.lastFedIndex
+    }
+    dbg('解码失败', {
+      reason,
+      byTime: this.gopIndexAt(this.video.currentTime || 0),
+      bad,
+      lastFedIndex: this.lastFedIndex,
+      rebuilds: this.rebuilds + 1
+    })
     if (!this.skipSet.has(bad)) {
       this.skipSet.add(bad)
       this.onSkip(bad, reason)
@@ -488,22 +809,36 @@ export class MseRecordPlayer {
     this._rebuilding = true
     // 重建后要重新判断「是否在播」，否则状态会一直停在「容错重建」
     this._state = ''
+    /*
+     * 必须在清 src <b>之前</b>取当前播放位置：
+     * removeAttribute('src') 会把 currentTime 归零，
+     * 之后再读就只能从头重播（原有实现的隐性浪费）。
+     */
+    const resume = this.video.currentTime || 0
     try {
       if (this.sb) {
         try { this.sb.abort() } catch (e) { /* 忽略 */ }
       }
-      if (this.objectUrl) {
-        URL.revokeObjectURL(this.objectUrl)
-      }
-      this.video.removeAttribute('src')
       this.sb = null
-      // 从出问题的片段之后继续（坏的那段已进 skipSet）
-      this.nextIndex = Math.min(this.gopIndexAt(this.video.currentTime || 0) + 1, this.gops.length)
+      this.ms = null
+      // 上一轮的下载守卫作废，交给新的 SourceBuffer 重新建立
+      this._feeding = false
+      this._feedingSb = null
+      // 从出问题的片段之后继续（坏的那段已进 skipSet），
+      // 并越过此前已经确认坏掉的段，避免反复重建同一处
+      let idx = Math.min(this.gopIndexAt(resume) + 1, this.gops.length)
+      while (idx < this.gops.length && this.skipSet.has(idx)) idx++
+      this.nextIndex = idx
+      this.lastFedIndex = -1
+      dbg('重建', { resume: +resume.toFixed(2), nextIndex: idx, skipped: [...this.skipSet] })
+      // _open 在 initialMediaSource 为空时会自己新建 MediaSource 并设 src
       await this._open()
       this._rebuilding = false
+      dbg('重建完成，继续喂', { nextIndex: this.nextIndex })
       this._feed()
     } catch (e) {
       this._rebuilding = false
+      dbg('重建失败', e.message)
       this.onFatal('重建播放失败：' + e.message)
     }
   }
@@ -523,18 +858,81 @@ export class MseRecordPlayer {
    */
   seek(time) {
     const v = this.video
-    if (!Number.isFinite(v.duration)) {
+    const target = Math.max(0, Math.min(time, (v.duration || 0) - 0.1))
+    if (!Number.isFinite(target) || target < 0) {
       return
     }
-    const target = Math.max(0, Math.min(time, v.duration - 0.1))
-    const targetGop = this.gopIndexAt(target)
-    if (targetGop < this.nextIndex) {
-      // 已喂过的范围：直接跳
-      try { v.currentTime = target } catch (e) { /* 忽略 */ }
-    } else {
-      // 还没喂到：把指针拨过去，让 _feed 从那里继续下载
-      this.nextIndex = targetGop
-      this._feed()
+    try {
+      v.currentTime = target
+    } catch (e) { /* 元数据未就绪 */ }
+  }
+
+  /**
+   * 处理 video 的 {@code seeking} 事件。
+   *
+   * <p>按需下载模式下 buffered 只覆盖「已经喂过」的区间。用户拖动进度条时：
+   * <ul>
+   *   <li>目标在缓冲内 → 浏览器自己能处理，什么都不用做；</li>
+   *   <li>目标在缓冲之后 → 把下载指针拨过去，中间那段不下载；</li>
+   *   <li>目标在缓冲之前 → 清空缓冲后从目标处重新喂
+   *       （片段可能被跳过，或早先因配额被清掉）。</li>
+   * </ul>
+   */
+  _onSeek() {
+    const sb = this.sb
+    const v = this.video
+    if (!sb) {
+      return
     }
+    const t = v.currentTime || 0
+    for (let i = 0; i < sb.buffered.length; i++) {
+      if (t >= sb.buffered.start(i) - 0.1 && t <= sb.buffered.end(i) - 0.05) {
+        return
+      }
+    }
+    const target = this.gopIndexAt(t)
+    if (target >= this.nextIndex) {
+      // 往前拖：跳着下载
+      this.nextIndex = target
+      this._state = ''
+      if (!sb.updating) {
+        this._feed()
+      }
+      return
+    }
+    // 往回拖且缓冲里没有：清空后从目标片段重新喂
+    this._state = ''
+    this._restartFrom(target)
+  }
+
+  /**
+   * 清空缓冲并从指定片段重新开始喂。
+   *
+   * @param {number} index GOP 序号
+   */
+  _restartFrom(index) {
+    const sb = this.sb
+    this.nextIndex = index
+    if (!sb) {
+      return
+    }
+    const clear = () => {
+      try {
+        sb.remove(0, Infinity)
+      } catch (e) {
+        if (!sb.updating) this._feed()
+      }
+    }
+    if (!sb.buffered.length) {
+      if (!sb.updating) this._feed()
+      return
+    }
+    if (sb.updating) {
+      // 正在 append 时 remove 会抛 InvalidStateError，等这一轮结束再清
+      sb.addEventListener('updateend', clear, { once: true })
+      return
+    }
+    // remove 完成后，_attach 里注册的 updateend 会自动继续喂
+    clear()
   }
 }

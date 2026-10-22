@@ -27,3 +27,6 @@ src/main/resources/application-local.yml
 src/main/resources/application-local.yaml
 src/main/resources/application-*.local.yml
 src/main/resources/application-*.local.yaml
+
+# Playwright 排障脚本（本地临时目录，不入库）
+.tmp-*/

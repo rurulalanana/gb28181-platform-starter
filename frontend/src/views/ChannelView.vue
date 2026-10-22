@@ -240,11 +240,17 @@
     </el-card>
 
     <!-- 预览对话框 -->
+    <!--
+      尺寸对齐参考站（LiveGBS）的播放弹窗：那边视频区实测 878×494（16:9），
+      云台面板 303 宽贴在右侧，弹窗整体约 1200px 宽。
+      这里取 1280px 上限（视口小时按 94vw 收缩），视频栏因此比参考站更宽一些。
+    -->
     <el-dialog
       v-model="previewDialog"
       :title="'实时预览 · ' + (previewTarget?.customName || previewTarget?.name || previewTarget?.id || '')"
-      width="880px"
-      top="6vh"
+      width="min(1280px, 94vw)"
+      top="5vh"
+      class="preview-dialog"
       @close="closePreview"
     >
       <div class="preview-wrap">
@@ -259,14 +265,22 @@
           </div>
         </div>
         <div class="preview-side">
+          <!--
+            状态 + 播放方式。
+            el-tag 与 el-select 的高度不同（tag 24px / select 32px），
+            默认基线对齐会一高一低；这里统一用 align-items: center 居中，
+            并给右侧留出滚动条宽度的补偿，避免下拉框贴住滚动条。
+          -->
           <div class="preview-status">
-            <el-tag :type="stateType" size="small">{{ state }}</el-tag>
-            <el-select v-model="proto" size="small" style="width: 160px" @change="switchProto">
+            <el-tag :type="stateType" size="small" effect="dark" class="status-tag">
+              {{ state }}
+            </el-tag>
+            <el-select v-model="proto" size="small" class="proto-select" @change="switchProto">
               <el-option label="WebSocket-FLV" value="wsflv" />
               <el-option label="WebRTC（低延迟）" value="webrtc" />
             </el-select>
           </div>
-          <el-divider />
+          <div class="preview-sep" />
           <!--
             云台面板只在通道被标为可云台（球机 / 半球 / 遥控枪机）时提供。
             类型未知或固定枪机时不显示 —— 面板里的方向键对固定枪机无效，
@@ -533,16 +547,33 @@ async function startPlay() {
   await player.play(streamId, urls, { proto: proto.value })
 }
 
+/**
+ * 切换播放方式（ws-flv ↔ WebRTC）。
+ *
+ * <p><b>拿不到播放地址时要重新点播，不能直接调 switchProtocol</b>：
+ * 切协议时 {@code stop()} 会断开旧通路，这一瞬间 ZLM 的读者数归零，
+ * 平台侧的空闲流巡检（45 秒无观看者即关流）可能刚好在此时执行把流关掉。
+ * 之后再查 {@code stream/info} 就是 400，地址为空 ——
+ * 而 {@code switchProtocol} 拿到空地址只会把状态置成「缺少播放地址」，
+ * 播放器就停在那儿了（这就是用户看到的提示）。
+ *
+ * <p>所以这里一旦发现地址不齐，就重新走完整的 {@link startPlay}
+ * （内部会重新 INVITE 拉起设备推流），而不是拿空地址去切。
+ */
 async function switchProto() {
   const row = previewTarget.value
   if (!row || !playing.value) return
   const streamId = `${row.deviceId}/${row.id}`
-  let urls = {}
+  let urls = null
   try {
     const info = await streamApi.info(streamId, true)
     urls = resolvePlayUrls(info, mediaHttpPort.value)
   } catch (e) {
-    // 忽略
+    // 流可能已被空闲巡检关闭，下面重新点播
+  }
+  if (!urls || (!urls.wsFlv && !urls.webrtc)) {
+    await startPlay()
+    return
   }
   await player.switchProtocol(proto.value, urls)
 }
@@ -886,89 +917,204 @@ onUnmounted(() => player.stop())
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
+</style>
 
+<style scoped>
 .preview-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 20px;
   /*
-   * 本行高度的唯一持有者。
+   * 视频栏吃掉剩余宽度，云台面板固定 340px。
    *
-   * 之前左栏高度由宽度决定（.video-box 的 aspect-ratio: 16/9），
-   * 右栏由视口决定（max-height: 62vh），两个来源互不相关 ——
-   * 1080p 下左栏约 293px、右栏上限约 670px，差近 380px，永远对不上。
-   * 现在两栏都拉伸到这里的高度，视频改由栏内居中满足 16:9。
+   * 参考站是 303px，但它的云台面板只有方向盘 + 变倍 + 信息表；
+   * 我们多了 4 个折叠的运维功能（预置位/设备功能/高级操作/语音喊话），
+   * 320px 时标题文字与展开箭头离得很近，所以放宽到 340px。
    */
-  height: 62vh;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 24px;
+  /*
+   * 两栏等高（grid 默认 stretch）。
+   *
+   * 右栏内容（折叠项都收起时约 382px）本来就比视频（约 474px）矮，
+   * 让它们等高后：
+   *   - 右栏高度 = 视频高度，是整数，不会有「内容 382 / 容器 382 却报
+   *     383」的 subpixel 假溢出（那种情况滚动条会一直挂着，很碍眼）；
+   *   - 两栏底边对齐，视觉上成一块整体。
+   *
+   * 之前设 align-items: start 是因为右栏那时有 678px（折叠项全展开）、
+   * 会把整行撑高、视频下方留白。现在折叠项默认收起，不存在这个问题；
+   * 用户手动展开导致右栏变高时，由 .preview-side 的 overflow 在栏内滚动。
+   */
+  align-items: stretch;
+  /*
+   * 视频的最大高度。视口太矮时靠它收缩，避免画面顶到弹窗底部。
+   * 只通过下面的 max-width 反推，不直接约束 width，所以不会压扁比例。
+   */
+  --video-max-h: 62vh;
 }
 
 /*
- * 左栏是「舞台」：撑满行高，内部把 16:9 的视频按 contain 方式居中。
+ * 左栏是「舞台」：宽度交给视频自己决定，这里只负责居中。
  *
- * container-type: size 让下面能用 cqw/cqh 表达「舞台自身的宽高」。
- * 纯百分比做不到：只写 height:100% + width:auto 时宽度由 16:9 推出，
- * 超出栏宽被 max-width 夹取后浏览器不会回算高度，画面会被压扁
- * （实测 528×558 的栏里视频变成 0.946 而非 1.778）；
- * 只写 width:100% + max-height 则在「宽而矮」的栏里同样压扁。
- * 用 min(100cqw, 100cqh*16/9) 一次选出受限的那一边，两种情形都正确。
+ * 【为什么不再固定 .preview-wrap 的高度】
+ * 之前给 wrap 设了 height: 74vh（视口 900 时 666px），而视频按栏宽 874
+ * 算出来只需要 492px —— 上下各空 87px，凭空多出 174px 空白，
+ * 右侧云台面板又被这个虚高的行高撑开、内容溢出被裁掉。
+ * 现在改成「高度由视频宽度决定」，两栏自然等高，没有任何多余留白。
+ *
+ * 【align-items: flex-start 不能省】
+ * flex 容器默认 align-items: stretch，会把 .video-box 拉伸到容器高度。
+ * 而容器高度又来自 grid 的 stretch（跟 wrap 等高）—— 结果是视频被拉成
+ * 874×678（比例 1.29，画面变形），aspect-ratio 完全失效。
+ * 改成 flex-start 后 video-box 保持自己的 16:9，容器高度也跟着它走。
  */
 .preview-stage {
-  height: 100%;
-  min-height: 0;
+  min-width: 0;
   display: flex;
-  align-items: center;
   justify-content: center;
-  container-type: size;
+  align-items: flex-start;
 }
 
+/*
+ * 同时写 width / max-width / aspect-ratio 是这里的关键：
+ *   - 栏宽够大时：宽度取 100%，高度 = 宽度 × 9/16；
+ *   - 视口太矮时：宽度被 max-width 夹住（= --video-max-h × 16/9），
+ *     高度随之收缩，比例保持 16:9。
+ *
+ * 注意不能用 max-height 代替 max-width —— max-height 不参与宽高比反算，
+ * 只会把高度硬压下去，画面就变形了（这正是上一版踩过的坑）。
+ */
 .preview-stage .video-box {
-  width: min(100cqw, calc(100cqh * 16 / 9));
+  width: 100%;
+  max-width: calc(var(--video-max-h) * 16 / 9);
   aspect-ratio: 16 / 9;
 }
 
+/*
+ * 右栏：宽度固定，高度跟随行高（= 视频高度）。
+ * 展开折叠项后内容变长时在本栏内滚动，不会撑大弹窗。
+ */
 .preview-side {
   border-left: 1px solid var(--border-color);
   padding-left: 18px;
-  height: 100%;
+  min-height: 0;
   overflow-y: auto;
+  /* 细滚动条，避免在 340px 的栏里显得笨重 */
+  scrollbar-width: thin;
 }
 
 /*
- * 窄视口：改为单列堆叠，行高不再由 .preview-wrap 持有（height: auto），
- * 因此两栏都要退回按内容自然高度 —— 否则 height: 100% 在 auto 高度的父级里
- * 会塌成 0，视频和云台面板都会消失。此时舞台也不需要容器尺寸，
- * 直接用全局 .video-box 的「宽 100% + 16:9」。
+ * 窄视口：改为单列堆叠，视频回到「宽 100% + 16:9」，
+ * 右栏不再限高，按内容自然高度铺开。
  */
 @media (max-width: 900px) {
   .preview-wrap {
     grid-template-columns: minmax(0, 1fr);
-    height: auto;
   }
 
   .preview-stage {
-    height: auto;
     display: block;
-    container-type: normal;
   }
 
   .preview-stage .video-box {
-    width: 100%;
+    max-width: none;
   }
 
   .preview-side {
-    height: auto;
     border-left: none;
     padding-left: 0;
     border-top: 1px solid var(--border-color);
     padding-top: 14px;
+    overflow-y: visible;
   }
 }
 
+/*
+ * 状态行：状态标签 + 播放方式下拉。
+ *
+ * 【为什么要显式给高度和 padding】
+ * el-tag（24px）与 el-select（32px）高度不同，只写 align-items: center
+ * 时两者在行内居中但整行高度随内容跳动，和下面的内容贴得很紧。
+ * 这里固定 32px 行高（与 select 一致）、上下各留 6px，
+ * 标签和下拉框就在同一条水平线上，也与下方分隔线拉开距离。
+ */
 .preview-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 4px;
+  min-height: 32px;
+  padding: 6px 0 12px;
+}
+
+/* 状态标签：固定宽度，避免文案变化（播放中 / 容错重建…）时左右抖动 */
+.status-tag {
+  flex: 0 0 auto;
+  min-width: 76px;
+  justify-content: center;
+}
+
+/*
+ * 播放方式下拉：吃掉剩余宽度。
+ * 右侧留 2px 补偿滚动条（scrollbar-width: thin 时约 8px 中已含在 padding 里），
+ * 避免下拉框贴着滚动条边缘。
+ */
+.proto-select {
+  flex: 1;
+  min-width: 0;
+  margin-right: 2px;
+}
+
+/* 轻量分隔线：比 el-divider 的上下 24px 紧凑得多 */
+.preview-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin-bottom: 14px;
+}
+
+/*
+ * 云台面板在预览弹窗里空间有限：把共享组件默认的 16px 间距收一点。
+ * （只影响本弹窗，LiveView 的右侧面板保持原样。）
+ *
+ * 取 18px 而不是更小的值：右栏高度跟视频齐平（约 474px），
+ * 折叠项都收起时内容约 415px，底部本来就留给展开折叠项；
+ * 间距再压下去反而会显得元素粘在一起。
+ */
+.preview-side :deep(.ptz-panel) {
+  gap: 18px;
+}
+</style>
+
+<!--
+  预览弹窗的内边距必须放在非 scoped 样式块里。
+
+  el-dialog 会把 DOM teleport 到 <body> 下，元素上没有本组件的
+  data-v-xxx 标记，scoped 样式里的 `.preview-dialog :deep(...)` 匹配不到，
+  写了也不生效（实测弹窗底部仍留着约 90px 空白）。
+
+  选择器带上 .preview-dialog 前缀，只影响这个弹窗，不会污染其它对话框。
+-->
+<style>
+/*
+ * Element Plus 默认给 header / body / footer 各留 16~20px，
+ * 三者叠起来在视频下方形成一条明显的空白带 —— 视频再大也填不满。
+ * 这里把上下留白收到只够放标题和按钮的程度。
+ */
+.preview-dialog .el-dialog__header {
+  padding: 14px 20px 10px;
+  margin-right: 0;
+}
+
+.preview-dialog .el-dialog__body {
+  padding: 0 20px;
+}
+
+.preview-dialog .el-dialog__footer {
+  padding: 8px 20px 12px;
+}
+
+/* 弹窗标题：比默认 18px 收一点，与紧凑布局更协调 */
+.preview-dialog .el-dialog__title {
+  font-size: 15px;
+  font-weight: 600;
 }
 </style>

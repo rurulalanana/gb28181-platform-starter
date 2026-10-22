@@ -44,6 +44,93 @@ export const CODEC_UNKNOWN = 'unknown';
 const FOURCC_H264 = ['avc1', 'avc3'];
 const FOURCC_H265 = ['hvc1', 'hev1'];
 
+/* ==================== HEVC 参数集（VPS/SPS/PPS） ==================== */
+
+/** HEVC NAL 单元类型：视频参数集。 */
+const NAL_VPS = 32;
+/** HEVC NAL 单元类型：序列参数集。 */
+const NAL_SPS = 33;
+/** HEVC NAL 单元类型：图像参数集。 */
+const NAL_PPS = 34;
+
+/**
+ * 各参数集的合理长度上限（字节）。
+ *
+ * <p>真正的参数集都很小：VPS 约 20~30 字节，SPS 通常 30~60（4K 也就百来字节），
+ * PPS 不到 20。实测正常录像：{@code VPS 23 / SPS 34 / PPS 7}。
+ * 上限设得宽松（VPS 128 / SPS 512 / PPS 256）—— 目的只是拦住"整帧被当成
+ * 参数集写进来"这种量级错误（实测见过 3133 字节的 VPS），不是严格校验。
+ */
+const PARAM_MAX_LEN = { [NAL_VPS]: 128, [NAL_SPS]: 512, [NAL_PPS]: 256 };
+
+/** 参数集最短长度（含 2 字节 NAL 头）。 */
+const PARAM_MIN_LEN = 4;
+
+/**
+ * 校验一个 HEVC 参数集。
+ *
+ * <p>两个判据，都是"必然坏"的硬伤：
+ * <ol>
+ *   <li>{@code forbidden_zero_bit} 必须为 0（NAL 首字节最高位）。
+ *       实测 ZLM 的坏 hvcC 里 VPS 首字节是 {@code 0xC0}（正常应为 {@code 0x40}），
+ *       最高位置着 —— 说明那段字节根本不是从 NAL 边界开始的；</li>
+ *   <li>NAL 头里的 type 必须和它所在的数组一致，且长度在合理范围。</li>
+ * </ol>
+ *
+ * @param {number} expectedType 期望的 NAL 类型（32/33/34）
+ * @param {Uint8Array} nal
+ * @returns {boolean}
+ */
+export function isValidParamSet(expectedType, nal) {
+  if (!nal || nal.length < PARAM_MIN_LEN || nal.length > PARAM_MAX_LEN[expectedType]) {
+    return false;
+  }
+  if (nal[0] & 0x80) {
+    // forbidden_zero_bit 置位
+    return false;
+  }
+  const type = (nal[0] >> 1) & 0x3F;
+  if (type !== expectedType) {
+    return false;
+  }
+  // nuh_temporal_id_plus1 不能为 0（HEVC 规范硬性要求）
+  return (nal[1] & 0x07) !== 0;
+}
+
+/**
+ * 从样本字节里捞出可用的参数集。
+ *
+ * <p>MP4 里的样本是「长度前缀 NAL」格式（每段 4 字节大端长度 + NAL）。
+ * 编码器通常会在每个 IDR 前重复 VPS/SPS/PPS，所以即使 hvcC 写坏了，
+ * 真正的参数集往往仍躺在 mdat 里 —— 实测某段坏录像的 hvcC 是一个
+ * 3133 字节的垃圾 VPS，但第 38 个样本起每个关键帧都带着正确的 23 字节 VPS。
+ *
+ * @param {Uint8Array} sample 一个样本的字节
+ * @param {Set<number>} needed 还需要哪些类型
+ * @returns {Object<number, Uint8Array>} 找到的参数集
+ */
+export function scanParamSets(sample, needed) {
+  const found = {};
+  let off = 0;
+  while (off + 4 <= sample.length) {
+    const len = ((sample[off] << 24) | (sample[off + 1] << 16) |
+      (sample[off + 2] << 8) | sample[off + 3]) >>> 0;
+    if (len < 2 || off + 4 + len > sample.length) {
+      break;
+    }
+    const start = off + 4;
+    const type = (sample[start] >> 1) & 0x3F;
+    if (needed.has(type) && !found[type]) {
+      const nal = sample.subarray(start, start + len);
+      if (isValidParamSet(type, nal)) {
+        found[type] = nal.slice();
+      }
+    }
+    off = start + len;
+  }
+  return found;
+}
+
 /**
  * 解析 box 列表。
  *
@@ -299,7 +386,170 @@ export class Mp4Remuxer {
     if (!this.moovBox) {
       throw new Error('找不到 moov box（不是有效的 MP4，或录像仍在录制中）');
     }
+    /** 校验通过的编码参数集：HEVC NAL 类型 → 字节。 */
+    this.paramSets = {};
+    /** 缺失或校验不过的参数集类型（空表示 hvcC 完好）。 */
+    this.badParamTypes = [];
+    /** hvcC box 的位置（重写参数集时用）。 */
+    this.hvcCBox = null;
+    /** 是否已经用码流里捞到的参数集修补过 hvcC。 */
+    this._paramPatched = false;
     this._parseVideoTrack();
+  }
+
+  /**
+   * 解析并校验视频轨的编码参数集（仅 HEVC）。
+   *
+   * <p>记录三样东西：
+   * <ul>
+   *   <li>{@code paramSets} —— 校验通过的参数集（type → 字节）；</li>
+   *   <li>{@code badParamTypes} —— 缺失或校验不过的类型；</li>
+   *   <li>{@code hvcCBox} —— hvcC box 在缓冲区里的位置，供重写用。</li>
+   * </ul>
+   *
+   * <p>H.264 的 {@code avcC} 结构不同（SPS/PPS 没有 array 包裹），暂不做同样处理。
+   *
+   * @param {object} stsd stsd box
+   */
+  _parseParamSets(stsd) {
+    this.paramSets = {};
+    this.badParamTypes = [];
+    this.hvcCBox = null;
+    if (!FOURCC_H265.includes(this.fourcc)) {
+      return;
+    }
+    for (const entry of parseBoxes(this.buf, stsd.bodyStart + 8, stsd.end)) {
+      // 视觉 sample entry 的固定字段 78 字节，之后才是子 box
+      const hvcC = parseBoxes(this.buf, entry.bodyStart + 78, entry.end).find(c => c.type === 'hvcC');
+      if (!hvcC) {
+        continue;
+      }
+      this.hvcCBox = hvcC;
+      const p = this.buf.subarray(hvcC.bodyStart, hvcC.end);
+      // 前 22 字节是配置字段，[22] 是 numOfArrays
+      if (p.length < 23) {
+        this.badParamTypes = [NAL_VPS, NAL_SPS, NAL_PPS];
+        return;
+      }
+      let q = 23;
+      for (let i = 0; i < p[22] && q + 3 <= p.length; i++) {
+        const type = p[q] & 0x3F;
+        const count = (p[q + 1] << 8) | p[q + 2];
+        q += 3;
+        for (let j = 0; j < count && q + 2 <= p.length; j++) {
+          const len = (p[q] << 8) | p[q + 1];
+          q += 2;
+          if (q + len > p.length) {
+            break;
+          }
+          const nal = p.subarray(q, q + len);
+          if ((type === NAL_VPS || type === NAL_SPS || type === NAL_PPS) && isValidParamSet(type, nal)) {
+            this.paramSets[type] = nal.slice();
+          }
+          q += len;
+        }
+      }
+      for (const t of [NAL_VPS, NAL_SPS, NAL_PPS]) {
+        if (!this.paramSets[t]) {
+          this.badParamTypes.push(t);
+        }
+      }
+      return;
+    }
+  }
+
+  /**
+   * 还需要从码流里补哪些参数集。
+   *
+   * @returns {number[]} HEVC NAL 类型数组（空数组表示 hvcC 完好）
+   */
+  get needsParamRecovery() {
+    return this.badParamTypes ? this.badParamTypes.slice() : [];
+  }
+
+  /**
+   * 用从码流里捞回来的参数集修补 hvcC。
+   *
+   * <p>只接受校验通过、且确实缺失的那几类，避免把别处的参数集乱塞进来
+   * （比如把 VPS 塞进 SPS 的位置）。
+   *
+   * @param {Object<number, Uint8Array>} sets type → 字节
+   * @returns {boolean} 是否发生了修补
+   */
+  setParamSets(sets) {
+    let patched = false;
+    for (const t of [NAL_VPS, NAL_SPS, NAL_PPS]) {
+      const nal = sets && sets[t];
+      if (!nal || !isValidParamSet(t, nal)) {
+        continue;
+      }
+      if (this.badParamTypes.includes(t)) {
+        this.paramSets[t] = nal.slice();
+        this.badParamTypes = this.badParamTypes.filter(x => x !== t);
+        patched = true;
+      }
+    }
+    if (patched) {
+      this._paramPatched = true;
+      // initSegment 有缓存，参数变了必须让它重建
+      this._init = null;
+    }
+    return patched;
+  }
+
+  /**
+   * 按当前的 {@code paramSets} 重写 hvcC 的 payload。
+   *
+   * <p>hvcC 的布局：前 22 字节是通用配置（profile/tier/level、色度格式、
+   * 位深等），第 23 字节是 {@code numOfArrays}，之后每段是
+   * {@code 1 字节 array_completeness|type + 2 字节 numNalus + 若干 [2 字节长度 + NAL]}。
+   *
+   * @returns {Uint8Array}
+   */
+  _buildHvcCPayload() {
+    const head = this.buf.subarray(this.hvcCBox.bodyStart, this.hvcCBox.bodyStart + 22);
+    const chunks = [head];
+    const types = [NAL_VPS, NAL_SPS, NAL_PPS].filter(t => this.paramSets[t]);
+    chunks.push(new Uint8Array([types.length]));
+    for (const t of types) {
+      const nal = this.paramSets[t];
+      const ent = new Uint8Array(5 + nal.length);
+      ent[0] = 0x80 | t;                 // array_completeness = 1
+      ent[1] = 0; ent[2] = 1;            // numNalus = 1
+      ent[3] = (nal.length >> 8) & 0xff;
+      ent[4] = nal.length & 0xff;
+      ent.set(nal, 5);
+      chunks.push(ent);
+    }
+    return this._concat(chunks);
+  }
+
+  /**
+   * 重建 stsd（仅在参数集被修补过时才需要）。
+   *
+   * @param {object} stsd stsd box
+   * @returns {Uint8Array}
+   */
+  _patchStsd(stsd) {
+    const head = this.buf.slice(stsd.bodyStart, stsd.bodyStart + 8); // version/flags + entry_count
+    const entries = [];
+    for (const entry of parseBoxes(this.buf, stsd.bodyStart + 8, stsd.end)) {
+      const children = [];
+      for (const c of parseBoxes(this.buf, entry.bodyStart + 78, entry.end)) {
+        if (c.type === 'hvcC') {
+          children.push(makeBox('hvcC', this._buildHvcCPayload()));
+        } else {
+          children.push(this.buf.slice(c.start, c.end));
+        }
+      }
+      const fixed = this.buf.slice(entry.bodyStart, entry.bodyStart + 78);
+      entries.push(makeBox(
+        String.fromCharCode(this.buf[entry.start + 4], this.buf[entry.start + 5],
+          this.buf[entry.start + 6], this.buf[entry.start + 7]),
+        this._concat([fixed, ...children])
+      ));
+    }
+    return makeBox('stsd', this._concat([head, ...entries]));
   }
 
   /**
@@ -353,6 +603,9 @@ export class Mp4Remuxer {
     this.timescale = mdhd
       ? (mdhdVersion === 1 ? u32(buf, mdhd.bodyStart + 20) : u32(buf, mdhd.bodyStart + 12))
       : 1000;
+
+    // 编码参数（hvcC）校验：坏的话先记下来，等播放器从 mdat 里捞回真的
+    this._parseParamSets(stsd);
 
     // 样本大小
     const stsz = findRecursive(buf, trak.bodyStart, trak.end, 'stsz', ['mdia', 'minf', 'stbl']);
@@ -624,7 +877,8 @@ export class Mp4Remuxer {
     const parts = [];
     for (const c of parseBoxes(this.buf, stbl.bodyStart, stbl.end)) {
       if (c.type === 'stsd') {
-        parts.push(this.buf.slice(c.start, c.end));
+        // 参数集被修补过就重建 stsd（hvcC 换了内容），否则原样拷贝
+        parts.push(this._paramPatched ? this._patchStsd(c) : this.buf.slice(c.start, c.end));
       } else if (c.type === 'stts' || c.type === 'stsc') {
         // version/flags(4) + entry_count(4) = 0
         parts.push(makeBox(c.type, new Uint8Array(8)));

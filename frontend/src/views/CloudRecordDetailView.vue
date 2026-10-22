@@ -60,26 +60,26 @@
         </el-button>
       </div>
 
-      <!-- 播放器：居中，最大 700px（对齐 LiveGBS 的 .player-wrapper max-width:700px） -->
+      <!-- 播放器：居中，最宽 1000px（与实时预览的播放弹窗观感一致） -->
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            录像播放：原生 <video> 直连优先，失败自动切容错通路。
+            录像播放：统一用 xgplayer 渲染（挂载点是普通容器，播放器在内部自建 video），
+            与实时预览是同一套控制栏、同一套全屏与音量交互。
 
-            1) 接口回填的 playUrl 是 Spring 静态资源映射（/record/...）：
-               浏览器原生播放，Range 由容器实现 → 首帧只下载文件头，秒开；
-               进度条拖动、倍速、音量、全屏全是浏览器自带，不需要额外代码。
-            2) ZLM 录出的 H.265 MP4 里会夹着残缺帧（UDP 丢包 → PS 解封装失败），
+            1) H.264：地址直接交给 xgplayer 走原生解码。Range 由容器实现，
+               首帧只下载文件头，秒开；拖动进度条是浏览器原生行为。
+            2) H.265：ZLM 录出的 MP4 里夹着残缺帧（UDP 丢包 → PS 解封装失败），
                浏览器硬解不容错会 PIPELINE_ERROR_DECODE，只出首帧。
-               此时自动切 MseRecordPlayer：浏览器端只换容器（不转码）
-               按 GOP 切 fMP4 喂 MSE，坏段跳过继续播。
+               此时由 useRecordPlayer 内的 MSE 内核接管：先建 MediaSource
+               把 blob URL 交给 xgplayer 当媒体源，再按 GOP 灌 fMP4，
+               坏段跳过继续播（浏览器端只换容器，不转码）。
 
             token 拼在 URL 上：/api/v1/... 通路带不了自定义头，
             后端 Sa-Token 配了从 query 读（is-read-body）。
             静态 /record/... 通路不过拦截器，不需要 token。
           -->
-          <video v-if="playingRecord" ref="mseVideo" class="video-container"
-                 controls playsinline muted autoplay />
+          <div v-if="playingRecord" ref="videoContainer" class="video-container" />
           <div v-else class="player-tip">
             <el-icon :size="34"><VideoPlay /></el-icon>
             <span>点击下方时间轴上的录像段点播</span>
@@ -158,8 +158,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
-import { MseRecordPlayer } from '@/player/MseRecordPlayer'
 import { probeCodecFromUrl } from '@/player/Mp4Remuxer'
+import { useRecordPlayer } from '@/composables/useRecordPlayer'
 
 const route = useRoute()
 const router = useRouter()
@@ -169,11 +169,9 @@ const router = useRouter()
  *
  * <p>只等 {@code loadedmetadata} 不够 —— 那只说明索引读到了，
  * 坏码流要等解码器真正出帧才暴露（实测坏录像在 {@code t=0.03} 就报错）。
+ *
+ * <p>判据本身在 {@code useRecordPlayer} 里，这里只留注释说明为什么不看元数据。
  */
-const NATIVE_OK_ADVANCE = 0.3
-
-/** 原生播放的超时（毫秒）：超时还没出画面就切容错通路。 */
-const NATIVE_TIMEOUT_MS = 10000
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
@@ -288,18 +286,26 @@ const viewMode = ref('timeline')
 
 const playingRecord = ref(null)
 
-/** 播放状态（展示用）。 */
-const playState = ref('空闲')
+/** 播放状态（展示用，直接映射播放器状态）。 */
+const playState = computed(() => recordPlayer.state.value)
 const playStateType = computed(() => {
   if (playState.value === '播放中') return 'success'
   if (playState.value === '播放异常') return 'danger'
   return 'info'
 })
 
-/** MSE 容错播放器实例（浏览器端重封装录像，见 frontend/src/player/MseRecordPlayer.js）。 */
-let msePlayer = null
-/** 承载播放的 video 元素。 */
-const mseVideo = ref(null)
+/** 播放器挂载容器（xgplayer 在内部创建 video 元素）。 */
+const videoContainer = ref(null)
+
+/**
+ * 录像播放器：xgplayer 外壳 + 容错 MSE 内核。
+ *
+ * <p>与实时预览共用同一套控制栏外观；内核负责 H.265 坏帧跳过，
+ * 见 {@code frontend/src/composables/useRecordPlayer.js}。
+ */
+const recordPlayer = useRecordPlayer(videoContainer, {
+  onFatal: (msg) => ElMessage.error('播放失败：' + msg)
+})
 
 function todayString() {
   const d = new Date()
@@ -470,15 +476,18 @@ function goBack() {
 /**
  * 点播一段录像。
  *
- * <p><b>H.264 → 原生直连</b>：接口回填的 {@code playUrl}（{@code /record/...}）是
- * Spring 静态资源映射，浏览器原生 {@code <video src>} 直接播 —— Range 由容器实现，
- * 首帧只下载文件头，秒开，进度条拖动是浏览器原生行为，不用任何额外代码。
+ * <p>播放器统一用 xgplayer（与实时预览同一套控制栏），这里只负责挑通路：
  *
- * <p><b>H.265 → 直接走容错通路</b>：ZLM 录出的 H.265 MP4 里几乎必然夹着残缺帧
- * （UDP 收流丢包 → PS 解封装失败 → 残帧仍被写进文件），浏览器硬解不容错，
- * 原生播放只会 {@code PIPELINE_ERROR_DECODE}。而且浏览器拿到 {@code src} 后
- * 会<b>预取整个文件</b>（实测 57MB 全下完才报错），所以这里先花几十 KB
- * 探一下编码，H.265 直接跳过原生尝试，省掉那次浪费。
+ * <ul>
+ *   <li><b>H.264 / 探测不出编码</b> → 原生直连。
+ *       接口回填的 {@code playUrl}（{@code /record/...}）是 Spring 静态资源映射，
+ *       Range 由容器实现，首帧只下载文件头，秒开，拖动进度条是浏览器原生行为。</li>
+ *   <li><b>H.265</b> → 直接走容错通路。ZLM 录出的 H.265 MP4 里几乎必然夹着
+ *       残缺帧（UDP 丢包 → PS 解封装失败 → 残帧仍被写进文件），浏览器硬解不容错，
+ *       原生播放只会 {@code PIPELINE_ERROR_DECODE}；而且浏览器拿到 {@code src}
+ *       后会<b>预取整个文件</b>（实测 57MB 全下完才报错），
+ *       所以先花几十 KB 探一下编码，H.265 直接跳过原生尝试。</li>
+ * </ul>
  *
  * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
  * 转成 ws-flv/webrtc 地址，供「流式」播放用。本页直接播文件，
@@ -486,172 +495,22 @@ function goBack() {
  */
 async function play(record) {
   playingRecord.value = { ...record }
-  playState.value = '加载中…'
   try {
     // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例
     await nextTick()
     const codec = record.playUrl
       ? await probeCodecFromUrl(record.playUrl)
       : 'unknown'
-    if (codec === 'h265') {
-      // H.265 不试原生：已知会失败，试一次要多下几十 MB
-      await playWithMse(record)
-    } else if (record.playUrl && await tryNativePlay(record)) {
-      // H.264（或探测不出编码但原生能播）：交给浏览器
-    } else {
-      await playWithMse(record)
-    }
+    const token = localStorage.getItem('gb_token') || ''
+    // playUrl 存在时用它（静态地址 Range 更快），否则退回需要登录的接口
+    const source = record.playUrl || `/api/v1/cloudrecord/file/${record.recordId}`
+    await recordPlayer.play(source, {
+      token: record.playUrl ? '' : token,
+      useMse: codec === 'h265'
+    })
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
     playingRecord.value = null
-    playState.value = '空闲'
-  }
-}
-
-/**
- * 用原生 {@code <video src>} 直接播静态地址。
- *
- * <p><b>判定成功的标准是「画面真的动起来」，不是「元数据到了」</b>：
- * {@code loadedmetadata} 只能说明文件头和索引读到了（几十毫秒），
- * 坏码流要等解码器真正开始解码才暴露 —— 实测 H.265 坏录像会在
- * {@code t=0.03} 报 {@code PIPELINE_ERROR_DECODE}（{@code err=3}），
- * 而 {@code loadedmetadata} 早就已经通过了。
- *
- * <p>所以这里等 {@code currentTime} 推进超过 {@link NATIVE_OK_ADVANCE} 秒才判成功；
- * 期间一旦 {@code error} 立刻判失败，交给 MSE 容错通路。
- *
- * @param {object} record 录像记录
- * @returns {Promise<boolean>} 是否成功接管播放
- */
-function tryNativePlay(record) {
-  const video = mseVideo.value
-  if (!video || !record.playUrl) {
-    return Promise.resolve(false)
-  }
-  destroyMse()
-  return new Promise((resolve) => {
-    let settled = false
-    let baseTime = 0
-    const finish = (ok) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      video.removeEventListener('loadedmetadata', onMeta)
-      video.removeEventListener('timeupdate', onTime)
-      video.removeEventListener('error', onError)
-      if (!ok) {
-        // 交回给 MSE 通路，先把原生状态清掉
-        video.removeEventListener('playing', onNativePlaying)
-        video.removeEventListener('ended', onNativeEnded)
-        video.removeAttribute('src')
-        video.load()
-      }
-      resolve(ok)
-    }
-    const onMeta = () => {
-      baseTime = video.currentTime
-      video.play().catch(() => { /* 自动播放被拦时由用户点一下 */ })
-    }
-    // 画面推进了才算真能播
-    const onTime = () => {
-      if (video.currentTime - baseTime >= NATIVE_OK_ADVANCE) {
-        playState.value = '播放中'
-        finish(true)
-      }
-    }
-    const onError = () => {
-      console.warn('[录像] 原生播放失败，改用容错通路：',
-        (video.error && video.error.message) || '未知错误')
-      finish(false)
-    }
-    const timer = setTimeout(() => {
-      if (!settled) {
-        console.warn('[录像] 原生播放超时未出画面，改用容错通路')
-        finish(false)
-      }
-    }, NATIVE_TIMEOUT_MS)
-
-    video.addEventListener('loadedmetadata', onMeta, { once: true })
-    video.addEventListener('timeupdate', onTime)
-    video.addEventListener('error', onError, { once: true })
-    // 原生通路也要同步状态文案
-    video.addEventListener('playing', onNativePlaying)
-    video.addEventListener('ended', onNativeEnded)
-    video.src = record.playUrl
-    video.load()
-  })
-}
-
-/** 原生通路：开始播放。 */
-function onNativePlaying() {
-  playState.value = '播放中'
-}
-
-/** 原生通路：播放结束。 */
-function onNativeEnded() {
-  playState.value = '播放结束'
-}
-
-/** 清掉原生通路挂在 video 上的监听。 */
-function detachNativeListeners() {
-  const video = mseVideo.value
-  if (!video) return
-  video.removeEventListener('playing', onNativePlaying)
-  video.removeEventListener('ended', onNativeEnded)
-}
-
-/**
- * 用 MSE 容错播放器播一段录像。
- *
- * @param {object} record 录像记录
- */
-async function playWithMse(record) {
-  const video = mseVideo.value
-  if (!video) {
-    throw new Error('播放器未就绪')
-  }
-  destroyMse()
-  playState.value = '容错加载…'
-  msePlayer = new MseRecordPlayer(video, {
-    onState: (s) => {
-      /*
-       * 必须同时处理「播放中」：容错重建是一次性的中间态，
-       * 重建完播放器会回调「播放中」，这里不接住的话
-       * 界面就会一直停在「容错重建…」。
-       */
-      if (s === '容错重建') {
-        playState.value = '容错重建…'
-      } else if (s === '播放中') {
-        playState.value = '播放中'
-      }
-    },
-    onSkip: (idx, reason) => {
-      // 单个 GOP 坏了就跳过，不打断用户
-      console.warn(`[录像] 跳过异常片段 #${idx}（${reason}）`)
-    },
-    onFatal: (msg) => {
-      playState.value = '播放异常'
-      ElMessage.error('播放失败：' + msg)
-    }
-  })
-  const token = localStorage.getItem('gb_token') || ''
-  // playUrl 存在时用它（静态地址 Range 更快），否则退回需要登录的接口
-  const source = record.playUrl || `/api/v1/cloudrecord/file/${record.recordId}`
-  await msePlayer.start(source, record.playUrl ? '' : token)
-  await video.play().catch(() => { /* 自动播放被拦时由用户点一下 */ })
-  playState.value = '播放中'
-}
-
-/** 销毁 MSE 播放器。 */
-function destroyMse() {
-  detachNativeListeners()
-  if (msePlayer) {
-    try {
-      msePlayer.destroy()
-    } catch (e) {
-      // 实例可能已释放，忽略
-    }
-    msePlayer = null
   }
 }
 
@@ -661,15 +520,8 @@ function destroyMse() {
  * <p>销毁播放器会释放 MediaSource，并中止对录像文件的请求。
  */
 function stopPlay() {
-  destroyMse()
-  detachNativeListeners()
-  const video = mseVideo.value
-  if (video) {
-    video.removeAttribute('src')
-    video.load()
-  }
+  recordPlayer.stop()
   playingRecord.value = null
-  playState.value = '空闲'
 }
 
 /**
@@ -812,7 +664,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
-  destroyMse()
+  recordPlayer.stop()
 })
 </script>
 
@@ -840,7 +692,7 @@ onUnmounted(() => {
  * （实测画面被压成一条）。本页内容本来就要滚动，故不撑满。
  */
 .player-wrap {
-  max-width: 700px;
+  max-width: min(1000px, 100%);
   margin: 0 auto 16px;
 }
 
@@ -858,18 +710,17 @@ onUnmounted(() => {
 }
 
 /*
- * 原生 <video>：铺满 .video-box。
+ * xgplayer 内部的 video。
  *
- * <p>不用 object-fit: contain —— 录像是固定比例的，铺满即可；
- * 若容器比例与视频不一致，contain 会留黑边，cover 会裁边。
+ * <p>xgplayer 自己会给 video 设 {@code width/height: 100%}，
+ * 但 <b>object-fit 只有在根节点带 data-xgfill 时才生效</b>。
+ * 这里再兜一层 contain：录像分辨率（如 2560×1440）与 16:9 容器
+ * 比例一致时看不出差别，一旦容器被拉成别的比例（窄屏、右侧留白），
+ * 缺了它画面就会被<b>非等比拉伸</b> —— 这正是之前"画面变形"的原因。
  */
-.video-element {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+.video-container :deep(video) {
+  object-fit: contain;
   background: #000;
-  display: block;
 }
 
 /* 点播控制条：播放器下方一行 */
