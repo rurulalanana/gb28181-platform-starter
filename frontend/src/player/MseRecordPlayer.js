@@ -43,8 +43,40 @@ const MOOV_PROBE_BYTES = 64 * 1024
 /** 探测 moov 时，单次最多放大到的字节数。 */
 const MOOV_MAX_BYTES = 32 * 1024 * 1024
 
-/** 提前下载的 GOP 数量（保证连续播放不卡顿）。 */
-const PREFETCH_GOP = 2
+/**
+ * 提前下载的 GOP 数量（保证连续播放不卡顿）。
+ *
+ * <p>GOP 约 2 秒，4 个就是 8 秒的缓冲余量。公网带宽实测 50~130KB/s
+ * （波动 6 倍），而录像码率 46~370KB/s —— 带宽紧张时必须留够余量，
+ * 否则缓冲一掉到 0 就转圈。
+ *
+ * <p>预取是「喂完当前段才发起」的，不阻塞起播；起播只等 1 个 GOP。
+ */
+const PREFETCH_GOP = 4
+
+/**
+ * 同时在飞的预取下载数。
+ *
+ * <p>公网链路中间有网关，并发几个大响应就会被限流（实测 4~5 个并发时
+ * 直接返回 {@code 502 Bad Gateway}）。限成 2 个。
+ */
+const PREFETCH_CONCURRENCY = 2
+
+/**
+ * 单次 Range 请求的最大字节数。
+ *
+ * <p>公网中间网关会掐断较大的响应（实测 300KB 就出 502），而且响应越大
+ * 吞吐越差：16KB→53KB/s、64KB→132KB/s、256KB→115KB/s、1MB→77KB/s。
+ * 取 128KB 是「不太会被掐」与「请求次数不太多」的折中。
+ */
+const FETCH_CHUNK_BYTES = 128 * 1024
+
+/**
+ * 单次下载的重试次数（5xx / 网络错误时）。
+ *
+ * <p>网络抖动和网关限流是临时的，重试就能拿到；直接跳段等于把好录像丢了。
+ */
+const FETCH_RETRY = 3
 
 /**
  * 缓冲窗口（秒）：只下载「播放位置 + 这个时长」以内的数据。
@@ -172,9 +204,23 @@ export class MseRecordPlayer {
     this.skipSet = new Set()
     /** 下一个要喂的 GOP 序号 */
     this.nextIndex = 0
+    /**
+     * 用户拖动进度条想去的位置（秒）。
+     *
+     * <p>MSE 的 currentTime 只能落在 buffered 内，拖到未下载的位置时浏览器
+     * 会把播放位置拉回来；数据到了之后要靠这个字段再挪回去。
+     */
+    this._seekTarget = null
     /** 已下载的 GOP 数据缓存：index -> Uint8Array */
     this.chunkCache = new Map()
     /** 正在下载的 GOP：index -> Promise */
+    this.downloading = new Map()
+    /** 排队等待下载的 GOP 序号（限制并发用）。 */
+    this._prefetchQueue = []
+    /** 当前在飞的预取下载数。 */
+    this._prefetchActive = 0
+    /** 下载失败后的重试定时器。 */
+    this._retryTimer = null
     this.downloading = new Map()
     this.rebuilds = 0
     this.aborted = false
@@ -255,6 +301,12 @@ export class MseRecordPlayer {
   /** 销毁并释放资源。 */
   destroy() {
     this.aborted = true
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer)
+      this._retryTimer = null
+    }
+    this._prefetchQueue.length = 0
+    this._prefetchActive = 0
     this.video.removeEventListener('error', this._onError)
     this.video.removeEventListener('playing', this._onPlaying)
     this.video.removeEventListener('seeking', this._onSeeking)
@@ -518,6 +570,73 @@ export class MseRecordPlayer {
   }
 
   /**
+   * 取一段字节，**分块**请求。
+   *
+   * <p><b>为什么要分块</b>：公网链路中间有网关，会掐断较大的响应 ——
+   * 实测一次要 300KB 就会返回 {@code 502 Bad Gateway}（服务端日志里
+   * 是正常的 206，说明是中间设备干的）。而且响应越大吞吐越差：
+   * 实测 16KB→53KB/s、64KB→132KB/s、256KB→115KB/s、1MB→77KB/s。
+   * 所以分小块反而更快，也更不容易被掐。
+   *
+   * @param {number} start 起始字节
+   * @param {number} end 结束字节（含）
+   * @returns {Promise<Uint8Array>}
+   */
+  async _fetchRangeChunked(start, end) {
+    const total = end - start + 1
+    if (total <= FETCH_CHUNK_BYTES) {
+      return this._fetchRange(start, end)
+    }
+    const parts = []
+    for (let s = start; s <= end; s += FETCH_CHUNK_BYTES) {
+      const e = Math.min(s + FETCH_CHUNK_BYTES - 1, end)
+      // 串行取：并发会让中间网关更早掐断（实测并发 4~5 个大响应就出 502）
+      parts.push(await this._fetchRangeWithRetry(s, e))
+    }
+    const out = new Uint8Array(total)
+    let off = 0
+    for (const p of parts) {
+      out.set(p, off)
+      off += p.length
+    }
+    return out
+  }
+
+  /**
+   * 取一段字节，失败时重试。
+   *
+   * <p><b>5xx 要重试，不能当坏段跳过</b>：网络抖动 / 网关限流是临时的，
+   * 跳过这一段就等于把好录像弄丢了（实测 502 连着 5 次，然后
+   * 「跳过异常片段 #71」，那一段其实是好的）。
+   *
+   * @param {number} start 起始字节
+   * @param {number} end 结束字节（含）
+   * @returns {Promise<Uint8Array>}
+   */
+  async _fetchRangeWithRetry(start, end) {
+    let lastErr = null
+    for (let attempt = 0; attempt < FETCH_RETRY; attempt++) {
+      if (this.aborted) {
+        throw new Error('已取消')
+      }
+      try {
+        return await this._fetchRange(start, end)
+      } catch (e) {
+        lastErr = e
+        // 4xx 是请求本身有问题（越界等），重试没意义
+        if (/HTTP 4\d\d/.test(e.message || '')) {
+          throw e
+        }
+        if (attempt < FETCH_RETRY - 1) {
+          // 退避后重试
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)))
+        }
+      }
+    }
+    throw lastErr
+  }
+
+  /**
    * 下载一个 GOP 的数据（带缓存与去重）。
    *
    * @param {number} i GOP 序号
@@ -531,7 +650,7 @@ export class MseRecordPlayer {
       return this.downloading.get(i)
     }
     const g = this.gops[i]
-    const p = this._fetchRange(g.dataStart, g.dataEnd - 1)
+    const p = this._fetchRangeChunked(g.dataStart, g.dataEnd - 1)
       .then(data => {
         this.chunkCache.set(i, data)
         this.downloading.delete(i)
@@ -641,6 +760,8 @@ export class MseRecordPlayer {
         sb.mode = 'segments'
         this.sb = sb
         sb.addEventListener('updateend', () => {
+          // 数据到位后把播放位置挪到用户拖去的落点
+          this._applySeekTarget()
           this._ensurePlayable()
           this._feed()
         })
@@ -667,8 +788,36 @@ export class MseRecordPlayer {
   _prefetch(from) {
     for (let k = from; k < from + PREFETCH_GOP && k < this.gops.length; k++) {
       if (!this.chunkCache.has(k) && !this.downloading.has(k) && !this.skipSet.has(k)) {
-        this._fetchGop(k).catch(() => { /* 失败时播放到那里再重试 */ })
+        this._prefetchQueue.push(k)
       }
+    }
+    this._pumpPrefetch()
+  }
+
+  /**
+   * 启动排队中的预取。
+   *
+   * <p><b>并发数要限住</b>：同时发 4~5 个大响应会触发公网中间网关限流，
+   * 实测直接返回 {@code 502 Bad Gateway}（服务端日志是正常的 206，
+   * 说明是链路中间的设备掐的）。所以同时最多
+   * {@link PREFETCH_CONCURRENCY} 个在飞，其余排队。
+   */
+  _pumpPrefetch() {
+    if (this._prefetchActive >= PREFETCH_CONCURRENCY) {
+      return
+    }
+    while (this._prefetchQueue.length && this._prefetchActive < PREFETCH_CONCURRENCY) {
+      const k = this._prefetchQueue.shift()
+      if (this.chunkCache.has(k) || this.downloading.has(k) || this.skipSet.has(k)) {
+        continue
+      }
+      this._prefetchActive++
+      this._fetchGop(k)
+        .catch(() => { /* 失败时播放到那里再重试 */ })
+        .finally(() => {
+          this._prefetchActive--
+          this._pumpPrefetch()
+        })
     }
   }
 
@@ -705,9 +854,14 @@ export class MseRecordPlayer {
      * 几秒钟内就把整段几十 MB 的录像拉完 —— 用户只看了 10 秒，
      * 流量却已经跑光，拖动也失去了「按需」的意义。
      * 播放推进由 {@code timeupdate} 事件续上（见构造函数里的监听）。
+     *
+     * <p><b>拖动中要用「用户意图的位置」当基准</b>：浏览器把 currentTime
+     * 钳回缓冲内后，真实的落点（{@link _seekTarget}）会远大于它。
+     * 用 currentTime 算窗口就会判定「目标在窗口外」而永远不下载，
+     * 表现为拖动后画面原地不动（实测拖到 70% 只停在 8.9 秒）。
      */
     const ts = this.remuxer.timescale || 1
-    const now = this.video.currentTime || 0
+    const now = this._seekTarget != null ? this._seekTarget : (this.video.currentTime || 0)
     if (this.gops[i].startTime / ts > now + LEAD_SECONDS) {
       // 这个分支每次 timeupdate 都会走到，只在换片段时打一条，避免刷屏
       if (this._waitLogged !== i) {
@@ -789,10 +943,20 @@ export class MseRecordPlayer {
         this._feed()
         return
       }
-      this.skipSet.add(i)
-      this.nextIndex = i + 1
-      this.onSkip(i, '下载失败：' + e.message)
-      this._feed()
+      /*
+       * <b>网络失败不能当坏段跳过</b>。
+       *
+       * <p>502 / 超时是链路问题（网关限流、抖动），这一段的数据本身是好的。
+       * 跳过它就等于在录像里挖了个洞，而且用户看到的是「后面一段没画面」。
+       * 正确做法是：原地重试（{@link _fetchGop} 内部已重试过 3 次），
+       * 还失败就退避一小会儿再来一轮，而不是往前跳。
+       */
+      this.onSkip(i, '下载失败（将重试）：' + e.message)
+      const retry = setTimeout(() => {
+        if (this.aborted || this.sb !== sb) return
+        this._feed()
+      }, 1500)
+      this._retryTimer = retry
     })
   }
 
@@ -985,9 +1149,58 @@ export class MseRecordPlayer {
     if (!Number.isFinite(target) || target < 0) {
       return
     }
+    // 目标可能还没下载下来，先记着，数据到了再真正跳过去
+    this.rememberSeekTarget(target)
     try {
       v.currentTime = target
     } catch (e) { /* 元数据未就绪 */ }
+  }
+
+  /**
+   * 记住「用户想去的位置」。
+   *
+   * <p><b>为什么需要单独记</b>：MSE 的 {@code currentTime} 只能落在
+   * {@code buffered} 范围内。用户拖到还没下载的位置时，浏览器会把
+   * {@code currentTime} 拉回缓冲内（实测拖到 70% 却只到 8.9 秒），
+   * 等数据下载完了也**不会自己跳过去** —— 画面停在原地，看起来像拖动无效。
+   *
+   * <p>所以记下目标，等对应片段喂进缓冲后再把播放位置挪过去。
+   *
+   * @param {number} time 目标时间（秒）
+   */
+  rememberSeekTarget(time) {
+    this._seekTarget = time
+  }
+
+  /**
+   * 目标位置的数据到了没有？到了就把播放位置挪过去。
+   *
+   * @returns {boolean} 是否发生了跳转
+   */
+  _applySeekTarget() {
+    if (this._seekTarget == null) {
+      return false
+    }
+    const v = this.video
+    const sb = this.sb
+    if (!sb || !sb.buffered.length) {
+      return false
+    }
+    const t = this._seekTarget
+    for (let i = 0; i < sb.buffered.length; i++) {
+      if (t >= sb.buffered.start(i) - 0.1 && t <= sb.buffered.end(i) - 0.05) {
+        this._seekTarget = null
+        try {
+          v.currentTime = t
+          dbg('跳到目标位置', { t: +t.toFixed(2) })
+          return true
+        } catch (e) {
+          // 元数据未就绪，下一轮再试
+          return false
+        }
+      }
+    }
+    return false
   }
 
   /**
@@ -1007,11 +1220,27 @@ export class MseRecordPlayer {
     if (!sb) {
       return
     }
-    const t = v.currentTime || 0
+    /*
+     * 用「用户意图的目标」而不是 currentTime。
+     *
+     * <p>拖到没下载的位置时，浏览器会把 currentTime 钳回缓冲内
+     * （实测拖到 70% 只停在 8.9 秒）。{@link _seekTarget} 里存的是
+     * progress 插件给的真实落点，比 currentTime 准。
+     */
+    const t = this._seekTarget != null ? this._seekTarget : (v.currentTime || 0)
     for (let i = 0; i < sb.buffered.length; i++) {
       if (t >= sb.buffered.start(i) - 0.1 && t <= sb.buffered.end(i) - 0.05) {
+        // 目标已在缓冲里，浏览器自己就能处理
+        this._seekTarget = null
         return
       }
+    }
+    /*
+     * 目标还没下下来：记下来，等数据到了再把播放位置挪过去。
+     * （浏览器会把 currentTime 拉回缓冲内，不会自己跳回来。）
+     */
+    if (this._seekTarget == null) {
+      this.rememberSeekTarget(t)
     }
     const target = this.gopIndexAt(t)
     if (target >= this.nextIndex) {

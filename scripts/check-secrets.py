@@ -53,6 +53,10 @@ SKIP_SUFFIX = {
 }
 SKIP_PATH_PARTS = ("static/assets", "node_modules", "dist/", "target/")
 
+# 行内豁免标记：确属误报的赋值可以在行尾加这个注释
+#   password: someVar,   // secret-scan: allow
+ALLOW_MARK = re.compile(r"secret-scan\s*:\s*allow", re.IGNORECASE)
+
 
 def is_placeholder(value: str, quoted: bool = False) -> bool:
     v = value.strip().strip("\"'")
@@ -163,6 +167,10 @@ def main() -> int:
                 continue
             # SQL 的 COMMENT ON ... IS '说明文字'：整行都是注释
             if re.match(r"(?i)comment\s+on\b", stripped):
+                continue
+            # 行内白名单：本行带豁免标记就跳过
+            # （比如 `token: authToken,  // secret-scan: allow`）
+            if ALLOW_MARK.search(line):
                 continue
             problems.append(f"{rel}:{i}: {stripped[:110]}")
 

@@ -353,6 +353,36 @@ export function useRecordPlayer(containerRef, hooks = {}) {
       }
     })
 
+    /*
+     * 拖动进度条：把「用户想去的位置」告诉内核。
+     *
+     * <p><b>为什么不能只靠 video 的 seeking 事件</b>：MSE 的 currentTime
+     * 只能落在 buffered 范围内，拖到没下载的位置时浏览器会立刻把播放位置
+     * 钳回缓冲内（实测拖到 70% 只停在 8.9 秒），等数据到了也不会自己跳回去。
+     *
+     * <p>进度条插件拖动结束时调的是 {@code player.seek(目标时间)}，
+     * 包装这个方法就能拿到<b>用户意图的真实落点</b>（不受钳制影响）。
+     * 这比监听事件可靠 —— 事件可能被插件配置挡掉，方法不会被绕过。
+     */
+    const origSeek = p.seek.bind(p)
+    p.seek = (time, status) => {
+      if (!disposed && core && typeof time === 'number' && Number.isFinite(time)) {
+        core.rememberSeekTarget(time)
+      }
+      return origSeek(time, status)
+    }
+
+    // 兜底：progress 插件的拖动结束事件也带 seekTime
+    p.on('user_action', (e) => {
+      if (disposed || !core) return
+      if (e && e.eventType === 'drag' && e.action === 'dragend') {
+        const target = e.seekTime
+        if (typeof target === 'number' && Number.isFinite(target)) {
+          core.rememberSeekTarget(target)
+        }
+      }
+    })
+
     try {
       await core.start(url, '')
     } catch (e) {

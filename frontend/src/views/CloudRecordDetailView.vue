@@ -158,7 +158,6 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
-import { probeCodecFromUrl } from '@/player/Mp4Remuxer'
 import { useRecordPlayer } from '@/composables/useRecordPlayer'
 
 const route = useRoute()
@@ -498,15 +497,23 @@ async function play(record) {
   try {
     // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例
     await nextTick()
-    const codec = record.playUrl
-      ? await probeCodecFromUrl(record.playUrl)
-      : 'unknown'
-    const token = localStorage.getItem('gb_token') || ''
+    // 静态地址（/record/**）不过鉴权，不需要带 token；
+    // 走受保护接口时才有 token
+    const authToken = record.playUrl ? '' : (localStorage.getItem('gb_token') || '')
     // playUrl 存在时用它（静态地址 Range 更快），否则退回需要登录的接口
     const source = record.playUrl || `/api/v1/cloudrecord/file/${record.recordId}`
     await recordPlayer.play(source, {
-      token: record.playUrl ? '' : token,
-      useMse: codec === 'h265'
+      token: authToken,
+      // 一律走自控下载（容错）通路。
+      //
+      // 原生 <video> 播 H.264 固然起播快（实测 412ms），但它的下载策略
+      // 是「攒一小批 → 播 → 缓冲掉下去再攒」，在公网带宽只有 50~130KB/s
+      // 的链路上必然周期性转圈：实测 40 秒播放只下载了 0.65MB（16KB/s），
+      // 而录像码率是 46KB/s —— 缓冲余量在 4~12 秒之间锯齿波动，最后耗尽。
+      //
+      // 自控下载实测能跑到 75KB/s（每次 300KB），高于录像码率，缓冲持续
+      // 增长，不会断粮。代价是起播要等 moov + 第一个 GOP（约 1 秒）。
+      useMse: true
     })
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
