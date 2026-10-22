@@ -87,6 +87,19 @@ public class Gb28181Properties {
     /** 录像根目录（留空用 ${user.dir}/record）。 */
     private String recordRoot = "";
 
+    /**
+     * 是否把录像目录暴露成静态资源（{@code /record/**}）。
+     *
+     * <p>开启后浏览器可以用原生 {@code <video src="/record/...">} 直接播录像：
+     * Range 由容器实现，首帧只下载文件头，秒开，进度条拖动是浏览器原生行为。
+     * 关掉则只能走需要登录的 {@code /api/v1/cloudrecord/file/{id}} 接口
+     * （该接口要整段读取，前端做大文件播放会明显变慢）。
+     *
+     * <p><b>注意</b>：开启意味着知道路径就能下载录像，适合内网/单机部署。
+     * 公网部署建议关掉，或在 Nginx 层限制来源。
+     */
+    private boolean recordStaticEnabled = true;
+
     /** 平台运行时行为。 */
     private Starter starter = new Starter();
 

@@ -76,6 +76,8 @@ public class CloudRecordController {
     private final SnapService snapService;
     private final SnapCaptureService snapCaptureService;
     private final ShareTokenService shareTokenService;
+    /** 用于把录像文件路径换算成 {@code /record/...} 静态地址。 */
+    private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
     /** 有云端录像的通道。 */
     @GetMapping("/querychannels")
@@ -548,6 +550,10 @@ public class CloudRecordController {
         item.setRecording(r.getEndTime() == null);
         if (withDownloadUrl && r.getEndTime() != null && recordService.fileAvailable(r)) {
             item.setDownloadUrl(recordService.downloadUrl(r));
+        }
+        // 本地录像：回填静态播放地址，前端可直接 <video src> 秒开
+        if (ObjectStorageService.TYPE_LOCAL.equals(r.getStorageType()) && r.getEndTime() != null) {
+            item.setPlayUrl(spaWebConfiguration.toStaticUrl(r.getFilePath()));
         }
         return item;
     }

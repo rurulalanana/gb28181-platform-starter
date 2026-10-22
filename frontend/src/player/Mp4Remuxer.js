@@ -161,6 +161,116 @@ function makeFullBox(type, version, flags, payload) {
 }
 
 /**
+ * 探测 moov 时，首次取文件尾的字节数。
+ *
+ * <p>ZLM 录出的 MP4 是 {@code ftyp + free + mdat + moov [+ free]}，索引在文件尾。
+ * 起始取 256KB：实测 16MB 录像的 moov 约 24KB，但 57MB 的录像样本数多得多，
+ * moov 会到 100KB 以上 —— 从 64KB 起步会多一次「不够→翻倍」的往返。
+ */
+const MOOV_PROBE_BYTES = 256 * 1024
+
+/** 探测 moov 时单次最多放大到的字节数。 */
+const MOOV_MAX_BYTES = 32 * 1024 * 1024
+
+/** 探测结果缓存：同一 URL 只探一次（避免重复点击/重渲染时重复下载）。 */
+const codecCache = new Map()
+
+/**
+ * 只下载「文件尾的 moov」来探测视频编码，不下载整个文件。
+ *
+ * <p><b>为什么要先探测</b>：H.265 录像里夹着坏帧的概率很高（UDP 丢包），
+ * 原生 {@code <video src>} 播不了；而浏览器一旦拿到 {@code src} 就会
+ * <b>预取整个文件</b>（实测 57MB 全下完才报错），白白浪费带宽。
+ * 先花一次几百 KB 的 Range 请求问清编码，H.265 直接走 MSE 通路就能省掉这次浪费。
+ *
+ * @param {string} url 录像地址（可带 query）
+ * @returns {Promise<string>} {@link CODEC_H264} / {@link CODEC_H265} / {@link CODEC_UNKNOWN}
+ */
+export async function probeCodecFromUrl(url) {
+  if (codecCache.has(url)) {
+    return codecCache.get(url)
+  }
+  const codec = await doProbeCodec(url)
+  // 只缓存「探到了」的结果；unknown 可能是临时网络问题，下次再试
+  if (codec !== CODEC_UNKNOWN) {
+    codecCache.set(url, codec)
+  }
+  return codec
+}
+
+/**
+ * 实际执行探测。
+ *
+ * @param {string} url 录像地址
+ * @returns {Promise<string>}
+ */
+async function doProbeCodec(url) {
+  try {
+    const head = await fetch(url, { method: 'HEAD' })
+    if (!head.ok) {
+      return CODEC_UNKNOWN
+    }
+    const size = Number(head.headers.get('Content-Length') || 0)
+    if (!size) {
+      return CODEC_UNKNOWN
+    }
+    let take = Math.min(MOOV_PROBE_BYTES, size)
+    for (;;) {
+      const start = size - take
+      const resp = await fetch(url, { headers: { Range: `bytes=${start}-${size - 1}` } })
+      if (!resp.ok) {
+        return CODEC_UNKNOWN
+      }
+      const bytes = new Uint8Array(await resp.arrayBuffer())
+      /*
+       * 在尾部字节里<b>搜索</b> 'moov' 四字符，不能用 parseBoxes。
+       *
+       * <p>尾部字节的开头落在 mdat 的中间，不是 box 边界 ——
+       * parseBoxes 从 offset 0 解析会读到垃圾长度，永远找不到 moov
+       * （表现为翻倍重试到 32MB，比整文件下载还费）。
+       */
+      const hit = findBoxByType(bytes, 'moov')
+      if (hit) {
+        const r = new Mp4Remuxer(bytes.subarray(hit.start, hit.start + hit.size))
+        return r.codec
+      }
+      if (take >= size || take >= MOOV_MAX_BYTES) {
+        return CODEC_UNKNOWN
+      }
+      take = Math.min(take * 4, size, MOOV_MAX_BYTES)
+    }
+  } catch (e) {
+    return CODEC_UNKNOWN
+  }
+}
+
+/**
+ * 在字节数组里按四字符类型搜索 box。
+ *
+ * @param {Uint8Array} buf 字节数组
+ * @param {string} type 四字符类型
+ * @returns {{start:number,size:number}|null} box 起始偏移与长度
+ */
+function findBoxByType(buf, type) {
+  const c0 = type.charCodeAt(0)
+  const c1 = type.charCodeAt(1)
+  const c2 = type.charCodeAt(2)
+  const c3 = type.charCodeAt(3)
+  for (let i = 4; i + 4 <= buf.length; i++) {
+    if (buf[i] === c0 && buf[i + 1] === c1 && buf[i + 2] === c2 && buf[i + 3] === c3) {
+      const start = i - 4
+      const size = ((buf[start] << 24) | (buf[start + 1] << 16)
+        | (buf[start + 2] << 8) | buf[start + 3]) >>> 0
+      // 长度前缀必须合理（至少 8，且不超出数组）
+      if (size >= 8 && start + size <= buf.length) {
+        return { start, size }
+      }
+    }
+  }
+  return null
+}
+
+/**
  * MP4 重封装器。
  *
  * <p>用法：
@@ -174,15 +284,20 @@ function makeFullBox(type, version, flags, payload) {
  */
 export class Mp4Remuxer {
   /**
-   * @param {Uint8Array} buf  整个 MP4 文件（或至少包含 moov 的部分）
+   * @param {Uint8Array} buf       至少包含 {@code moov} 的字节块（也可以是整个文件）
+   * @param {number} [baseOffset]  该字节块在<b>文件</b>里的起始偏移。
+   *   只传「文件尾部的 moov」时用它把 box 位置换算回文件绝对偏移。
+   *   sample 的 {@code stco} 记录本来就是文件绝对偏移，所以解析索引时不需要它；
+   *   它只用于判定「哪部分数据已经下载好了」。
    */
-  constructor(buf) {
+  constructor(buf, baseOffset = 0) {
     this.buf = buf;
+    this.baseOffset = baseOffset;
     this.boxes = parseBoxes(buf, 0, buf.length);
     this.ftypBox = this.boxes.find(b => b.type === 'ftyp') || null;
     this.moovBox = this.boxes.find(b => b.type === 'moov') || null;
     if (!this.moovBox) {
-      throw new Error('找不到 moov box（不是有效的 MP4）');
+      throw new Error('找不到 moov box（不是有效的 MP4，或录像仍在录制中）');
     }
     this._parseVideoTrack();
   }
@@ -372,7 +487,10 @@ export class Mp4Remuxer {
   /**
    * 按 GOP 分组：每个 GOP 从一个关键帧开始，到下一个关键帧之前结束。
    *
-   * @returns {Array<{start:number,end:number,samples:Array<object>,startTime:number,duration:number}>}
+   * <p>每个 GOP 额外带上 {@code dataStart}/{@code dataEnd}（<b>文件绝对偏移</b>），
+   * 调用方据此只下载这一段就能播这个 GOP —— 不用把整个录像拉下来。
+   *
+   * @returns {Array<{start:number,end:number,samples:Array<object>,startTime:number,duration:number,dataStart:number,dataEnd:number}>}
    */
   gops() {
     const out = [];
@@ -391,6 +509,11 @@ export class Mp4Remuxer {
     }
     if (cur) {
       out.push(cur);
+    }
+    for (const g of out) {
+      g.dataStart = g.samples[0].offset;
+      const last = g.samples[g.samples.length - 1];
+      g.dataEnd = last.offset + last.size;
     }
     return out;
   }
@@ -425,7 +548,19 @@ export class Mp4Remuxer {
     }
     parts.push(this._buildMvex());
     const moovBytes = makeBox('moov', this._concat(parts));
-    const ftyp = this.ftypBox ? buf.slice(this.ftypBox.start, this.ftypBox.end) : makeBox('ftyp', new Uint8Array([0]));
+    /*
+     * ftyp 只在「整个文件在手」时能从源文件抄；
+     * 只下载文件尾部 moov 的场景下 ftyp 不在手上，这里给一个标准头
+     * （major_brand=isom, minor_version=0x200, compatible=isomiso2mp41）。
+     */
+    const ftyp = this.ftypBox
+      ? buf.slice(this.ftypBox.start, this.ftypBox.end)
+      : makeBox('ftyp', new Uint8Array([
+        0x69, 0x73, 0x6f, 0x6d,             // 'isom'
+        0x00, 0x00, 0x02, 0x00,             // minor_version
+        0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
+        0x6d, 0x70, 0x34, 0x31              // 'isomiso2mp41'
+      ]));
     this._init = this._concat([ftyp, moovBytes]);
     return this._init;
   }
@@ -531,11 +666,13 @@ export class Mp4Remuxer {
   /**
    * 构造一个分片（{@code moof + mdat}）。
    *
-   * @param {object} gop {@link Mp4Remuxer#gops} 里的一项
+   * @param {object} gop           {@link Mp4Remuxer#gops} 里的一项
    * @param {number} sequenceNumber 片段序号
+   * @param {Uint8Array} [data]    该 GOP 的样本字节（从 {@code gop.dataStart} 开始）。
+   *   不传时从构造函数的 {@code buf} 里按绝对偏移取（整个文件在手的场景）。
    * @returns {Uint8Array}
    */
-  fragment(gop, sequenceNumber = 1) {
+  fragment(gop, sequenceNumber = 1, data = null) {
     const samples = gop.samples;
 
     // ---- mdat 的数据 ----
@@ -543,7 +680,13 @@ export class Mp4Remuxer {
     const mdatPayload = new Uint8Array(total);
     let p = 0;
     for (const s of samples) {
-      mdatPayload.set(this.buf.subarray(s.offset, s.offset + s.size), p);
+      if (data) {
+        // data 是从 gop.dataStart 开始的连续字节，样本偏移要减去它
+        const from = s.offset - gop.dataStart;
+        mdatPayload.set(data.subarray(from, from + s.size), p);
+      } else {
+        mdatPayload.set(this.buf.subarray(s.offset, s.offset + s.size), p);
+      }
       p += s.size;
     }
 

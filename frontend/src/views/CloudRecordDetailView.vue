@@ -64,18 +64,19 @@
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            录像播放：统一走 MseRecordPlayer（浏览器端重封装 + 容错）。
+            录像播放：原生 <video> 直连优先，失败自动切容错通路。
 
-            为什么不直接 <video src>：ZLM 录出的 H.265 MP4 里会夹着残缺帧
-            （UDP 收流丢包 → PS 解封装失败 → 残帧仍被写进文件），
-            浏览器硬解不容错，原生 <video> 直接 PIPELINE_ERROR_DECODE，只出首帧。
+            1) 接口回填的 playUrl 是 Spring 静态资源映射（/record/...）：
+               浏览器原生播放，Range 由容器实现 → 首帧只下载文件头，秒开；
+               进度条拖动、倍速、音量、全屏全是浏览器自带，不需要额外代码。
+            2) ZLM 录出的 H.265 MP4 里会夹着残缺帧（UDP 丢包 → PS 解封装失败），
+               浏览器硬解不容错会 PIPELINE_ERROR_DECODE，只出首帧。
+               此时自动切 MseRecordPlayer：浏览器端只换容器（不转码）
+               按 GOP 切 fMP4 喂 MSE，坏段跳过继续播。
 
-            MseRecordPlayer 的做法：把 MP4 拉下来后在浏览器里只换容器（不转码），
-            按 GOP 切成 fMP4 片段逐段喂给 MSE；某段解码报错就跳过它继续播。
-            H.264 走同一套逻辑（实测两编码都能正常播放），少一条分支。
-
-            token 拼在 URL 上：媒体请求带不了自定义头，
+            token 拼在 URL 上：/api/v1/... 通路带不了自定义头，
             后端 Sa-Token 配了从 query 读（is-read-body）。
+            静态 /record/... 通路不过拦截器，不需要 token。
           -->
           <video v-if="playingRecord" ref="mseVideo" class="video-container"
                  controls playsinline muted autoplay />
@@ -158,9 +159,21 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { MseRecordPlayer } from '@/player/MseRecordPlayer'
+import { probeCodecFromUrl } from '@/player/Mp4Remuxer'
 
 const route = useRoute()
 const router = useRouter()
+
+/**
+ * 原生播放判成功的门槛：{@code currentTime} 至少要推进这么多秒。
+ *
+ * <p>只等 {@code loadedmetadata} 不够 —— 那只说明索引读到了，
+ * 坏码流要等解码器真正出帧才暴露（实测坏录像在 {@code t=0.03} 就报错）。
+ */
+const NATIVE_OK_ADVANCE = 0.3
+
+/** 原生播放的超时（毫秒）：超时还没出画面就切容错通路。 */
+const NATIVE_TIMEOUT_MS = 10000
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
@@ -457,15 +470,15 @@ function goBack() {
 /**
  * 点播一段录像。
  *
- * <p>统一走 {@link MseRecordPlayer}：把 MP4 拉下来后<b>在浏览器里只换容器</b>
- * （不转码）按 GOP 切成 fMP4 片段，逐段喂给 MSE；某段解码报错就跳过它继续播。
+ * <p><b>H.264 → 原生直连</b>：接口回填的 {@code playUrl}（{@code /record/...}）是
+ * Spring 静态资源映射，浏览器原生 {@code <video src>} 直接播 —— Range 由容器实现，
+ * 首帧只下载文件头，秒开，进度条拖动是浏览器原生行为，不用任何额外代码。
  *
- * <p><b>为什么需要这层容错</b>：ZLM 录出的 MP4 里会夹着残缺帧 ——
- * UDP 收流丢包导致 PS 解封装失败，ZLM 仍把残帧写进文件，
- * 于是码流里出现 {@code Invalid NAL unit 0} / {@code VPS 0 does not exist} /
- * {@code Could not find ref with POC N}。ffmpeg 容错能跳过，但浏览器硬解不容错，
- * 原生 {@code <video src>} 直接 {@code PIPELINE_ERROR_DECODE}，只出首帧就停。
- * 这与收流用 UDP 还是 TCP 无关 —— 用户坚持 UDP 时同样能播。
+ * <p><b>H.265 → 直接走容错通路</b>：ZLM 录出的 H.265 MP4 里几乎必然夹着残缺帧
+ * （UDP 收流丢包 → PS 解封装失败 → 残帧仍被写进文件），浏览器硬解不容错，
+ * 原生播放只会 {@code PIPELINE_ERROR_DECODE}。而且浏览器拿到 {@code src} 后
+ * 会<b>预取整个文件</b>（实测 57MB 全下完才报错），所以这里先花几十 KB
+ * 探一下编码，H.265 直接跳过原生尝试，省掉那次浪费。
  *
  * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
  * 转成 ws-flv/webrtc 地址，供「流式」播放用。本页直接播文件，
@@ -477,7 +490,17 @@ async function play(record) {
   try {
     // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例
     await nextTick()
-    await playRecord(record)
+    const codec = record.playUrl
+      ? await probeCodecFromUrl(record.playUrl)
+      : 'unknown'
+    if (codec === 'h265') {
+      // H.265 不试原生：已知会失败，试一次要多下几十 MB
+      await playWithMse(record)
+    } else if (record.playUrl && await tryNativePlay(record)) {
+      // H.264（或探测不出编码但原生能播）：交给浏览器
+    } else {
+      await playWithMse(record)
+    }
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
     playingRecord.value = null
@@ -486,20 +509,120 @@ async function play(record) {
 }
 
 /**
+ * 用原生 {@code <video src>} 直接播静态地址。
+ *
+ * <p><b>判定成功的标准是「画面真的动起来」，不是「元数据到了」</b>：
+ * {@code loadedmetadata} 只能说明文件头和索引读到了（几十毫秒），
+ * 坏码流要等解码器真正开始解码才暴露 —— 实测 H.265 坏录像会在
+ * {@code t=0.03} 报 {@code PIPELINE_ERROR_DECODE}（{@code err=3}），
+ * 而 {@code loadedmetadata} 早就已经通过了。
+ *
+ * <p>所以这里等 {@code currentTime} 推进超过 {@link NATIVE_OK_ADVANCE} 秒才判成功；
+ * 期间一旦 {@code error} 立刻判失败，交给 MSE 容错通路。
+ *
+ * @param {object} record 录像记录
+ * @returns {Promise<boolean>} 是否成功接管播放
+ */
+function tryNativePlay(record) {
+  const video = mseVideo.value
+  if (!video || !record.playUrl) {
+    return Promise.resolve(false)
+  }
+  destroyMse()
+  return new Promise((resolve) => {
+    let settled = false
+    let baseTime = 0
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      video.removeEventListener('loadedmetadata', onMeta)
+      video.removeEventListener('timeupdate', onTime)
+      video.removeEventListener('error', onError)
+      if (!ok) {
+        // 交回给 MSE 通路，先把原生状态清掉
+        video.removeEventListener('playing', onNativePlaying)
+        video.removeEventListener('ended', onNativeEnded)
+        video.removeAttribute('src')
+        video.load()
+      }
+      resolve(ok)
+    }
+    const onMeta = () => {
+      baseTime = video.currentTime
+      video.play().catch(() => { /* 自动播放被拦时由用户点一下 */ })
+    }
+    // 画面推进了才算真能播
+    const onTime = () => {
+      if (video.currentTime - baseTime >= NATIVE_OK_ADVANCE) {
+        playState.value = '播放中'
+        finish(true)
+      }
+    }
+    const onError = () => {
+      console.warn('[录像] 原生播放失败，改用容错通路：',
+        (video.error && video.error.message) || '未知错误')
+      finish(false)
+    }
+    const timer = setTimeout(() => {
+      if (!settled) {
+        console.warn('[录像] 原生播放超时未出画面，改用容错通路')
+        finish(false)
+      }
+    }, NATIVE_TIMEOUT_MS)
+
+    video.addEventListener('loadedmetadata', onMeta, { once: true })
+    video.addEventListener('timeupdate', onTime)
+    video.addEventListener('error', onError, { once: true })
+    // 原生通路也要同步状态文案
+    video.addEventListener('playing', onNativePlaying)
+    video.addEventListener('ended', onNativeEnded)
+    video.src = record.playUrl
+    video.load()
+  })
+}
+
+/** 原生通路：开始播放。 */
+function onNativePlaying() {
+  playState.value = '播放中'
+}
+
+/** 原生通路：播放结束。 */
+function onNativeEnded() {
+  playState.value = '播放结束'
+}
+
+/** 清掉原生通路挂在 video 上的监听。 */
+function detachNativeListeners() {
+  const video = mseVideo.value
+  if (!video) return
+  video.removeEventListener('playing', onNativePlaying)
+  video.removeEventListener('ended', onNativeEnded)
+}
+
+/**
  * 用 MSE 容错播放器播一段录像。
  *
  * @param {object} record 录像记录
  */
-async function playRecord(record) {
+async function playWithMse(record) {
   const video = mseVideo.value
   if (!video) {
     throw new Error('播放器未就绪')
   }
   destroyMse()
+  playState.value = '容错加载…'
   msePlayer = new MseRecordPlayer(video, {
     onState: (s) => {
+      /*
+       * 必须同时处理「播放中」：容错重建是一次性的中间态，
+       * 重建完播放器会回调「播放中」，这里不接住的话
+       * 界面就会一直停在「容错重建…」。
+       */
       if (s === '容错重建') {
         playState.value = '容错重建…'
+      } else if (s === '播放中') {
+        playState.value = '播放中'
       }
     },
     onSkip: (idx, reason) => {
@@ -511,16 +634,17 @@ async function playRecord(record) {
       ElMessage.error('播放失败：' + msg)
     }
   })
-  video.addEventListener('playing', () => { playState.value = '播放中' })
-  video.addEventListener('ended', () => { playState.value = '播放结束' })
   const token = localStorage.getItem('gb_token') || ''
-  await msePlayer.start(`/api/v1/cloudrecord/file/${record.recordId}`, token)
+  // playUrl 存在时用它（静态地址 Range 更快），否则退回需要登录的接口
+  const source = record.playUrl || `/api/v1/cloudrecord/file/${record.recordId}`
+  await msePlayer.start(source, record.playUrl ? '' : token)
   await video.play().catch(() => { /* 自动播放被拦时由用户点一下 */ })
   playState.value = '播放中'
 }
 
 /** 销毁 MSE 播放器。 */
 function destroyMse() {
+  detachNativeListeners()
   if (msePlayer) {
     try {
       msePlayer.destroy()
@@ -534,10 +658,16 @@ function destroyMse() {
 /**
  * 停止点播。
  *
- * <p>销毁播放器会释放 MediaSource 并中止对 {@code /file/{recordId}} 的请求。
+ * <p>销毁播放器会释放 MediaSource，并中止对录像文件的请求。
  */
 function stopPlay() {
   destroyMse()
+  detachNativeListeners()
+  const video = mseVideo.value
+  if (video) {
+    video.removeAttribute('src')
+    video.load()
+  }
   playingRecord.value = null
   playState.value = '空闲'
 }
