@@ -64,18 +64,21 @@
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            xgplayer 挂载点。
+            录像播放：统一走 MseRecordPlayer（浏览器端重封装 + 容错）。
 
-            录像回放直接播后端 /api/v1/cloudrecord/file/{recordId} 返回的 MP4：
-              - 浏览器靠 HTTP Range 按需拉取，不必整个下载完（实测 357MB /
-                1 小时的文件 loadedmetadata 在 5.3 秒内返回）；
-              - 进度条、拖动、倍速、音量、全屏、截图全部由 xgplayer 自带，
-                不用自己拼一套控件。
+            为什么不直接 <video src>：ZLM 录出的 H.265 MP4 里会夹着残缺帧
+            （UDP 收流丢包 → PS 解封装失败 → 残帧仍被写进文件），
+            浏览器硬解不容错，原生 <video> 直接 PIPELINE_ERROR_DECODE，只出首帧。
 
-            token 拼在 URL 上：<video> 发起的请求带不了自定义头，
+            MseRecordPlayer 的做法：把 MP4 拉下来后在浏览器里只换容器（不转码），
+            按 GOP 切成 fMP4 片段逐段喂给 MSE；某段解码报错就跳过它继续播。
+            H.264 走同一套逻辑（实测两编码都能正常播放），少一条分支。
+
+            token 拼在 URL 上：媒体请求带不了自定义头，
             后端 Sa-Token 配了从 query 读（is-read-body）。
           -->
-          <div v-if="playingRecord" ref="playerEl" class="video-container" />
+          <video v-if="playingRecord" ref="mseVideo" class="video-container"
+                 controls playsinline muted autoplay />
           <div v-else class="player-tip">
             <el-icon :size="34"><VideoPlay /></el-icon>
             <span>点击下方时间轴上的录像段点播</span>
@@ -153,9 +156,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import Player from 'xgplayer'
-import 'xgplayer/dist/index.min.css'
 import { cloudRecordApi } from '@/api'
+import { MseRecordPlayer } from '@/player/MseRecordPlayer'
 
 const route = useRoute()
 const router = useRouter()
@@ -273,11 +275,6 @@ const viewMode = ref('timeline')
 
 const playingRecord = ref(null)
 
-/** xgplayer 挂载点。 */
-const playerEl = ref(null)
-/** xgplayer 实例（非响应式，避免 Vue 代理播放器内部对象）。 */
-let xgPlayer = null
-
 /** 播放状态（展示用）。 */
 const playState = ref('空闲')
 const playStateType = computed(() => {
@@ -286,73 +283,10 @@ const playStateType = computed(() => {
   return 'info'
 })
 
-/**
- * 录像文件的播放地址。
- *
- * <p>token 拼在 URL 上：{@code <video>} 发起的请求带不了自定义头，
- * Sa-Token 会从 query 参数里读 token（配置 {@code is-read-body: true}）。
- */
-const playUrl = computed(() => {
-  if (!playingRecord.value?.recordId) return ''
-  const token = localStorage.getItem('gb_token') || ''
-  return `/api/v1/cloudrecord/file/${playingRecord.value.recordId}?Authorization=${encodeURIComponent(token)}`
-})
-
-/**
- * 创建/重建播放器。
- *
- * <p>每次点播都新建实例：{@code destroy()} 之后 xgplayer 的 DOM 与
- * 内部 MediaSource 都不可复用，重建比「换 src」可靠。
- */
-function createPlayer() {
-  destroyPlayer()
-  const el = playerEl.value
-  if (!el) return null
-  xgPlayer = new Player({
-    el,
-    url: playUrl.value,
-    // 录像时长有限：不传 isLive，进度条/时间/倍速等点播控件才会出现
-    autoplay: true,
-    // 静音起播：浏览器只允许静音自动播放，用户点音量键即可恢复。
-    // 注意 xgplayer 的顶层配置项是 autoplayMuted（不是 muted）：
-    // muted 只会作为 video 元素属性传下去，不会让浏览器放行自动播放。
-    autoplayMuted: true,
-    lang: 'zh-cn',
-    width: '100%',
-    height: '100%',
-    ignores: ['download', 'testSpeed', 'definition', 'screenShot']
-  })
-
-  const p = xgPlayer
-  // 拖动进度条时 xgplayer 会自己切 Range 请求，这里只同步状态文案
-  p.on('playing', () => {
-    playState.value = '播放中'
-  })
-  p.on('pause', () => {
-    if (playState.value === '播放中') playState.value = '已暂停'
-  })
-  p.on('ended', () => {
-    playState.value = '播放结束'
-  })
-  p.on('error', () => {
-    playState.value = '播放异常'
-    ElMessage.error('播放失败：浏览器可能不支持该视频编码（如 H.265 缺少 HEVC 解码器）')
-  })
-  return p
-}
-
-/** 销毁播放器并清空挂载点。 */
-function destroyPlayer() {
-  if (xgPlayer) {
-    try {
-      xgPlayer.destroy()
-    } catch (e) {
-      // 实例可能已释放，忽略
-    }
-    xgPlayer = null
-  }
-  if (playerEl.value) playerEl.value.innerHTML = ''
-}
+/** MSE 容错播放器实例（浏览器端重封装录像，见 frontend/src/player/MseRecordPlayer.js）。 */
+let msePlayer = null
+/** 承载播放的 video 元素。 */
+const mseVideo = ref(null)
 
 function todayString() {
   const d = new Date()
@@ -521,21 +455,21 @@ function goBack() {
 /* ==================== 点播 / 下载 / 删除 ==================== */
 
 /**
- * 点播一段录像：把 MP4 直接交给原生 {@code <video>}。
+ * 点播一段录像。
  *
- * <p><b>实测数据</b>（357MB / 1 小时 / moov 在文件尾 / H264）：
- * {@code loadedmetadata} 5.3 秒、{@code canplay} 5.3 秒、
- * {@code readyState=4}，全程无错误。
- * moov 在文件尾并不影响播放 —— 浏览器会先发 {@code Range: bytes=-N}
- * 取文件尾的索引，再按需取数据，不需要整个下完。
+ * <p>统一走 {@link MseRecordPlayer}：把 MP4 拉下来后<b>在浏览器里只换容器</b>
+ * （不转码）按 GOP 切成 fMP4 片段，逐段喂给 MSE；某段解码报错就跳过它继续播。
+ *
+ * <p><b>为什么需要这层容错</b>：ZLM 录出的 MP4 里会夹着残缺帧 ——
+ * UDP 收流丢包导致 PS 解封装失败，ZLM 仍把残帧写进文件，
+ * 于是码流里出现 {@code Invalid NAL unit 0} / {@code VPS 0 does not exist} /
+ * {@code Could not find ref with POC N}。ffmpeg 容错能跳过，但浏览器硬解不容错，
+ * 原生 {@code <video src>} 直接 {@code PIPELINE_ERROR_DECODE}，只出首帧就停。
+ * 这与收流用 UDP 还是 TCP 无关 —— 用户坚持 UDP 时同样能播。
  *
  * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
  * 转成 ws-flv/webrtc 地址，供「流式」播放用。本页直接播文件，
  * 那些地址一个都用不上；调它反而会让 ZLM 白读一遍文件、多等一个来回。
- *
- * <p><b>H265 录像</b>：浏览器原生支持 HEVC（macOS/Windows 的
- * Chrome/Edge 通过系统解码器硬解），实测 2560×1440 的 H265 录像
- * 可以正常播放，<b>不需要服务端转码</b>。
  */
 async function play(record) {
   playingRecord.value = { ...record }
@@ -543,7 +477,7 @@ async function play(record) {
   try {
     // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例
     await nextTick()
-    createPlayer()
+    await playRecord(record)
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
     playingRecord.value = null
@@ -552,13 +486,58 @@ async function play(record) {
 }
 
 /**
+ * 用 MSE 容错播放器播一段录像。
+ *
+ * @param {object} record 录像记录
+ */
+async function playRecord(record) {
+  const video = mseVideo.value
+  if (!video) {
+    throw new Error('播放器未就绪')
+  }
+  destroyMse()
+  msePlayer = new MseRecordPlayer(video, {
+    onState: (s) => {
+      if (s === '容错重建') {
+        playState.value = '容错重建…'
+      }
+    },
+    onSkip: (idx, reason) => {
+      // 单个 GOP 坏了就跳过，不打断用户
+      console.warn(`[录像] 跳过异常片段 #${idx}（${reason}）`)
+    },
+    onFatal: (msg) => {
+      playState.value = '播放异常'
+      ElMessage.error('播放失败：' + msg)
+    }
+  })
+  video.addEventListener('playing', () => { playState.value = '播放中' })
+  video.addEventListener('ended', () => { playState.value = '播放结束' })
+  const token = localStorage.getItem('gb_token') || ''
+  await msePlayer.start(`/api/v1/cloudrecord/file/${record.recordId}`, token)
+  await video.play().catch(() => { /* 自动播放被拦时由用户点一下 */ })
+  playState.value = '播放中'
+}
+
+/** 销毁 MSE 播放器。 */
+function destroyMse() {
+  if (msePlayer) {
+    try {
+      msePlayer.destroy()
+    } catch (e) {
+      // 实例可能已释放，忽略
+    }
+    msePlayer = null
+  }
+}
+
+/**
  * 停止点播。
  *
- * <p>直接销毁播放器：xgplayer 会中止对 {@code /file/{recordId}} 的
- * Range 请求，不会继续拉剩下的数据。
+ * <p>销毁播放器会释放 MediaSource 并中止对 {@code /file/{recordId}} 的请求。
  */
 function stopPlay() {
-  destroyPlayer()
+  destroyMse()
   playingRecord.value = null
   playState.value = '空闲'
 }
@@ -703,7 +682,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
-  destroyPlayer()
+  destroyMse()
 })
 </script>
 
