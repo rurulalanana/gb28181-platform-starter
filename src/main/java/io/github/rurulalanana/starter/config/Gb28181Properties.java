@@ -88,17 +88,28 @@ public class Gb28181Properties {
     private String recordRoot = "";
 
     /**
-     * 是否把录像目录暴露成静态资源（{@code /record/**}）。
+     * 是否由<b>本进程</b>把录像目录暴露成静态资源（{@code /record/**}）。
      *
-     * <p>开启后浏览器可以用原生 {@code <video src="/record/...">} 直接播录像：
-     * Range 由容器实现，首帧只下载文件头，秒开，进度条拖动是浏览器原生行为。
-     * 关掉则只能走需要登录的 {@code /api/v1/cloudrecord/file/{id}} 接口
-     * （该接口要整段读取，前端做大文件播放会明显变慢）。
+     * <p><b>默认为 {@code false}，即交给 nginx</b>。因为 Spring Boot 的
+     * 静态资源处理器处理 Range 请求极慢 —— 同一段 2MB，实测：
+     * <pre>
+     *   Spring Boot 静态映射            16~20 秒（110 KB/s）
+     *   nginx（sendfile + keep-alive）  0.06~0.15 秒（24 MB/s）
+     * </pre>
+     * 差 200 倍。而录像回放要按 GOP 分段下载很多次 Range，
+     * 这个差距直接决定「起播 15 秒还是 2 秒」。
      *
-     * <p><b>注意</b>：开启意味着知道路径就能下载录像，适合内网/单机部署。
-     * 公网部署建议关掉，或在 Nginx 层限制来源。
+     * <p>标准部署形态见 {@code deploy/nginx-record.conf}：nginx 监听公网端口，
+     * {@code /record/**} 用 sendfile 直读磁盘，其余请求反代回本进程。
+     *
+     * <p>什么时候需要打开：没有 nginx 的单机/内网部署（比如直接
+     * {@code java -jar} 跑起来试）。打开后浏览器可以用
+     * {@code <video src="/record/...">} 直接播，但大文件拖动会明显变慢。
+     *
+     * <p><b>安全提示</b>：开启意味着知道路径就能下载录像，
+     * 公网部署不要开。
      */
-    private boolean recordStaticEnabled = true;
+    private boolean recordStaticEnabled = false;
 
     /** 平台运行时行为。 */
     private Starter starter = new Starter();

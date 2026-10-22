@@ -118,6 +118,13 @@ gb28181:
   auto-record: false
   record-root: ""
 
+  # 是否由本进程提供 /record/** 录像文件。
+  # 默认 false，交给 nginx 的 location /record/（sendfile 直读）——
+  # Spring Boot 静态映射的 Range 请求只有 110KB/s，nginx 有 24MB/s，差 200 倍，
+  # 直接决定录像起播是「15 秒」还是「2 秒」。配置见 deploy/nginx-record.conf。
+  # 没有 nginx 的单机/内网部署可改为 true 回退到本进程提供（大文件拖动会变慢）。
+  record-static-enabled: false
+
   # 平台运行时行为
   starter:
     # 启动时执行 db/schema.sql 建表（幂等：全部 CREATE TABLE IF NOT EXISTS）

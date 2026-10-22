@@ -337,6 +337,12 @@ export function useRecordPlayer(containerRef, hooks = {}) {
     core = new MseRecordPlayer(media, {
       // 把外壳建好的 MediaSource 交给内核，避免它再改写 video.src
       mediaSource: ms,
+      /*
+       * 开发模式下把内核挂到 window，便于在控制台查内部状态
+       * （_seekTarget / nextIndex / _feeding 等），排查拖动卡死用。
+       * 生产构建会被 Vite 静态剔除，不留全局变量。
+       */
+      debugGlobal: import.meta.env.DEV ? 'mseRecordCore' : '',
       onState: (s) => {
         if (disposed) return
         state.value = s === '容错重建' ? '容错重建…' : s
@@ -354,34 +360,17 @@ export function useRecordPlayer(containerRef, hooks = {}) {
     })
 
     /*
-     * 拖动进度条：把「用户想去的位置」告诉内核。
+     * 拖动进度条的处理<b>不在这里做</b>。
      *
-     * <p><b>为什么不能只靠 video 的 seeking 事件</b>：MSE 的 currentTime
-     * 只能落在 buffered 范围内，拖到没下载的位置时浏览器会立刻把播放位置
-     * 钳回缓冲内（实测拖到 70% 只停在 8.9 秒），等数据到了也不会自己跳回去。
+     * <p>早期是包装 {@code player.seek()} + 监听 {@code user_action}，
+     * 实测<b>都拿不到落点</b>：progress 插件点击时并没有走 {@code player.seek()}，
+     * 那两个钩子形同虚设，内核只能退化成拿被浏览器钳回的 currentTime 去比对，
+     * 于是判定「目标已在缓冲内」→ 什么都不做 → <b>永远转圈</b>。
      *
-     * <p>进度条插件拖动结束时调的是 {@code player.seek(目标时间)}，
-     * 包装这个方法就能拿到<b>用户意图的真实落点</b>（不受钳制影响）。
-     * 这比监听事件可靠 —— 事件可能被插件配置挡掉，方法不会被绕过。
+     * <p>现在由内核直接劫持 {@code media.currentTime} 的 setter 捕获落点
+     * （见 {@code MseRecordPlayer#_installCurrentTimeHook}）：所有 seek 路径
+     * （点击进度条、拖动、方向键、播放器内部调用）最终都必经它，一个都不漏。
      */
-    const origSeek = p.seek.bind(p)
-    p.seek = (time, status) => {
-      if (!disposed && core && typeof time === 'number' && Number.isFinite(time)) {
-        core.rememberSeekTarget(time)
-      }
-      return origSeek(time, status)
-    }
-
-    // 兜底：progress 插件的拖动结束事件也带 seekTime
-    p.on('user_action', (e) => {
-      if (disposed || !core) return
-      if (e && e.eventType === 'drag' && e.action === 'dragend') {
-        const target = e.seekTime
-        if (typeof target === 'number' && Number.isFinite(target)) {
-          core.rememberSeekTarget(target)
-        }
-      }
-    })
 
     try {
       await core.start(url, '')

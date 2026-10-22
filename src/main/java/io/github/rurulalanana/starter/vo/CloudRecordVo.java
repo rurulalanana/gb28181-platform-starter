@@ -39,12 +39,12 @@ public class CloudRecordVo {
     private String downloadUrl;
 
     /**
-     * 直接播放地址（静态资源，如 {@code /record/xxx/....mp4}）。
+     * 直接播放地址（同源相对路径，如 {@code /record/xxx/....mp4}）。
      *
-     * <p>前端把它直接喂给 {@code <video src>}：Range 由容器实现，
-     * 首帧只下载文件头，秒开，进度条拖动是浏览器原生行为。
-     * 本地存储且开启 {@code gb28181.record-static-enabled} 时才有值；
-     * 为空时前端退回 {@code /api/v1/cloudrecord/file/{recordId}}。
+     * <p>前端拿它按需 Range 下载并做浏览器端重封装。
+     * 文件实体由 nginx 直读磁盘提供（见 {@code deploy/nginx-record.conf}）；
+     * 无 nginx 的部署可开 {@code gb28181.record-static-enabled} 由本进程提供。
+     * 对象存储（OSS）录像该字段为空，走 {@code downloadUrl}。
      */
     private String playUrl;
 

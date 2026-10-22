@@ -184,12 +184,15 @@ export class MseRecordPlayer {
    * @param {function} [options.onState] 状态回调（'加载中'/'播放中'/'容错重建'…）
    * @param {function} [options.onFatal] 彻底失败回调
    * @param {function} [options.onSkip]  跳过片段回调 (gopIndex, 原因)
+   * @param {string} [options.debugGlobal] 开发模式下挂到 window 的全局名
    */
   constructor(videoEl, options = {}) {
     this.video = videoEl
     this.onState = options.onState || (() => {})
     this.onFatal = options.onFatal || (() => {})
     this.onSkip = options.onSkip || (() => {})
+    /** 开发调试用的全局挂点名（空字符串 = 不挂）。 */
+    this.debugGlobal = options.debugGlobal || ''
 
     /**
      * 首次播放用的 MediaSource（由外部播放器骨架创建）。
@@ -223,6 +226,15 @@ export class MseRecordPlayer {
      * 会把播放位置拉回来；数据到了之后要靠这个字段再挪回去。
      */
     this._seekTarget = null
+    /**
+     * 程序自己设置播放位置的标志。
+     *
+     * <p>{@link _setCurrentTime} 期间置 true，让 {@link _installCurrentTimeHook}
+     * 知道「这是程序纠偏，不是用户想看这里」。
+     */
+    this._selfSettingTime = false
+    /** currentTime 劫持是否已装上（销毁时还原）。 */
+    this._timeHookInstalled = false
     /** 已下载的 GOP 数据缓存：index -> Uint8Array */
     this.chunkCache = new Map()
     /** 正在下载的 GOP：index -> Promise */
@@ -308,6 +320,133 @@ export class MseRecordPlayer {
     this.video.addEventListener('playing', this._onPlaying)
     this.video.addEventListener('seeking', this._onSeeking)
     this.video.addEventListener('timeupdate', this._onTimeUpdate)
+
+    this._installCurrentTimeHook()
+
+    if (this.debugGlobal && typeof window !== 'undefined') {
+      window[this.debugGlobal] = this
+    }
+  }
+
+  /**
+   * 劫持 {@code media.currentTime} 的 setter，捕获「用户想看哪」。
+   *
+   * <h3>为什么必须劫持</h3>
+   * <p>MSE 有一个反直觉的��为：<b>把 currentTime 设到未缓冲的位置时，
+   * 浏览器不会把播放位置挪过去，而是保持原值并挂起</b>
+   * （实测：currentTime 停在 12.7 秒、paused=true、等数据等到天荒地老）。
+   * 于是「用户拖到了哪里」这个信息会彻底丢失。
+   *
+   * <p>之前靠包装 xgplayer 的 {@code player.seek()} 来拿落点，实测<b>不生效</b>：
+   * progress 插件点击时并没有走 {@code player.seek()}，
+   * {@code _seekTarget} 一直是 null → 内核退化成拿被挂起的 currentTime
+   * 去比对缓冲 → 误判「目标已在缓冲内」→ 什么都不做 → 永远转圈。
+   *
+   * <p>而 setter 拿到的是<b>赋值的那一刻的目标值</b>，不受浏览器挂起影响，
+   * 且所有 seek 路径（点击、拖动、键盘）最终都必经它 —— 比猜播放器内部
+   * 行为可靠得多。
+   *
+   * <p>代价是「程序自己纠偏也会被捕获」，用 {@link _selfSettingTime} 区分。
+   */
+  _installCurrentTimeHook() {
+    if (typeof HTMLMediaElement === 'undefined') return
+    const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')
+    if (!desc || !desc.set || !desc.get) return
+    const self = this
+    try {
+      Object.defineProperty(this.video, 'currentTime', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return desc.get.call(this)
+        },
+        set(value) {
+          if (!self._selfSettingTime) {
+            self._onSeekIntent(value)
+          }
+          desc.set.call(this, value)
+        }
+      })
+      this._timeHookInstalled = true
+    } catch (e) {
+      /* 某些环境不允许重定义，退回只靠 seeking 事件 */
+    }
+  }
+
+  /** 还原 currentTime 的原始行为（销毁时调用）。 */
+  _removeCurrentTimeHook() {
+    if (!this._timeHookInstalled) return
+    this._timeHookInstalled = false
+    try {
+      delete this.video.currentTime
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+
+  /**
+   * 设置播放位置（程序内部用）。
+   *
+   * <p>包一层是为了让 {@link _installCurrentTimeHook} 知道「这是程序自己设的」，
+   * 不把它当成用户的 seek 意图 —— 否则 {@link _ensurePlayable} 把位置
+   * 拉回缓冲起点时，会被误判成「用户想看这里」。
+   *
+   * @param {number} t 目标时间（秒）
+   */
+  _setCurrentTime(t) {
+    this._selfSettingTime = true
+    try {
+      this.video.currentTime = t
+    } catch (e) {
+      /* 元数据未就绪 */
+    } finally {
+      this._selfSettingTime = false
+    }
+  }
+
+  /**
+   * 收到「有人把播放位置设到 t」的信号。
+   *
+   * <p>只做转发：去重与驱动下载的逻辑统一在 {@link rememberSeekTarget}，
+   * 免得两个入口各写一套、哪天改一处漏一处。
+   *
+   * @param {number} value 目标时间（秒）
+   */
+  _onSeekIntent(value) {
+    this.rememberSeekTarget(value)
+  }
+
+  /**
+   * 内部状态快照（排障用）。
+   *
+   * @returns {object}
+   */
+  debugState() {
+    const sb = this.sb
+    const ranges = []
+    if (sb) {
+      for (let i = 0; i < sb.buffered.length; i++) {
+        ranges.push([+sb.buffered.start(i).toFixed(1), +sb.buffered.end(i).toFixed(1)])
+      }
+    }
+    const ts = this.remuxer ? this.remuxer.timescale : 0
+    return {
+      seekTarget: this._seekTarget,
+      nextIndex: this.nextIndex,
+      feeding: this._feeding,
+      updating: sb ? sb.updating : null,
+      currentTime: +this.video.currentTime.toFixed(2),
+      paused: this.video.paused,
+      readyState: this.video.readyState,
+      buffered: ranges,
+      gopCount: this.gops.length,
+      gopTotalSec: this.gops.length ? +((this.gops[this.gops.length - 1].startTime + this.gops[this.gops.length - 1].duration) / ts).toFixed(1) : 0,
+      gopIndexAt: (t) => this.gopIndexAt(t),
+      chunkCache: this.chunkCache.size,
+      downloading: [...this.downloading.keys()],
+      prefetchActive: this._prefetchActive,
+      skipSet: [...this.skipSet]
+    }
   }
 
   /** 销毁并释放资源。 */
@@ -323,6 +462,7 @@ export class MseRecordPlayer {
     this.video.removeEventListener('playing', this._onPlaying)
     this.video.removeEventListener('seeking', this._onSeeking)
     this.video.removeEventListener('timeupdate', this._onTimeUpdate)
+    this._removeCurrentTimeHook()
     try {
       if (this.ms && this.ms.readyState === 'open') {
         this.ms.endOfStream()
@@ -378,6 +518,15 @@ export class MseRecordPlayer {
     // ---- 3) 挂上 MSE，开始按需下载 + 播放 ----
     await this._open()
     this.started = true
+    /*
+     * 缓冲就绪后再驱动一次 seek。
+     *
+     * <p>用户在索引还没读完时就拖了进度条的话，{@link _driveSeek} 当时
+     * 因为 {@code sb} 还没建而直接返回，目标就一直记着没人管 ——
+     * 而 {@code _feed} 的下载窗口又是按 {@code _seekTarget} 算的，
+     * 结果就是「既不下载也不播放」，永远转圈。
+     */
+    this._driveSeek()
     this._feed()
   }
 
@@ -809,6 +958,8 @@ export class MseRecordPlayer {
         sb.addEventListener('updateend', () => {
           // 数据到位后把播放位置挪到用户拖去的落点
           this._applySeekTarget()
+          // 目标可能还没下，继续把下载指针拨过去
+          this._driveSeek()
           this._ensurePlayable()
           this._feed()
         })
@@ -958,7 +1109,16 @@ export class MseRecordPlayer {
       }
       try {
         sb.appendBuffer(this.remuxer.fragment(this.gops[i], i + 1, data))
-        this.nextIndex = i + 1
+        /*
+         * 只有「没人改过指针」才推进。
+         *
+         * <p>下载期间用户可能拖了进度条，{@link _driveSeek} 已经把
+         * {@code nextIndex} 指向新目标了；这里再无脑 {@code i + 1}
+         * 就会把刚设好的目标覆盖掉，表现为「拖完又跳回原处」。
+         */
+        if (this.nextIndex === i) {
+          this.nextIndex = i + 1
+        }
         this.lastFedIndex = i
         dbg('已下发', { i, bytes: data.length, ct: +this.video.currentTime.toFixed(2), rs: this.video.readyState })
         // 当前段已经下发，这时再去预取后面的段，不再抢当前段的带宽
@@ -974,7 +1134,9 @@ export class MseRecordPlayer {
           return
         }
         this.skipSet.add(i)
-        this.nextIndex = i + 1
+        if (this.nextIndex === i) {
+          this.nextIndex = i + 1
+        }
         this.onSkip(i, 'append 失败：' + e.name)
         this._feed()
       }
@@ -1033,7 +1195,7 @@ export class MseRecordPlayer {
        * 落在了缓冲之后说明数据还在下载，交给 {@link _onSeek} 处理即可。
        */
       if (v.currentTime < start - 0.05) {
-        v.currentTime = start
+        this._setCurrentTime(start)
       }
     } catch (e) { /* 还没准备好 */ }
     if (v.paused) {
@@ -1213,10 +1375,23 @@ export class MseRecordPlayer {
    *
    * <p>所以记下目标，等对应片段喂进缓冲后再把播放位置挪过去。
    *
+   * <p>记完<b>立刻驱动下载</b>：光记不下载的话，{@code _feed} 的窗口
+   * 又是按 {@code _seekTarget} 算的，会一直判定「还没到该下的位置」，
+   * 结果既不下载也不播放 —— 界面上就是永远转圈。
+   *
    * @param {number} time 目标时间（秒）
    */
   rememberSeekTarget(time) {
-    this._seekTarget = time
+    const t = Number(time)
+    if (!Number.isFinite(t) || t < 0) {
+      return
+    }
+    if (this._seekTarget != null && Math.abs(this._seekTarget - t) < 0.05) {
+      // 同一个目标重复设置（播放器内部会设好几次），不重复驱动
+      return
+    }
+    this._seekTarget = t
+    this._driveSeek()
   }
 
   /**
@@ -1238,7 +1413,7 @@ export class MseRecordPlayer {
       if (t >= sb.buffered.start(i) - 0.1 && t <= sb.buffered.end(i) - 0.05) {
         this._seekTarget = null
         try {
-          v.currentTime = t
+          this._setCurrentTime(t)
           dbg('跳到目标位置', { t: +t.toFixed(2) })
           return true
         } catch (e) {
@@ -1262,9 +1437,25 @@ export class MseRecordPlayer {
    * </ul>
    */
   _onSeek() {
+    this._driveSeek()
+  }
+
+  /**
+   * 把下载指针拨到「用户想去的位置」。
+   *
+   * <p><b>为什么要单独一个方法</b>：seek 的入口不止一个
+   * （{@code seeking} 事件、{@code currentTime} 赋值、外部调用
+   * {@link rememberSeekTarget}），而它们最终都做同一件事 ——
+   * 让「目标位置的数据开始下载」。统一到一处，就不会漏掉某个入口。
+   *
+   * <p><b>为什么不能等 {@code seeking} 事件</b>：浏览器把 currentTime 设到
+   * 未缓冲的位置时会挂起这次 seek，事件可能迟迟不来（或来时 ct 已被钳回
+   * 旧值），而用户看到的就是「一直转圈」。
+   */
+  _driveSeek() {
     const sb = this.sb
     const v = this.video
-    if (!sb) {
+    if (!sb || this.aborted || this._rebuilding) {
       return
     }
     /*
@@ -1272,7 +1463,7 @@ export class MseRecordPlayer {
      *
      * <p>拖到没下载的位置时，浏览器会把 currentTime 钳回缓冲内
      * （实测拖到 70% 只停在 8.9 秒）。{@link _seekTarget} 里存的是
-     * progress 插件给的真实落点，比 currentTime 准。
+     * 用户真正的落点，比 currentTime 准。
      */
     const t = this._seekTarget != null ? this._seekTarget : (v.currentTime || 0)
     for (let i = 0; i < sb.buffered.length; i++) {
@@ -1288,11 +1479,15 @@ export class MseRecordPlayer {
      */
     if (this._seekTarget == null) {
       this.rememberSeekTarget(t)
+      return
     }
     const target = this.gopIndexAt(t)
     if (target >= this.nextIndex) {
       // 往前拖：跳着下载
-      this.nextIndex = target
+      if (this.nextIndex !== target) {
+        dbg('跳着下载', { from: this.nextIndex, to: target, t: +t.toFixed(2) })
+        this.nextIndex = target
+      }
       this._state = ''
       if (!sb.updating) {
         this._feed()

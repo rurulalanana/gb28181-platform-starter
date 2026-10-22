@@ -9,7 +9,6 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.List;
 
 /**
  * 前端单页应用（SPA）路由回退。
@@ -48,22 +47,18 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
                 .setCacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePublic());
 
         /*
-         * 录像文件直接暴露成静态资源：/record/**  →  <record-root>/
+         * 录像文件：<b>默认不在这里提供</b>，交给 nginx。
          *
-         * <p><b>为什么要有这条</b>：{@code /api/v1/cloudrecord/file/{id}} 是走
-         * 控制器转发文件流，虽然也支持 Range，但前端要拿它做「浏览器端重封装」
-         * 就得先整段下载（57MB 的录像要等 20 多秒才出画面）。
-         * 交给 Spring 的静态资源处理器后：
-         * <ul>
-         *   <li>浏览器原生 {@code <video src>} 直接播，Range 由容器实现，
-         *       首帧只需下载文件头 + 少量数据，秒开；</li>
-         *   <li>进度条拖动是浏览器原生行为，不需要任何服务端 seek 逻辑；</li>
-         *   <li>不会经过 Sa-Token 拦截器，媒体请求不用带 token。</li>
-         * </ul>
+         * <p>Spring Boot 的静态资源处理器处理 Range 请求极慢 —— 同一段 2MB
+         * 实测 16~20 秒（110 KB/s），而 nginx（sendfile + keep-alive）只要
+         * 0.06~0.15 秒（24 MB/s），<b>差 200 倍</b>。录像回放要按 GOP 分段
+         * 下载很多次 Range，这个差距就是「起播 15 秒」与「起播 2 秒」的区别。
          *
-         * <p><b>安全提示</b>：这条映射会把录像目录整个暴露出去（只要知道路径就能下载）。
-         * 适合内网/单机部署；公网部署请配合 Nginx 限制来源 IP，或把
-         * {@code gb28181.record-static-enabled} 关掉，改用需要登录的 API 接口。
+         * <p>标准部署见 {@code deploy/nginx-record.conf}：nginx 监听公网端口，
+         * {@code /record/**} 用 sendfile 直读磁盘，其余请求反代回本进程。
+         *
+         * <p>只有无 nginx 的单机/内网部署才需要把
+         * {@code gb28181.record-static-enabled} 打开，回退到本进程提供。
          */
         if (props.isRecordStaticEnabled()) {
             Path root = resolveRecordRoot();
@@ -98,16 +93,22 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
     }
 
     /**
-     * 把录像文件路径换算成 {@code /record/...} 形式的静态 URL。
+     * 把录像文件路径换算成 {@code /record/...} 形式的 URL。
      *
      * <p>供接口层回填给前端：前端拿到这个 URL 就能直接喂给
-     * {@code <video src>}，不用再经过控制器转发文件流。
+     * {@code <video src>} 或按需 Range 下载，不用经过控制器转发文件流。
+     *
+     * <p><b>与「文件由谁提供」无关</b>：这个 URL 是<b>同源相对路径</b>，
+     * 标准部署下由 nginx 的 {@code location /record/} 直读磁盘，
+     * 开了 {@code gb28181.record-static-enabled} 时也由本进程提供。
+     * 所以这里不做开关判断 —— 地址总要给前端；拿不到数据属于部署配置问题，
+     * 不该表现为「前端根本拿不到播放地址」。
      *
      * @param filePath 录像文件绝对路径
-     * @return 静态 URL；静态映射关闭、或文件不在录像根目录下返回 {@code null}
+     * @return 静态 URL；文件不在录像根目录下返回 {@code null}
      */
     public String toStaticUrl(String filePath) {
-        if (!props.isRecordStaticEnabled() || filePath == null || filePath.isBlank()) {
+        if (filePath == null || filePath.isBlank()) {
             return null;
         }
         try {

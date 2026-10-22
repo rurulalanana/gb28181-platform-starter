@@ -68,6 +68,12 @@ export default defineConfig(({ mode }) => {
         '/index': {
           target: mediaTarget,
           changeOrigin: true
+        },
+        // 录像文件：生产环境由 nginx 直读（见 deploy/nginx-record.conf），
+        // 开发模式下走 proxy 转发到同一个 nginx，保持行为一致。
+        '/record': {
+          target: apiTarget,
+          changeOrigin: true
         }
         // 注意：/jessibuca 不代理 —— 播放器文件在 public/jessibuca/ 下，
         // 由 vite 直接提供（构建后进 jar 的 static/jessibuca/）。
