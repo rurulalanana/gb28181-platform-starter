@@ -57,10 +57,14 @@ const PREFETCH_GOP = 4
 /**
  * 同时在飞的预取下载数。
  *
- * <p>公网链路中间有网关，并发几个大响应就会被限流（实测 4~5 个并发时
- * 直接返回 {@code 502 Bad Gateway}）。限成 2 个。
+ * <p><b>服务器出口带宽不是瓶颈</b>（实测 9.6 MB/s），
+ * 瓶颈是客户端到服务器这条链路的单流速率。实测同一条链路：
+ * 1 路 77 KB/s、4 路 245 KB/s、8 路 374 KB/s。
+ * 再往上（12 路）网关开始掐断（一半请求 502）。
+ *
+ * <p>所以取 4：比单流快 3 倍，又不会被限流。
  */
-const PREFETCH_CONCURRENCY = 2
+const PREFETCH_CONCURRENCY = 4
 
 /**
  * 单次 Range 请求的最大字节数。
@@ -77,6 +81,14 @@ const FETCH_CHUNK_BYTES = 128 * 1024
  * <p>网络抖动和网关限流是临时的，重试就能拿到；直接跳段等于把好录像丢了。
  */
 const FETCH_RETRY = 3
+
+/**
+ * 同一个 GOP 内部并发取几块。
+ *
+ * <p>见 {@link _fetchRangeChunked} 的说明：单流只有 77 KB/s，
+ * 4 路能到 245 KB/s。超过 8 路会被网关限流。
+ */
+const FETCH_CONCURRENCY = 4
 
 /**
  * 缓冲窗口（秒）：只下载「播放位置 + 这个时长」以内的数据。
@@ -570,13 +582,26 @@ export class MseRecordPlayer {
   }
 
   /**
-   * 取一段字节，**分块**请求。
+   * 取一段字节，**分块 + 并发**请求。
    *
    * <p><b>为什么要分块</b>：公网链路中间有网关，会掐断较大的响应 ——
    * 实测一次要 300KB 就会返回 {@code 502 Bad Gateway}（服务端日志里
    * 是正常的 206，说明是中间设备干的）。而且响应越大吞吐越差：
    * 实测 16KB→53KB/s、64KB→132KB/s、256KB→115KB/s、1MB→77KB/s。
-   * 所以分小块反而更快，也更不容易被掐。
+   *
+   * <p><b>为什么要并发</b>：<b>服务器出口带宽有 9.6 MB/s</b>
+   * （服务器上拉清华镜像实测 9604727 B/s），带宽根本不是瓶颈 ——
+   * 瓶颈是「客户端到服务器」这条链路的单流速率。实测同一条链路：
+   * <pre>
+   *   1 路  →  77 KB/s
+   *   4 路  → 245 KB/s
+   *   8 路  → 374 KB/s
+   *   12 路 → 488 KB/s（但一半请求被网关掐断）
+   * </pre>
+   * 所以<b>并发 4 路</b>是「提速明显」与「不被掐断」的平衡点。
+   *
+   * <p>注意：这条链路的丢包率、延迟因人而异（我这里是 10% 丢包 / 82ms），
+   * 用户所在网络可能更慢或更快。并发数保守取 4，再高容易被网关限流。
    *
    * @param {number} start 起始字节
    * @param {number} end 结束字节（含）
@@ -585,14 +610,36 @@ export class MseRecordPlayer {
   async _fetchRangeChunked(start, end) {
     const total = end - start + 1
     if (total <= FETCH_CHUNK_BYTES) {
-      return this._fetchRange(start, end)
+      return this._fetchRangeWithRetry(start, end)
     }
-    const parts = []
+    // 切块
+    const ranges = []
     for (let s = start; s <= end; s += FETCH_CHUNK_BYTES) {
-      const e = Math.min(s + FETCH_CHUNK_BYTES - 1, end)
-      // 串行取：并发会让中间网关更早掐断（实测并发 4~5 个大响应就出 502）
-      parts.push(await this._fetchRangeWithRetry(s, e))
+      ranges.push([s, Math.min(s + FETCH_CHUNK_BYTES - 1, end)])
     }
+    /*
+     * 并发取（限 {@link FETCH_CONCURRENCY} 路）。
+     *
+     * <p>不能用 {@code Promise.all} 一把梭 —— 块数多时同时发十几个请求
+     * 会被网关限流（实测 12 路时一半 502）。
+     */
+    const parts = new Array(ranges.length)
+    let next = 0
+    const worker = async () => {
+      for (;;) {
+        const i = next++
+        if (i >= ranges.length) return
+        const [s, e] = ranges[i]
+        parts[i] = await this._fetchRangeWithRetry(s, e)
+      }
+    }
+    const workers = []
+    const n = Math.min(FETCH_CONCURRENCY, ranges.length)
+    for (let i = 0; i < n; i++) {
+      workers.push(worker())
+    }
+    await Promise.all(workers)
+
     const out = new Uint8Array(total)
     let off = 0
     for (const p of parts) {
