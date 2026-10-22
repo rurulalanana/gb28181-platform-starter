@@ -176,7 +176,18 @@ public class CloudRecordController {
         List<GbRecord> records = recordService.cloudRecords(channelId, day, day.plusDays(1));
         List<CloudRecordVo> list = new ArrayList<>();
         for (GbRecord r : records) {
-            list.add(toItem(r, false));
+            /*
+             * 要下载地址。
+             *
+             * <p>早先这里传 false，理由是「列表页不必查文件是否存在」。
+             * 但前端的下载按钮判据就是 {@code downloadUrl} 非空 ——
+             * 不填就等于把下载功能整体关掉，界面上每个「下载」都是灰的
+             * （用户看到的就是「为啥下载按钮都是灰的」）。
+             *
+             * <p>代价只有一次 {@code Files.exists}（几十条记录，微秒级），
+             * 换来「文件真没了就不给下载按钮」的正确提示。
+             */
+            list.add(toItem(r, true));
         }
         var channel = deviceService.findChannel(channelId);
         CloudDailyVo vo = new CloudDailyVo();
@@ -548,12 +559,27 @@ public class CloudRecordController {
         item.setStorageType(r.getStorageType());
         item.setUploadState(r.getUploadState());
         item.setRecording(r.getEndTime() == null);
-        if (withDownloadUrl && r.getEndTime() != null && recordService.fileAvailable(r)) {
-            item.setDownloadUrl(recordService.downloadUrl(r));
-        }
         // 本地录像：回填静态播放地址，前端可直接 <video src> 秒开
         if (ObjectStorageService.TYPE_LOCAL.equals(r.getStorageType()) && r.getEndTime() != null) {
             item.setPlayUrl(spaWebConfiguration.toStaticUrl(r.getFilePath()));
+        }
+        /*
+         * 下载地址：与播放地址<b>尽量是同一个 URL</b>。
+         *
+         * <p>同一个文件本来就该用同一个地址取 —— 前端拿到它就能直接
+         * {@code <a download>} 让浏览器原生下载（有进度、可续传、不占内存）。
+         *
+         * <p>早先本地录像走 {@code /api/v1/cloudrecord/file/{recordId}}：
+         * 那个接口由本进程转发文件流，协议上没问题，但前端为了带登录头
+         * 只能 {@code fetch + blob} 把整个文件读进内存 —— 136MB 的录像
+         * 直接吃掉 136MB+ 内存，且全程没有任何进度反馈，用户以为卡死了。
+         * 有了 nginx sendfile 就直接给静态路径。
+         *
+         * <p>对象存储（OSS）仍是签名/外链 URL，跨域，交给浏览器新窗口下载。
+         */
+        if (withDownloadUrl && r.getEndTime() != null && recordService.fileAvailable(r)) {
+            String playUrl = item.getPlayUrl();
+            item.setDownloadUrl(playUrl != null ? playUrl : recordService.downloadUrl(r));
         }
         return item;
     }

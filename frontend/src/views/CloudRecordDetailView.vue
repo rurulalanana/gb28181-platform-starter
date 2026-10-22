@@ -26,7 +26,7 @@
         <el-button size="small" :disabled="!playingRecord" @click="shareCurrent">
           <el-icon><Share /></el-icon> 分享页
         </el-button>
-        <el-button size="small" :disabled="!playingRecord?.downloadUrl" @click="downloadCurrent">
+        <el-button size="small" :disabled="!canDownload(playingRecord)" @click="downloadCurrent">
           <el-icon><Download /></el-icon> 下载
         </el-button>
         <span class="filter-bar-spacer" />
@@ -93,7 +93,7 @@
           <el-button size="small" type="danger" plain @click="stopPlay">
             <el-icon><SwitchButton /></el-icon> 停止点播
           </el-button>
-          <el-button size="small" :disabled="!playingRecord.downloadUrl" @click="download(playingRecord)">
+          <el-button size="small" :disabled="!canDownload(playingRecord)" @click="download(playingRecord)">
             <el-icon><Download /></el-icon> 下载本段
           </el-button>
           <el-button size="small" type="danger" plain :disabled="!records.length" @click="removeDaily">
@@ -159,6 +159,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useRecordPlayer } from '@/composables/useRecordPlayer'
+import { downloadFile, recordFileName } from '@/utils/download'
 
 const route = useRoute()
 const router = useRouter()
@@ -532,37 +533,38 @@ function stopPlay() {
 }
 
 /**
+ * 能不能下载这段录像。
+ *
+ * <p>两个条件：
+ * <ul>
+ *   <li>{@code downloadUrl} 非空 —— 后端在文件不存在时不会回填；</li>
+ *   <li>不在录制中 —— 文件还在增长，下到一半的残缺文件对用户没意义
+ *       （和列表页的判据保持一致）。</li>
+ * </ul>
+ *
+ * @param {object|null} record
+ * @returns {boolean}
+ */
+function canDownload(record) {
+  return !!record && !!record.downloadUrl && !record.recording
+}
+
+/**
  * 下载一段录像。
  *
- * <p>{@code /file} 接口默认是 {@code inline}（给 {@code <video>} 就地播放），
- * 下载时带 {@code download=1} 让服务端改回 {@code attachment}。
- * 这里用 fetch + blob 而不是直接开新窗口：需要带登录头。
+ * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径
+ * （{@code /record/...}，由 nginx sendfile 提供），所以只要丢给
+ * {@link downloadFile} 让浏览器原生下载即可 —— 有进度、能续传、不占内存。
+ *
+ * <p>对象存储的地址是跨域的签名 URL，交给 {@code downloadFile} 新开窗口，
+ * 由服务端 {@code Content-Disposition} 决定文件名。
  */
 function download(record) {
-  const url = record.downloadUrl
-  if (!url) {
-    ElMessage.warning('该录像暂不可下载（可能仍在录制）')
+  if (!canDownload(record)) {
+    ElMessage.warning('该录像暂不可下载（可能仍在录制或文件已丢失）')
     return
   }
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    window.open(url, '_blank')
-    return
-  }
-  const token = localStorage.getItem('gb_token') || ''
-  const sep = url.includes('?') ? '&' : '?'
-  fetch(`${url}${sep}download=1`, { headers: { Authorization: token } })
-    .then((resp) => {
-      if (!resp.ok) throw new Error('下载失败 HTTP ' + resp.status)
-      return resp.blob()
-    })
-    .then((blob) => {
-      const link = document.createElement('a')
-      link.href = URL.createObjectURL(blob)
-      link.download = record.fileName || record.name || 'record.mp4'
-      link.click()
-      URL.revokeObjectURL(link.href)
-    })
-    .catch((e) => ElMessage.error(e.message || '下载失败'))
+  downloadFile(record.downloadUrl, recordFileName(record, channelName.value))
 }
 
 /** 工具条上的「下载」：下载当前正在点播的那一段。 */

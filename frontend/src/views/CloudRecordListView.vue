@@ -136,6 +136,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
+import { downloadFile, recordFileName } from '@/utils/download'
 import TablePager from '@/components/TablePager.vue'
 
 const route = useRoute()
@@ -337,30 +338,21 @@ function play(row) {
   })
 }
 
+/**
+ * 下载一段录像。
+ *
+ * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径
+ * （{@code /record/...}，由 nginx sendfile 提供），丢给浏览器原生下载即可 ——
+ * 有进度、能续传。早先的 {@code fetch + blob} 会把整个文件读进内存
+ * （1 小时的录像是 136MB），且全程无进度反馈。
+ */
 function download(row) {
-  const url = row.downloadUrl
+  const url = row?.downloadUrl
   if (!url) {
-    ElMessage.warning('该录像暂不可下载（可能仍在录制）')
+    ElMessage.warning('该录像暂不可下载（可能仍在录制或文件已丢失）')
     return
   }
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    window.open(url, '_blank')
-    return
-  }
-  const token = localStorage.getItem('gb_token') || ''
-  fetch(url, { headers: { Authorization: token } })
-    .then((resp) => {
-      if (!resp.ok) throw new Error('下载失败 HTTP ' + resp.status)
-      return resp.blob()
-    })
-    .then((blob) => {
-      const link = document.createElement('a')
-      link.href = URL.createObjectURL(blob)
-      link.download = row.fileName || row.name || 'record.mp4'
-      link.click()
-      URL.revokeObjectURL(link.href)
-    })
-    .catch((e) => ElMessage.error(e.message || '下载失败'))
+  downloadFile(url, recordFileName(row, channelName.value))
 }
 
 async function toggleImportant(record) {
