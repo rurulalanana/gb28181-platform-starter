@@ -251,16 +251,38 @@ function makeFullBox(type, version, flags, payload) {
  * 探测 moov 时，首次取文件尾的字节数。
  *
  * <p>ZLM 录出的 MP4 是 {@code ftyp + free + mdat + moov [+ free]}，索引在文件尾。
- * 起始取 256KB：实测 16MB 录像的 moov 约 24KB，但 57MB 的录像样本数多得多，
- * moov 会到 100KB 以上 —— 从 64KB 起步会多一次「不够→翻倍」的往返。
+ *
+ * <p><b>起始取 64KB</b>：实测 moov 基本都在尾部 64KB 内（16MB 录像的 moov
+ * 约 24KB）。公网带宽只有 ~80KB/s 时，256KB 要 3.2 秒、64KB 只要 0.8 秒。
+ * 万一不够，{@link doProbeCodec} 会按 ×4 渐进放大（64KB → 256KB → 1MB…），
+ * 只是多一次往返，不会失败。
  */
-const MOOV_PROBE_BYTES = 256 * 1024
+const MOOV_PROBE_BYTES = 64 * 1024
 
 /** 探测 moov 时单次最多放大到的字节数。 */
 const MOOV_MAX_BYTES = 32 * 1024 * 1024
 
 /** 探测结果缓存：同一 URL 只探一次（避免重复点击/重渲染时重复下载）。 */
 const codecCache = new Map()
+
+/**
+ * moov 缓存：url → {@code {bytes, offset}}。
+ *
+ * <p>探测编码时已经把 moov 读下来了，容错通路又要读一次 ——
+ * 公网带宽只有 ~80KB/s，重复读 64KB 就是白等 0.8 秒。
+ * 这里把读到的 moov 留下来给容错通路复用。
+ */
+const moovCache = new Map()
+
+/**
+ * 取出已缓存的 moov（没有则返回 null）。
+ *
+ * @param {string} url 录像地址
+ * @returns {{bytes: Uint8Array, offset: number}|null}
+ */
+export function getCachedMoov(url) {
+  return moovCache.get(url) || null
+}
 
 /**
  * 只下载「文件尾的 moov」来探测视频编码，不下载整个文件。
@@ -277,29 +299,51 @@ export async function probeCodecFromUrl(url) {
   if (codecCache.has(url)) {
     return codecCache.get(url)
   }
-  const codec = await doProbeCodec(url)
-  // 只缓存「探到了」的结果；unknown 可能是临时网络问题，下次再试
-  if (codec !== CODEC_UNKNOWN) {
-    codecCache.set(url, codec)
+  const r = await doProbeCodec(url)
+  if (!r) {
+    return CODEC_UNKNOWN
   }
-  return codec
+  // 只缓存「探到了」的结果；unknown 可能是临时网络问题，下次再试
+  codecCache.set(url, r.codec)
+  cacheMoov(url, r)
+  return r.codec
+}
+
+/**
+ * 缓存 moov，原始 URL 与规范化后的 URL 都存一份。
+ *
+ * <p>调用方传的可能是相对路径（{@code /record/...}），而
+ * {@link MseRecordPlayer} 内部会先 {@code new URL(url, location.href)}
+ * 规范化 —— 两者字符串不一定相同，两个 key 都存才命中得上。
+ *
+ * @param {string} url 原始 URL
+ * @param {{bytes:Uint8Array,offset:number}} r moov 数据
+ */
+function cacheMoov(url, r) {
+  const entry = { bytes: r.bytes, offset: r.offset }
+  moovCache.set(url, entry)
+  try {
+    moovCache.set(new URL(url, location.href).toString(), entry)
+  } catch (e) {
+    // URL 非法就算了，只留原始 key
+  }
 }
 
 /**
  * 实际执行探测。
  *
  * @param {string} url 录像地址
- * @returns {Promise<string>}
+ * @returns {Promise<{bytes:Uint8Array,offset:number,codec:string}|null>}
  */
 async function doProbeCodec(url) {
   try {
     const head = await fetch(url, { method: 'HEAD' })
     if (!head.ok) {
-      return CODEC_UNKNOWN
+      return null
     }
     const size = Number(head.headers.get('Content-Length') || 0)
     if (!size) {
-      return CODEC_UNKNOWN
+      return null
     }
     let take = Math.min(MOOV_PROBE_BYTES, size)
     for (;;) {
@@ -318,16 +362,17 @@ async function doProbeCodec(url) {
        */
       const hit = findBoxByType(bytes, 'moov')
       if (hit) {
-        const r = new Mp4Remuxer(bytes.subarray(hit.start, hit.start + hit.size))
-        return r.codec
+        const moovBytes = bytes.subarray(hit.start, hit.start + hit.size)
+        const r = new Mp4Remuxer(moovBytes)
+        return { bytes: moovBytes, offset: start + hit.start, codec: r.codec }
       }
       if (take >= size || take >= MOOV_MAX_BYTES) {
-        return CODEC_UNKNOWN
+        return null
       }
       take = Math.min(take * 4, size, MOOV_MAX_BYTES)
     }
   } catch (e) {
-    return CODEC_UNKNOWN
+    return null
   }
 }
 

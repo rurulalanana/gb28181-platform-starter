@@ -32,7 +32,7 @@
  * @module MseRecordPlayer
  */
 
-import { Mp4Remuxer, scanParamSets } from './Mp4Remuxer.js'
+import { Mp4Remuxer, scanParamSets, getCachedMoov } from './Mp4Remuxer.js'
 
 /** 重建 MediaSource 的最大次数，超过就放弃。 */
 const MAX_REBUILD = 12
@@ -63,6 +63,17 @@ const LEAD_SECONDS = 20
  * 那种情况说明录像真的坏了，再扫也没用。
  */
 const PARAM_SCAN_GOP = 8
+
+/**
+ * 扫参数集时，每个关键帧只取开头这么多字节。
+ *
+ * <p>VPS/SPS/PPS 是关键帧 NAL 的最前面几个（VPS 23 字节、SPS 几十字节、
+ * PPS 几字节），前面顶多跟一个 SEI。取 8KB 足够宽松。
+ *
+ * <p><b>这个值直接决定起播快慢</b>：整个 GOP 实测 640KB，而公网带宽只有
+ * ~80KB/s —— 取整个 GOP 扫 8 次就是 5MB（65 秒），只取头部就是 16KB（0.2 秒）。
+ */
+const PARAM_HEAD_BYTES = 8 * 1024
 
 /**
  * 调试开关。
@@ -326,6 +337,25 @@ export class MseRecordPlayer {
    * <p>扫描上限 {@link PARAM_SCAN_GOP} 个 GOP：GOP 通常 1~2 秒，
    * 参数集一般在前几个关键帧就出现，没必要为了坏文件把整个录像下下来。
    *
+   * <h3>怎么扫才不慢</h3>
+   * <p><b>参数集在每个 GOP 的关键帧上</b>，但<b>第一个 GOP 可能是例外</b>。
+   * 实测某坏录像：18 个关键帧里只有第 2 个（GOP1）起才带
+   * {@code [VPS, SPS, PPS]}，GOP0 的关键帧只有 slice。
+   * 所以扫描要从 GOP0 开始逐个试，<b>不能假设第一个就有</b>。
+   *
+   * <p>取数据的量要小：一个 GOP 实测 640KB，8 个就是 5MB；
+   * 公网带宽只有 ~80KB/s（实测 64KB 要 0.4~2.4 秒，波动 6 倍），
+   * 光这一项就 65 秒。而参数集就躺在关键帧 NAL 的开头，
+   * <b>取关键帧头部 8KB 就够</b>（VPS+SPS+PPS 加起来不到 200 字节）。
+   *
+   * <p>所以分两轮：
+   * <ol>
+   *   <li><b>快路径</b>：逐个 GOP 只取关键帧头部 8KB，串行，扫到就停
+   *       （本文件要 2 次共 16KB）；</li>
+   *   <li><b>兜底</b>：万一参数集不在关键帧上（罕见），退回
+   *       「取整个 GOP 逐样本扫」的老办法。</li>
+   * </ol>
+   *
    * @returns {Promise<void>}
    */
   async _recoverParams() {
@@ -336,37 +366,85 @@ export class MseRecordPlayer {
     }
     this.onState('修复编码参数')
     const limit = Math.min(this.gops.length, PARAM_SCAN_GOP)
+
+    // ---- 快路径：只取关键帧头部 ----
     for (let i = 0; i < limit && needed.size; i++) {
-      let data
-      try {
-        data = await this._fetchGop(i)
-      } catch (e) {
-        continue
-      }
-      if (this.aborted) {
-        return
-      }
-      const g = this.gops[i]
-      for (const s of g.samples) {
-        const from = s.offset - g.dataStart
-        if (from < 0 || from + s.size > data.length) {
-          continue
-        }
-        const found = scanParamSets(data.subarray(from, from + s.size), needed)
-        for (const t of Object.keys(found)) {
-          remuxer.setParamSets(found)
-          needed.delete(Number(t))
-        }
-        if (!needed.size) {
-          break
-        }
+      await this._scanKeyHead(i, needed)
+    }
+
+    // ---- 兜底：参数集不在关键帧上 → 取整个 GOP 逐样本扫 ----
+    if (needed.size) {
+      for (let i = 0; i < limit && needed.size; i++) {
+        await this._scanGopFull(i, needed)
       }
     }
+
     if (needed.size) {
       // 捞不到就只能用原参数集试一次（有的解码器能容忍缺 VPS）
       console.warn('[录像] 参数集仍缺失：', [...needed].join(','))
     } else {
       dbg('参数集已修复', { sets: Object.keys(remuxer.paramSets) })
+    }
+  }
+
+  /**
+   * 只取某个 GOP 的关键帧头部，扫参数集。
+   *
+   * <p>关键帧的 NAL 序列以参数集开头（可能有 SEI 在前），
+   * 取 {@link PARAM_HEAD_BYTES} 字节足够。
+   *
+   * @param {number} i GOP 序号
+   * @param {Set<number>} needed 还缺哪些类型（命中后会被删除）
+   */
+  async _scanKeyHead(i, needed) {
+    if (!needed.size) return
+    const g = this.gops[i]
+    if (!g || !g.samples.length) return
+    const key = g.samples[0]
+    let data
+    try {
+      data = await this._fetchRange(key.offset, key.offset + PARAM_HEAD_BYTES - 1)
+    } catch (e) {
+      return
+    }
+    if (this.aborted || !needed.size) return
+    const found = scanParamSets(data, needed)
+    for (const t of Object.keys(found)) {
+      this.remuxer.setParamSets(found)
+      needed.delete(Number(t))
+    }
+  }
+
+  /**
+   * 取整个 GOP，逐样本扫参数集（兜底路径）。
+   *
+   * @param {number} i GOP 序号
+   * @param {Set<number>} needed 还缺哪些类型（命中后会被删除）
+   */
+  async _scanGopFull(i, needed) {
+    if (!needed.size) return
+    const g = this.gops[i]
+    if (!g) return
+    let data
+    try {
+      data = await this._fetchRange(g.dataStart, g.dataEnd - 1)
+    } catch (e) {
+      return
+    }
+    if (this.aborted || !needed.size) return
+    for (const s of g.samples) {
+      const from = s.offset - g.dataStart
+      if (from < 0 || from + s.size > data.length) {
+        continue
+      }
+      const found = scanParamSets(data.subarray(from, from + s.size), needed)
+      for (const t of Object.keys(found)) {
+        this.remuxer.setParamSets(found)
+        needed.delete(Number(t))
+      }
+      if (!needed.size) {
+        return
+      }
     }
   }
 
@@ -396,6 +474,14 @@ export class MseRecordPlayer {
    * @returns {Promise<{bytes:Uint8Array, offset:number}>}
    */
   async _fetchMoov() {
+    /*
+     * 编码探测时已经把文件尾的 moov 读下来了，这里直接复用，
+     * 不用再下一次（公网带宽 ~80KB/s，重复读 64KB 就是白等 0.8 秒）。
+     */
+    const cached = getCachedMoov(this.url)
+    if (cached) {
+      return cached
+    }
     let take = Math.min(MOOV_PROBE_BYTES, this.fileSize)
     for (;;) {
       const offset = this.fileSize - take
@@ -570,8 +656,23 @@ export class MseRecordPlayer {
     })
   }
 
-  /**
-   * 喂片段：串行，一次一个，等 {@code updateend} 再喂下一个。
+  /**   * 预取后面的若干段。
+   *
+   * <p><b>调用时机很关键</b>：必须在当前段 {@code appendBuffer} 之后才调。
+   * 提前调会和当前段抢带宽（公网只有 ~80KB/s，一个 GOP 640KB 就要 8 秒），
+   * 反而拖慢起播。
+   *
+   * @param {number} from 起始段序号
+   */
+  _prefetch(from) {
+    for (let k = from; k < from + PREFETCH_GOP && k < this.gops.length; k++) {
+      if (!this.chunkCache.has(k) && !this.downloading.has(k) && !this.skipSet.has(k)) {
+        this._fetchGop(k).catch(() => { /* 失败时播放到那里再重试 */ })
+      }
+    }
+  }
+
+  /**   * 喂片段：串行，一次一个，等 {@code updateend} 再喂下一个。
    *
    * <p>数据是按需下载的 —— 只下当前要播的（外加 {@link PREFETCH_GOP} 个预取），
    * 所以打开一段 57MB 的录像只需要下载 moov + 第一个 GOP（几百 KB）。
@@ -617,13 +718,14 @@ export class MseRecordPlayer {
     }
     this._waitLogged = -1
 
-    // 预取后面的片段（不阻塞当前）
-    for (let k = i + 1; k <= i + PREFETCH_GOP && k < this.gops.length; k++) {
-      if (!this.chunkCache.has(k) && !this.downloading.has(k) && !this.skipSet.has(k)) {
-        this._fetchGop(k).catch(() => { /* 失败时播放到那里再重试 */ })
-      }
-    }
-
+    /*
+     * 只下当前这一段，<b>预取推迟到它喂进去之后</b>。
+     *
+     * <p>原因：公网带宽只有 ~80KB/s，一个 GOP 640KB 就要 8 秒。
+     * 要是同时预取后面 2 段（2MB），三份数据抢同一条带宽，
+     * 当前这段反而更慢（实测起播 15 秒）。先让当前段独占带宽出画面，
+     * 预取再在后台慢慢补 —— 带宽没变，但用户早 8 秒看到画面。
+     */
     this._feeding = true
     this._feedingSb = sb
     this._fetchGop(i).then(data => {
@@ -658,6 +760,8 @@ export class MseRecordPlayer {
         this.nextIndex = i + 1
         this.lastFedIndex = i
         dbg('已下发', { i, bytes: data.length, ct: +this.video.currentTime.toFixed(2), rs: this.video.readyState })
+        // 当前段已经下发，这时再去预取后面的段，不再抢当前段的带宽
+        this._prefetch(i + 1)
       } catch (e) {
         if (e.name === 'QuotaExceededError') {
           // 缓冲满了：丢掉最早的一段，nextIndex 保持不动，等 remove 的 updateend 重试
@@ -780,6 +884,25 @@ export class MseRecordPlayer {
      */
     if (this.skipSet.has(bad) && this.lastFedIndex > bad) {
       bad = this.lastFedIndex
+    }
+    /*
+     * <b>已跳过的段不再重复归因</b>。
+     *
+     * <p>重建后 currentTime 会归零（还没播起来就报错的情况），
+     * 时间归因必然指向第 0 段 —— 而它已经在 skipSet 里，
+     * 于是「跳过 0 → 重建 → 还是指向 0」形成死循环。
+     *
+     * <p>所以这里往后找第一个没跳过的段；实在没有了才退回
+     * {@link lastFedIndex}（刚下发的那段，多半就是坏的）。
+     */
+    if (this.skipSet.has(bad)) {
+      let j = bad
+      while (j < this.gops.length && this.skipSet.has(j)) j++
+      if (j < this.gops.length) {
+        bad = j
+      } else if (this.lastFedIndex >= 0 && !this.skipSet.has(this.lastFedIndex)) {
+        bad = this.lastFedIndex
+      }
     }
     dbg('解码失败', {
       reason,
