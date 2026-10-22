@@ -304,8 +304,56 @@ const videoContainer = ref(null)
  * 见 {@code frontend/src/composables/useRecordPlayer.js}。
  */
 const recordPlayer = useRecordPlayer(videoContainer, {
-  onFatal: (msg) => ElMessage.error('播放失败：' + msg)
+  onFatal: (msg) => ElMessage.error('播放失败：' + msg),
+  onEnded: () => playNext()
 })
+
+/**
+ * 自动连播下一段。
+ *
+ * <p>云端录像是一段段独立的 MP4（设备断线、码流中断都会切段），
+ * 看完一段还要回头去点时间轴，连续看半小时得点二十次 —— 所以播完
+ * 自动接下一段。到当天最后一段就停下，停在「播放结束」。
+ *
+ * <p><b>跳过仍在录制的段</b>：这种段没结束、文件还在增长，后端也不回填
+ * {@code playUrl}，点它必然播放失败。连播遇到就跳过，否则自动续播会
+ * 以一个错误提示收场。
+ *
+ * <p><b>为什么用 setTimeout 推迟而不是直接调 play</b>：本函数由
+ * xgplayer 的 {@code ended} 事件触发，此时事件回调还在播放器内部栈上；
+ * 直接 {@code play()} 会在回调里销毁当前播放器（{@code stop()}），
+ * 容易触发播放器自身的清理竞态。推到下一个宏任务就绕开了。
+ */
+function playNext() {
+  const cur = playingRecord.value
+  if (!cur) {
+    return
+  }
+  const list = records.value
+  const i = list.findIndex((r) => r.recordId === cur.recordId)
+  if (i < 0) {
+    return
+  }
+  // 往后找第一段「已结束」的录像（跳过正在录制的）
+  let next = null
+  for (let k = i + 1; k < list.length; k++) {
+    if (!list[k].recording) {
+      next = list[k]
+      break
+    }
+  }
+  if (!next) {
+    // 已是当天最后一段可播的：保持「播放结束」，不再往后续
+    return
+  }
+  setTimeout(() => {
+    // 期间用户可能已手动停止或点了别的段
+    if (playingRecord.value?.recordId !== cur.recordId) {
+      return
+    }
+    play(next)
+  }, 0)
+}
 
 function todayString() {
   const d = new Date()
@@ -367,7 +415,8 @@ function segTitle(seg) {
   if (r.endTime) bits.push('至 ' + fmtTs(r.endTime))
   if (r.duration != null) bits.push(r.duration + ' 秒')
   if (r.fileSize) bits.push(formatSize(r.fileSize))
-  bits.push('点击点播')
+  // 录制中的段不能播（见 play），提示里说清楚，别让用户反复点
+  bits.push(r.recording ? '录制中，结束后可回放' : '点击点播')
   return bits.join(' · ')
 }
 
@@ -494,6 +543,17 @@ function goBack() {
  * 那些地址一个都用不上；调它反而会让 ZLM 白读一遍文件、多等一个来回。
  */
 async function play(record) {
+  /*
+   * 正在录制的段点不了。
+   *
+   * <p>这种段 {@code endTime} 为 null、文件还在增长：后端不回填
+   * {@code playUrl}（媒体索引尚未定稿），走受保护接口也会失败。
+   * 与其让用户看到「播放失败」，不如直接说清原因。
+   */
+  if (record.recording) {
+    ElMessage.warning('该段仍在录制中，录制结束后才能回放')
+    return
+  }
   playingRecord.value = { ...record }
   try {
     // 播放器挂载点是 v-if 渲染的，必须等 DOM 出来才能创建实例

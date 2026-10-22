@@ -97,6 +97,7 @@ function withToken(url, token) {
  * @param {object} [hooks]
  * @param {function} [hooks.onFatal] 彻底失败回调（参数为原因文案）
  * @param {function} [hooks.onSkip]  跳过坏片段回调 (gopIndex, 原因)
+ * @param {function} [hooks.onEnded] 播放到结尾回调（用于自动连播下一段）
  */
 export function useRecordPlayer(containerRef, hooks = {}) {
   const playing = ref(false)
@@ -277,6 +278,7 @@ export function useRecordPlayer(containerRef, hooks = {}) {
         if (disposed) return
         playing.value = false
         state.value = '播放结束'
+        hooks.onEnded?.()
       })
     })
   }
@@ -332,6 +334,7 @@ export function useRecordPlayer(containerRef, hooks = {}) {
       if (disposed) return
       playing.value = false
       state.value = '播放结束'
+      hooks.onEnded?.()
     })
 
     core = new MseRecordPlayer(media, {

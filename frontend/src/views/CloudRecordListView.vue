@@ -126,16 +126,60 @@
         @size-change="onSizeChange"
       />
     </el-card>
+
+    <!--
+      点播弹窗。
+
+      <p><b>为什么用弹窗而不是跳转时间轴页</b>：列表视图的用途是「翻记录、
+      找某一段、看一眼」——跳走再回来会丢掉当前页、筛选和滚动位置，
+      来回翻十几次很折磨人。弹窗就地播放，关掉还在原处。
+
+      <p>{@code destroy-on-close} 让关闭时整块 DOM 消失，配合
+      {@code @closed} 释放播放器（不停会继续下载录像数据）。
+    -->
+    <el-dialog
+      v-model="playerVisible"
+      :title="playerTitle"
+      width="min(1000px, 94vw)"
+      top="6vh"
+      destroy-on-close
+      append-to-body
+      class="record-player-dialog"
+      @closed="onPlayerClosed"
+    >
+      <div class="video-box">
+        <div ref="dialogVideoContainer" class="video-container" />
+      </div>
+      <div class="player-bar">
+        <span class="mono">{{ playingRecord ? fmtTs(playingRecord.startAt) : '' }}</span>
+        <span v-if="playingRecord?.endTime" class="text-dim">
+          至 {{ fmtTs(playingRecord.endTime) }}
+        </span>
+        <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
+        <span class="player-bar-spacer" />
+        <el-button size="small" type="danger" plain @click="stopPlay">
+          <el-icon><SwitchButton /></el-icon> 停止
+        </el-button>
+        <el-button
+          size="small"
+          :disabled="!canDownload(playingRecord)"
+          @click="download(playingRecord)"
+        >
+          <el-icon><Download /></el-icon> 下载本段
+        </el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
+import { useRecordPlayer } from '@/composables/useRecordPlayer'
 import { downloadFile, recordFileName } from '@/utils/download'
 import TablePager from '@/components/TablePager.vue'
 
@@ -325,17 +369,104 @@ function uploadColor(state) {
 
 /* ==================== 操作 ==================== */
 
-/** 播放：跳到时间轴页并自动点播那一段（?play=<recordId>）。 */
-function play(row) {
-  router.push({
-    path: '/cloud/detail',
-    query: {
-      serial: serial.value,
-      code: code.value,
-      period: period.value,
-      play: row.recordId
-    }
-  })
+/* ---------- 点播弹窗 ---------- */
+
+/** 弹窗是否显示。 */
+const playerVisible = ref(false)
+/** 当前在播的录像（弹窗底栏展示用）。 */
+const playingRecord = ref(null)
+/** 播放器挂载容器（弹窗内，dialog 打开后才有 DOM）。 */
+const dialogVideoContainer = ref(null)
+
+/** 弹窗标题：通道名 + 起止时间。 */
+const playerTitle = computed(() => {
+  const r = playingRecord.value
+  if (!r) {
+    return '录像回放'
+  }
+  const span = r.endTime ? `${fmtTs(r.startAt)} 至 ${fmtTs(r.endTime)}` : fmtTs(r.startAt)
+  return `${channelName.value || '录像回放'} · ${span}`
+})
+
+/** 播放状态（展示用，直接映射播放器状态）。 */
+const playState = computed(() => recordPlayer.state.value)
+const playStateType = computed(() => {
+  if (playState.value === '播放中') return 'success'
+  if (playState.value === '播放异常') return 'danger'
+  return 'info'
+})
+
+/**
+ * 弹窗内的播放器：xgplayer 外壳 + 容错 MSE 内核。
+ *
+ * <p>与时间轴页、实时预览是<b>同一条通路</b>（{@link useRecordPlayer}）：
+ * H.265 录像里夹着坏帧，浏览器硬解会 {@code PIPELINE_ERROR_DECODE}，
+ * 必须走自控下载 + 浏览器端重封装才能跳坏段继续播。
+ */
+const recordPlayer = useRecordPlayer(dialogVideoContainer, {
+  onFatal: (msg) => ElMessage.error('播放失败：' + msg)
+})
+
+/**
+ * 能不能下载这段录像。
+ *
+ * <p>与时间轴页判据一致：{@code downloadUrl} 非空（文件确实存在）
+ * 且不在录制中（文件还在增长，下到一半的残缺文件没意义）。
+ *
+ * @param {object|null} record
+ * @returns {boolean}
+ */
+function canDownload(record) {
+  return !!record && !!record.downloadUrl && !record.recording
+}
+
+/**
+ * 弹窗点播一段录像。
+ *
+ * <p>注意 {@code nextTick}：播放器容器在 {@code el-dialog} 内部，
+ * 而 dialog 默认是<b>懒渲染</b>的 —— 没打开过时 DOM 根本不存在，
+ * 直接拿去建播放器会拿到 null 容器。先开弹窗、等渲染完再播。
+ *
+ * @param {object} row 录像记录
+ */
+async function play(row) {
+  playingRecord.value = { ...row }
+  playerVisible.value = true
+  await nextTick()
+  /*
+   * 静态地址（/record/**）由 nginx sendfile 直读，不过鉴权，不需要 token；
+   * 只有退回受保护接口时才带。
+   */
+  const authToken = row.playUrl ? '' : (localStorage.getItem('gb_token') || '')
+  const source = row.playUrl || `/api/v1/cloudrecord/file/${row.recordId}`
+  try {
+    await recordPlayer.play(source, {
+      token: authToken,
+      // 一律走自控下载通路：原生 <video> 的下载策略是「攒一批→播→
+      // 缓冲掉下去再攒」，公网链路上必然周期性转圈（见 useRecordPlayer 说明）。
+      useMse: true
+    })
+  } catch (e) {
+    ElMessage.error(e.message || '点播失败')
+  }
+}
+
+/** 停止点播（不关弹窗）。 */
+function stopPlay() {
+  recordPlayer.stop()
+  playingRecord.value = null
+}
+
+/**
+ * 弹窗完全关闭后释放播放器。
+ *
+ * <p>用 {@code @closed} 而不是 {@code @close}：{@code close} 在动画开始时就触发，
+ * 那时 DOM 还在；{@code closed} 是动画结束、内容真被销毁之后。
+ * 不释放的话，播放器会继续下载录像数据（自控下载是持续的 Range 请求）。
+ */
+function onPlayerClosed() {
+  recordPlayer.stop()
+  playingRecord.value = null
 }
 
 /**
@@ -480,5 +611,41 @@ onMounted(async () => {
 
 .star {
   cursor: pointer;
+}
+
+/* ==================== 点播弹窗 ==================== */
+
+/*
+ * 弹窗内容的样式必须用 :global()。
+ *
+ * <p>因为 el-dialog 挂了 {@code append-to-body}：DOM 实际挂在 {@code <body>}
+ * 下，不在本组件的模板树里，拿不到 scoped 的 {@code data-v-*} 属性 ——
+ * 写成普通 scoped 规则会编译成 {@code .player-bar[data-v-xxx]}，永远匹配不上
+ * （表现就是「样式写了但没生效」）。
+ */
+
+/* 播放器控制条：`video-box` / `video-container` 用全局样式，这行是弹窗独有 */
+:global(.record-player-dialog .player-bar) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+/* 把「停止 / 下载本段」推到右边 */
+:global(.record-player-dialog .player-bar-spacer) {
+  flex: 1;
+}
+
+/*
+ * 弹窗正文去掉默认的上下内边距 —— 16:9 视频本身就有高度，
+ * 默认 padding 会把弹窗撑出滚轮。
+ */
+:global(.record-player-dialog .el-dialog__body) {
+  padding-top: 8px;
+  padding-bottom: 4px;
 }
 </style>
