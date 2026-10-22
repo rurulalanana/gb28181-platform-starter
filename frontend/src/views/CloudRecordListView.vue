@@ -157,9 +157,10 @@
         </span>
         <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
         <span class="player-bar-spacer" />
-        <el-button size="small" type="danger" plain @click="stopPlay">
-          <el-icon><SwitchButton /></el-icon> 停止
-        </el-button>
+        <!--
+          这里不设「停止」按钮：弹窗关闭时会自动停播并释放播放器
+          （见 onPlayerClosed），单独放一个停止键属于重复入口。
+        -->
         <el-button
           size="small"
           :disabled="!canDownload(playingRecord)"
@@ -449,12 +450,6 @@ async function play(row) {
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
   }
-}
-
-/** 停止点播（不关弹窗）。 */
-function stopPlay() {
-  recordPlayer.stop()
-  playingRecord.value = null
 }
 
 /**

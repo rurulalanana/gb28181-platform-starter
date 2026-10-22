@@ -74,6 +74,7 @@
       width="900px"
       top="5vh"
       @close="closePlay"
+      @closed="onPlayClosed"
     >
       <div class="video-box">
         <div ref="videoContainer" class="video-container" />
@@ -270,11 +271,29 @@ function onSpeedChange(val) {
   control('speed', { scale: val })
 }
 
+/**
+ * 关闭回放弹窗。
+ *
+ * <p><b>必须显式把 {@code playDialog} 置 false</b>。早先这里只做了
+ * 「停播放器 + 停设备回放 + 清 current」，底部那个「关闭」按钮就变成了
+ * 一句空指令 —— 点了既不关窗也不断流，看起来像按钮坏了。
+ * （右上角 × 走的是 el-dialog 内部的 {@code update:modelValue false}，
+ * 跟这个函数无关，所以那边一直正常。）
+ *
+ * <p>清 {@code current} 放到 {@link onPlayClosed}：这里清掉的话，
+ * 标题（依赖 current.filePath）会在关闭动画还没跑完时先变成空串，闪一下。
+ */
 function closePlay() {
+  playDialog.value = false
+  // 立即停播并通知设备停止回放：别等 300ms 的关闭动画
   player.stop()
   if (current.value) {
     playbackApi.stop({ serial: serial.value, code: code.value }).catch(() => {})
   }
+}
+
+/** 弹窗完全关闭（动画结束、DOM 销毁后）再清数据。 */
+function onPlayClosed() {
   current.value = null
 }
 

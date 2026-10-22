@@ -252,6 +252,7 @@
       top="5vh"
       class="preview-dialog"
       @close="closePreview"
+      @closed="onPreviewClosed"
     >
       <div class="preview-wrap">
         <!--
@@ -578,8 +579,27 @@ async function switchProto() {
   await player.switchProtocol(proto.value, urls)
 }
 
+/**
+ * 关闭预览弹窗。
+ *
+ * <p><b>必须显式把 {@code previewDialog} 置 false</b>。早先这里只做了
+ * 「停播放器 + 清目标」，底部那个「关闭」按钮就变成了一句空指令 ——
+ * 点了既不关窗也不断流，看起来像按钮坏了。
+ * （右上角 × 之所以能用，是因为 el-dialog 自己会 emit
+ * {@code update:modelValue false}，走的是 v-model 那条路，跟这个函数无关。）
+ *
+ * <p>清 {@code previewTarget} 放到 {@link onPreviewClosed}：这里清掉的话，
+ * 标题（依赖 target）会在关闭动画还没跑完时先变成空串，肉眼能看到闪一下。
+ */
 function closePreview() {
+  previewDialog.value = false
+  // 立即断流：不要等 300ms 的关闭动画，让 ZLM 早点释放这路拉流
   player.stop()
+}
+
+/** 弹窗完全关闭（动画结束、DOM 销毁后）再清数据。 */
+function onPreviewClosed() {
+  // stop 已在 @close 里做过（幂等），这里只清掉标题依赖的数据
   previewTarget.value = null
 }
 
