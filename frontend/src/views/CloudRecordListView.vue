@@ -48,7 +48,7 @@
       <el-table
         ref="tableRef"
         v-loading="loading"
-        :data="records"
+        :data="pagedRecords"
         stripe
         class="list-table"
       >
@@ -135,6 +135,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
+import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
 
 const route = useRoute()
@@ -147,7 +148,22 @@ const loading = ref(false)
 const query = reactive({ q: '' })
 
 const tableRef = ref(null)
-useFillTableRows(tableRef, () => records.value.length)
+
+/**
+ * 前端分页。
+ *
+ * <p>{@code queryDaily} 一次返回当天的全部录像段（一天也就二三十段），
+ * 所以这里不往后端要分页参数，直接在浏览器里切页。
+ */
+const { pager, setTotal, onPageChange, onSizeChange } = usePagination({ pageSize: 10 })
+
+/** 当前页要显示的录像段。 */
+const pagedRecords = computed(() => {
+  const start = (pager.page - 1) * pager.size
+  return records.value.slice(start, start + pager.size)
+})
+
+useFillTableRows(tableRef, () => pagedRecords.value.length)
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
@@ -225,6 +241,7 @@ async function loadDaily() {
       period: period.value.replace(/-/g, '')
     })
     records.value = data?.list || []
+    setTotal(records.value.length)
     if (data?.name) channelName.value = data.name
   } catch (e) {
     ElMessage.error(e.message || '查询失败')
