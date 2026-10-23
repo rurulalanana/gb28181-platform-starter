@@ -319,6 +319,16 @@ public class RecordService {
         if (recording == null) {
             return null;
         }
+        // 【必须判 filePath】停机/秒停场景下 ZLM 可能已抢先停录，
+        // 我们的 mk_recorder_stop 晚了一步、回调没送到，此时 filePath 为 null。
+        // 这种条目一旦入库就是坏记录（file_path 空、size=0），
+        // 前端点播放/下载会 Path.of(null) 抛 NPE，文件又在磁盘上「看不见」。
+        // 直接返回 null，交给归档的磁盘兜底路径（archiveFromDisk 能拿到真实路径）。
+        if (recording.getFilePath() == null || recording.getFilePath().isBlank()) {
+            log.warn("停止录像但未拿到文件路径，跳过入库（交给磁盘对账补登记）: channel={}",
+                    channelId);
+            return null;
+        }
         GbRecord record = toRecord(recording);
         record.setStorageType(storage.type());
         record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
@@ -835,6 +845,13 @@ public class RecordService {
      * <p>数据源是 {@code gb_record} 表（历史条目重启不丢），
      * 再与 ZLMediaKit 内存索引合并：内存中「录制中」的条目用实时状态覆盖，
      * 库中缺失的内存条目也会补上（例如录像刚开始、库尚未落盘的瞬间）。
+     *
+     * <p><b>去重必须按文件路径，不能按 recordId</b>：内存条目与库条目各有
+     * 独立生成的随机 recordId（{@code startRecording} 一个、
+     * 对账/归档 {@code saveRecord} 另一个），按 ID 比对永远不相等 ——
+     * 结果同一段录像在列表里出现两次（一次「录制中」、一次「已完成」）。
+     * 文件路径才是同一段录像的真正标识，且库里有 {@code uk_gb_record_file_path}
+     * 唯一索引保证它唯一。
      */
     public List<GbRecord> cloudRecords(String channelId, LocalDateTime from, LocalDateTime to) {
         List<GbRecord> out = new ArrayList<>(recordMapper.selectList(
@@ -846,19 +863,28 @@ public class RecordService {
                         .orderByAsc(GbRecord::getStartTime)));
         // 用内存索引覆盖「录制中」条目，并补齐库里还没有的新录像
         if (platform.recordingService() != null) {
-            java.util.Map<String, GbRecord> byId = new java.util.LinkedHashMap<>();
+            // 按文件路径索引库里已有的条目
+            java.util.Map<String, GbRecord> byPath = new java.util.LinkedHashMap<>();
             for (GbRecord r : out) {
-                byId.put(r.getRecordId(), r);
+                if (r.getFilePath() != null && !r.getFilePath().isBlank()) {
+                    byPath.put(r.getFilePath(), r);
+                }
             }
             for (Recording r : platform.recordingService().search(channelId,
                     from == null ? null : TimeFormats.toDate(from).getTime(),
                     to == null ? null : TimeFormats.toDate(to).getTime())) {
                 GbRecord live = toRecord(r);
-                GbRecord existing = byId.get(live.getRecordId());
+                // 路径为空说明分片还没落盘（刚开始录），没什么可展示的，
+                // 等下一次轮询（首次落盘通常几秒内）
+                if (live.getFilePath() == null || live.getFilePath().isBlank()) {
+                    continue;
+                }
+                GbRecord existing = byPath.get(live.getFilePath());
                 if (existing == null) {
                     out.add(live);
+                    byPath.put(live.getFilePath(), live);
                 } else {
-                    // 录制中的条目以内存为准（结束时间/时长实时变化）
+                    // 同一文件：录制中的条目以内存为准（结束时间/时长实时变化）
                     if (existing.getEndTime() == null) {
                         existing.setEndTime(live.getEndTime());
                         existing.setDuration(live.getDuration());
@@ -868,8 +894,72 @@ public class RecordService {
             }
             out.sort(java.util.Comparator.comparing(GbRecord::getStartTime,
                     java.util.Comparator.nullsLast(java.util.Comparator.naturalOrder())));
+            // 追加「正在写的这一段」占位条目
+            appendInProgressEntry(channelId, out, to);
         }
         return out;
+    }
+
+    /**
+     * 追加一条「正在写的分片」占位条目（{@code endTime == null} 即界面上的「录制中」）。
+     *
+     * <p><b>为什么需要</b>：ZLM 只在分片<b>写完</b>时才回调（{@code on_mk_record_mp4}），
+     * 所以在两段之间（30 分钟窗口内）列表里完全看不出「还在录」。
+     * 用户会以为「录像停了」。
+     *
+     * <p><b>为什么是占位而不是真实条目</b>：正在写的文件带 {@code .} 前缀、
+     * 没有 moov、无法播放，且文件名由 ZLM 决定（我们拿不到，也不该猜）。
+     * 因此这条只用于表达「还在录制」，{@code filePath} 留空 ——
+     * 下载按钮与点播都会被前端按 {@code recording=true} 拦下并给出正确提示，
+     * 不会让用户去点一个打不开的文件。
+     *
+     * <p>开始时间取「上一段结束时间」：那是当前这段最可能开始的位置。
+     * 没有已完成分段时（刚开录）取会话开始时间，此时不追加占位
+     * （文件还没落盘，列表里一条都没有反而更干净）。
+     */
+    private void appendInProgressEntry(String channelId, List<GbRecord> out, LocalDateTime to) {
+        if (channelId == null || channelId.isBlank() || out.isEmpty()) {
+            return;
+        }
+        if (!isRecording(channelId)) {
+            return;
+        }
+        // 以列表里最后一条（最新）为基准推算当前段的起点
+        GbRecord last = out.get(out.size() - 1);
+        LocalDateTime from = last.getEndTime() != null
+                ? last.getEndTime() : last.getStartTime();
+        if (from == null) {
+            return;
+        }
+        // 上一条如果本身就是占位（连续两次轮询都还没轮转），不要叠加
+        if (last.getEndTime() == null) {
+            return;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        if (from.isAfter(now)) {
+            from = now;
+        }
+        GbRecord live = new GbRecord();
+        // recordId 固定成可辨识的前缀：前端点播时必然 404（这不是真实条目），
+        // 但正常路径会被 recording=true 拦在前面
+        live.setRecordId("live-" + channelId);
+        live.setChannelId(channelId);
+        live.setDeviceId(deviceIdOf(channelId));
+        live.setName(channelId);
+        live.setStartTime(from);
+        // endTime 留空 = 录制中（CloudRecordController 据此置 recording=true）
+        live.setDuration((int) Duration.between(from, now).getSeconds());
+        live.setFileSize(0L);
+        live.setCloudRecord(true);
+        live.setImportant(false);
+        live.setCreateTime(now);
+        live.setStorageType(ObjectStorageService.TYPE_LOCAL);
+        live.setUploadState("NONE");
+        // 超出查询窗口就不显示（用户在看昨天的记录时不该出现今天的「正在录」）
+        if (to != null && !from.isBefore(to)) {
+            return;
+        }
+        out.add(live);
     }
 
     /** 云端录像点播：把 MP4 拉入 ZLM 转协议输出。 */
@@ -1276,22 +1366,52 @@ public class RecordService {
         String filePath = recording.getFilePath();
         r.setFilePath(filePath);
         r.setFileName(filePath == null ? null : new java.io.File(filePath).getName());
-        r.setStartTime(TimeFormats.ofEpochMilli(recording.getStartTime()));
-        if (recording.getEndTime() > 0) {
-            r.setEndTime(TimeFormats.ofEpochMilli(recording.getEndTime()));
+
+        // 【时间与大小一律以磁盘文件为准，不用内存条目的会话级时间】
+        //
+        // 内存 Recording 的 startTime 在早期实现里是「会话开始」（bindFile 只绑首段），
+        // 分片轮转后它就不再对应该文件了。实测后果：停机归档时
+        // toRecord 算出 duration = now - 会话开始 = 6501 秒，
+        // 而实际文件只有 1801 秒；这条坏数据又被 saveRecord 按 file_path
+        // 更新进库，界面显示「6501 秒 · 170MB」。
+        //
+        // 现在 Recording 已改为每次都指向最新完成的分片（见 bindSegment），
+        // 但这里仍然以文件为准：文件名里带着真实开始时刻，
+        // lastModified 就是该分片写完的时刻 —— 与对账 toDiskRecord 完全同一套算法，
+        // 两条写入路径不可能再算出不同的时长。
+        LocalDateTime start = filePath == null ? null : parseZlmFileName(r.getFileName());
+        LocalDateTime end = null;
+        long size = recording.getFileSize();
+        if (filePath != null) {
+            java.io.File file = new java.io.File(filePath);
+            if (file.exists()) {
+                end = lastModified(file);
+                size = file.length();
+            }
         }
-        r.setDuration((int) recording.durationSeconds());
+        if (start == null) {
+            // 文件名解析不出（尚未落盘 / 命名不符合 ZLM 规则）：退回内存时间
+            start = TimeFormats.ofEpochMilli(recording.getStartTime());
+        }
+        if (end == null) {
+            end = recording.getEndTime() > 0
+                    ? TimeFormats.ofEpochMilli(recording.getEndTime()) : null;
+        }
+        r.setStartTime(start);
+        if (end != null) {
+            if (end.isBefore(start)) {
+                end = start;
+            }
+            r.setEndTime(end);
+            r.setDuration((int) Duration.between(start, end).getSeconds());
+        } else {
+            r.setDuration((int) recording.durationSeconds());
+        }
         r.setCloudRecord(true);
         r.setImportant(false);
         r.setCreateTime(LocalDateTime.now());
         r.setStorageType(ObjectStorageService.TYPE_LOCAL);
         r.setUploadState("NONE");
-        // 优先用回调上报的大小；缺失时回退磁盘实际大小
-        long size = recording.getFileSize();
-        if (size <= 0 && filePath != null) {
-            java.io.File file = new java.io.File(filePath);
-            size = file.exists() ? file.length() : 0L;
-        }
         r.setFileSize(size);
         return r;
     }
