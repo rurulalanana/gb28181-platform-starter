@@ -127,6 +127,22 @@ public class Gb28181Properties {
     private String recordRoot = "";
 
     /**
+     * 录像根目录的实际取值：配置为空时回落到「工作目录 + {@code /record}」。
+     *
+     * <p><b>为什么要收敛成一个方法</b>：这个回落规则原本在 7 处各写一遍
+     * （媒体装配、静态资源映射、清理任务、对账、归档、快照、转码），
+     * 其中一处写成 {@code System.getProperty("user.dir") + "/record"}、
+     * 另一处走 {@code Path.of(userDir, "record")}。规则一旦要改
+     * （例如改成可配置的绝对路径），漏改任何一处都会让
+     * 「录像在 A 目录、清理看 B 目录」，表现为磁盘明明满了却不清理。
+     */
+    public String resolvedRecordRoot() {
+        return recordRoot == null || recordRoot.isBlank()
+                ? System.getProperty("user.dir") + "/record"
+                : recordRoot;
+    }
+
+    /**
      * 是否由<b>本进程</b>把录像目录暴露成静态资源（{@code /record/**}）。
      *
      * <p><b>默认为 {@code false}，即交给 nginx</b>。因为 Spring Boot 的

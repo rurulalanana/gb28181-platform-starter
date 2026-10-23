@@ -229,11 +229,8 @@ public class RecordService {
         }
         ensureStreamReady(deviceId, channelId);
         Recording recording = platform.recordingService().startRecording(channelId);
-        GbRecord record = toRecord(recording);
-        record.setStorageType(storage.type());
-        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
-        saveRecord(record);
-        return record;
+        // 刚开始录制时文件还没落盘，不需要（也没法）上传
+        return persistRecording(recording);
     }
 
     /**
@@ -329,14 +326,7 @@ public class RecordService {
                     channelId);
             return null;
         }
-        GbRecord record = toRecord(recording);
-        record.setStorageType(storage.type());
-        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
-        saveRecord(record);
-        if (storage.enabled()) {
-            uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
-        }
-        return record;
+        return persistAndUpload(recording);
     }
 
     /**
@@ -436,11 +426,7 @@ public class RecordService {
      * @return 本次补登记的文件数
      */
     public int reconcileAutoRecordings() {
-        String root = props.getRecordRoot();
-        if (root == null || root.isBlank()) {
-            root = System.getProperty("user.dir") + "/record";
-        }
-        File rootDir = new File(root);
+        File rootDir = new File(props.resolvedRecordRoot());
         if (!rootDir.isDirectory()) {
             return 0;
         }
@@ -719,14 +705,7 @@ public class RecordService {
         // 那里能拿到真实路径、真实大小、真实时长（c0ntinue 到 archiveFromDisk）。
         if (recording != null && recording.getFilePath() != null
                 && !recording.getFilePath().isBlank()) {
-            GbRecord record = toRecord(recording);
-            record.setStorageType(storage.type());
-            record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
-            saveRecord(record);
-            if (storage.enabled()) {
-                uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
-            }
-            return record;
+            return persistAndUpload(recording);
         }
         // 路径二：索引不可用（或索引条目缺文件路径），扫该通道目录补登记
         return archiveFromDisk(channelId, sinceMillis);
@@ -742,11 +721,7 @@ public class RecordService {
      * @param sinceMillis 只登记修改时间不早于此时刻的文件（毫秒）；0 表示不限
      */
     private GbRecord archiveFromDisk(String channelId, long sinceMillis) {
-        String root = props.getRecordRoot();
-        if (root == null || root.isBlank()) {
-            root = System.getProperty("user.dir") + "/record";
-        }
-        File channelDir = new File(root, channelId);
+        File channelDir = new File(props.resolvedRecordRoot(), channelId);
         if (!channelDir.isDirectory()) {
             return null;
         }
@@ -1005,8 +980,7 @@ public class RecordService {
         if (record == null) {
             return null;
         }
-        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
-                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+        if (inObjectStorage(record)) {
             String url = storage.url(record.getObjectKey(),
                     Duration.ofSeconds(3600));
             if (url != null) {
@@ -1022,11 +996,22 @@ public class RecordService {
         if (record == null) {
             return false;
         }
-        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
-                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+        if (inObjectStorage(record)) {
             return true;
         }
         return record.getFilePath() != null && Files.exists(Path.of(record.getFilePath()));
+    }
+
+    /**
+     * 该录像是否已归档到对象存储（且拿得到 objectKey）。
+     *
+     * <p>只有「存储类型为 OSS」不够：上传失败时 {@code object_key} 为空，
+     * 此时仍应回退到本地文件路径。三个调用点（下载地址/可用性/删除）
+     * 必须用同一判据，否则会出现「能播但删不掉」这类错位。
+     */
+    private static boolean inObjectStorage(GbRecord record) {
+        return ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
+                && record.getObjectKey() != null && !record.getObjectKey().isBlank();
     }
 
     /** 删除录像文件（本地磁盘或对象存储，按 storage_type 分派）。 */
@@ -1040,8 +1025,7 @@ public class RecordService {
         if (tombPath != null && !tombPath.isBlank()) {
             rememberDeleted(tombPath);
         }
-        if (ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
-                && record.getObjectKey() != null && !record.getObjectKey().isBlank()) {
+        if (inObjectStorage(record)) {
             storage.delete(record.getObjectKey());
             // 本地副本可能按配置保留或已删除，尽力清理
         }
@@ -1219,7 +1203,8 @@ public class RecordService {
     }
 
     /** 设置重要标记。 */
-    public boolean setImportant(String recordId, boolean important) {        GbRecord record = findRecord(recordId);
+    public boolean setImportant(String recordId, boolean important) {
+        GbRecord record = findRecord(recordId);
         if (record == null) {
             return false;
         }
@@ -1349,6 +1334,29 @@ public class RecordService {
             record.setId(existing.getId());
             recordMapper.updateById(record);
         }
+    }
+
+    /**
+     * 把 ZLM 录像条目折算成库记录并落库（含存储类型与上传状态初始化）。
+     *
+     * <p>三条写入路径（开录、停录、归档）此前各写一遍同样的四行，
+     * 任何一处改了存储字段很容易漏掉另一处。
+     */
+    private GbRecord persistRecording(Recording recording) {
+        GbRecord record = toRecord(recording);
+        record.setStorageType(storage.type());
+        record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
+        saveRecord(record);
+        return record;
+    }
+
+    /** 落库并（启用对象存储时）异步上传该录像文件。 */
+    private GbRecord persistAndUpload(Recording recording) {
+        GbRecord record = persistRecording(recording);
+        if (storage.enabled()) {
+            uploadAsync(record.getRecordId(), recording.getFilePath(), record.getChannelId());
+        }
+        return record;
     }
 
     private GbRecord toRecord(Recording recording) {

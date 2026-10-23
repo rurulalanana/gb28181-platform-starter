@@ -118,7 +118,7 @@
         <el-table-column label="云端录像" min-width="88" align="center">
           <template #header>
             <el-tooltip
-              content="云端录像：平台持续把这段流录成 MP4，要求流一直在线。与「按需直播」互斥——开启它会自动关闭按需直播。"
+              content="云端录像：平台持续把这段流录成 MP4，要求流一直在线。与「按需直播」互斥——开启它会自动关闭按需直播。开启后为全天录制，会忽略录像计划的时段限制。"
               placement="top"
             >
               <span class="th-with-tip">云端录像 <el-icon><QuestionFilled /></el-icon></span>

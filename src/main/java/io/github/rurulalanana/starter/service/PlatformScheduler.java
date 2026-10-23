@@ -5,7 +5,6 @@ import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -114,39 +113,14 @@ public class PlatformScheduler {
      */
     private final Map<String, Long> negotiatingSince = new ConcurrentHashMap<>();
 
-    /** 操作日志保留天数（默认 7 天）。 */
-    @Value("${gb28181.starter.oplog-retain-days:7}")
-    private int oplogRetainDays;
-
-    /**
-     * 云端录像保留天数（默认 7 天）；{@code <=0} 表示不按天数删，只受磁盘水位约束。
+    /*
+     * 保留天数 / 磁盘水位 / 任务间隔一律从 {@link RuntimeConfigService} 实时读取，
+     * 不在这里用 {@code @Value} 缓存一份。
      *
-     * <p>配合 {@link #recordDiskMaxUsedPercent} 使用：天数保证「至少留 7 天」，
-     * 水位保证「盘不能满」。单通道 24 小时录像约 350MB/小时，
-     * 30G 的盘只够 3 天左右，因此水位兜底是必需的。
+     * <p>早先这里确实有 5 个 {@code @Value} 字段（oplogRetainDays 等），
+     * 但自从配置改为存库热更新后它们就再没被读过 ——
+     * 留着只会让人以为「改 yml 能生效」，与类注释里的说明恰好相反。
      */
-    @Value("${gb28181.starter.record-retain-days:7}")
-    private int recordRetainDays;
-
-    /**
-     * 录像磁盘使用率上限（百分比，默认 85）。
-     *
-     * <p>超过就删最老的录像（跳过 important 与最近
-     * {@link #recordKeepMinDays} 天），直到降回阈值以下。
-     *
-     * <p>为什么不是 95：留出 15% 给数据库、日志、临时转码文件。
-     * 同盘写满时 PostgreSQL 报错会连带整个平台不可用，比丢老录像严重得多。
-     */
-    @Value("${gb28181.starter.record-disk-max-used-percent:85}")
-    private int recordDiskMaxUsedPercent;
-
-    /** 磁盘告急时，无论多大压力都至少保留最近几天（默认 1 天）。 */
-    @Value("${gb28181.starter.record-keep-min-days:1}")
-    private int recordKeepMinDays;
-
-    /** 状态变更日志保留天数（默认 30 天）；{@code <=0} 表示不清理。 */
-    @Value("${gb28181.starter.status-log-retain-days:30}")
-    private int statusLogRetainDays;
 
     /** 心跳超时巡检，默认每 60 秒一次。 */
     @Scheduled(fixedDelayString = "${gb28181.starter.offline-scan-interval-ms:60000}")
@@ -246,10 +220,10 @@ public class PlatformScheduler {
      *
      * <p>两级策略：
      * <ol>
-     *   <li><b>按保留天数</b>：超过 {@link #recordRetainDays} 的非重要录像删掉；</li>
+     *   <li><b>按保留天数</b>：超过 {@link ConfigKeys#RECORD_RETAIN_DAYS} 的非重要录像删掉；</li>
      *   <li><b>按磁盘水位</b>：用完 1 之后若仍超过
-     *       {@link #recordDiskMaxUsedPercent}，继续删最老的
-     *       （跳过 important 与最近 {@link #recordKeepMinDays} 天）。</li>
+     *       {@link ConfigKeys#RECORD_DISK_MAX_USED_PERCENT}，继续删最老的
+     *       （跳过 important 与最近 {@link ConfigKeys#RECORD_KEEP_MIN_DAYS} 天）。</li>
      * </ol>
      *
      * <p><b>为什么必须有</b>：云端录像 24 小时不停写，单通道约 8GB/天。
@@ -279,11 +253,8 @@ public class PlatformScheduler {
         }
         // 2. 磁盘水位兜底
         try {
-            String root = props.getRecordRoot();
-            if (root == null || root.isBlank()) {
-                root = System.getProperty("user.dir") + "/record";
-            }
-            int deleted = recordService.purgeOldestUntilFree(root, maxUsedPercent, keepMinDays);
+            int deleted = recordService.purgeOldestUntilFree(
+                    props.resolvedRecordRoot(), maxUsedPercent, keepMinDays);
             if (deleted > 0) {
                 log.info("录像清理：磁盘水位超限，删除了 {} 条最老的录像", deleted);
             }
@@ -299,16 +270,35 @@ public class PlatformScheduler {
      * <b>没有任何地方真正执行计划</b> —— 用户在界面上配好时段、关联通道后
      * 什么都不会发生。这是功能缺失，不是配置问题。
      *
-     * <p><b>语义：计划对覆盖的通道有完全控制权</b>（与 LiveGBS 一致）：
-     * 时段内云端录像应为开、时段外应为关，即使之前是手动开的。
-     * 这样行为可预期；界面需明确提示，否则用户会困惑「手动开的怎么自己关了」。
+     * <h3>语义：只产生一个内存信号，绝不改用户的配置</h3>
      *
-     * <p><b>只驱动「开关」，不直接拉流</b>：开启后由既有的
-     * {@link #keepCloudRecordStreams()} 保活任务负责保证流在线，
-     * 避免两个任务同时发 INVITE 打架。
+     * <p>本方法<b>不写数据库、不改 {@code cloud_record}、不改 {@code on_demand}</b>，
+     * 只把「此刻计划判定应录」的通道集合写进
+     * {@link ChannelRecordPolicy#replacePlanActive}。
      *
-     * <p>30 秒周期：计划的最小粒度是「分钟」，30 秒足以在一个分钟内跟上，
-     * 又不至于频繁查库（本任务每轮 2 次查询）。
+     * <p>早先的实现让计划直接改这两个字段，后果：
+     * <ul>
+     *   <li>用户手动设的开关被计划反复覆盖，界面上看到状态自己变，无法维护；</li>
+     *   <li>计划把 {@code on_demand} 设成 false 后，空闲流永远不被回收
+     *       （见 {@code StreamService#channelsRequiringStream}），
+     *       设备被一直拉着推流、白占带宽。</li>
+     * </ul>
+     * 现在「是否录像」= 用户手动开关 ∪ 计划信号，两者独立，
+     * 用户的持久配置完全由用户掌握。
+     *
+     * <p><b>优先级</b>：用户手动开启优先。计划关闭时不会关掉用户手动开的通道 ——
+     * 判定是并集，见 {@link ChannelRecordPolicy#isEnabled}。
+     *
+     * <p><b>多个计划包含同一通道</b>：取<b>并集</b>——任一计划处于时段内即应录制。
+     * 这比「取交集」更符合直觉：用户给同一通道配了「白班 8-18」和「夜班 20-6」
+     * 两个计划，期望是两段都录，而不是只在重叠时段录。
+     * 该逻辑在 {@link RecordPlanService#scopeAt} 里，天然是 union。
+     *
+     * <p><b>只决策、不拉流</b>：开录由 {@link #keepCloudRecordStreams()} 保活任务
+     * 负责（它保证流在线，流上线回调自动开录），避免两个任务同时发 INVITE 打架。
+     *
+     * <p>30 秒周期：计划最小粒度是「分钟」，30 秒足以在一个分钟内跟上，
+     * 又不至于频繁查库（每轮 2 次查询）。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void applyRecordPlans() {
@@ -325,68 +315,27 @@ public class PlatformScheduler {
             log.warn("录像计划计算失败: {}", e.getMessage());
             return;
         }
-        if (scope.governed().isEmpty()) {
+        // 只更新内存信号：不动 cloud_record / on_demand，不写库。
+        // 记录替换前的集合，用于算出「进入」与「退出」两批，只在变化时打日志。
+        java.util.Set<String> before = recordPolicy.planActiveChannels();
+        java.util.Set<String> entered;
+        try {
+            entered = recordPolicy.replacePlanActive(scope.active());
+        } catch (Exception e) {
+            log.warn("更新录像计划生效集合失败: {}", e.getMessage());
             return;
         }
-        int started = 0;
-        int stopped = 0;
-        // 1) 时段内：确保开关为开
-        for (String channelId : scope.active()) {
-            try {
-                if (recordPolicy.isEnabled(channelId)) {
-                    continue;
-                }
-                GbChannel ch = deviceService.findChannel(channelId);
-                if (ch == null) {
-                    continue;
-                }
-                ch.setCloudRecord(true);
-                // 互斥：计划要录像，就必须常开推流
-                ch.setOnDemand(false);
-                deviceService.updateChannel(ch);
-                recordPolicy.set(channelId, true);
-                started++;
-            } catch (Exception e) {
-                log.warn("录像计划开启失败: channel={} {}", channelId, e.getMessage());
-            }
+        // 退出 = 原本在、现在不在
+        java.util.Set<String> exited = new java.util.HashSet<>(before);
+        exited.removeAll(scope.active());
+
+        if (!entered.isEmpty() || !exited.isEmpty()) {
+            log.info("录像计划：{} 路进入时段、{} 路退出（计划覆盖 {} 路，当前应在录 {} 路）",
+                    entered.size(), exited.size(),
+                    scope.governed().size(), scope.active().size());
         }
-        // 2) 时段外：确保开关为关（计划覆盖的通道由计划决定，即使曾手动开过）
-        for (String channelId : scope.shouldStop()) {
-            try {
-                if (!recordPolicy.isEnabled(channelId)) {
-                    continue;
-                }
-                GbChannel ch = deviceService.findChannel(channelId);
-                if (ch == null) {
-                    continue;
-                }
-                ch.setCloudRecord(false);
-                // 【必须同时恢复「按需直播」】
-                //
-                // 计划开启录像时把 on_demand 强制设成了 false（两者互斥）。
-                // 关的时候若不还原，这个通道就变成「不录也不按需」——
-                // 而空闲流回收会跳过 on_demand=false 的通道（见
-                // StreamService#channelsRequiringStream），于是设备会一直被拉着推流，
-                // 白占带宽直到有人手动停。实测踩过。
-                //
-                // 还原成按需 = 时段外没人看就停流，这正是计划的语义。
-                ch.setOnDemand(true);
-                deviceService.updateChannel(ch);
-                recordPolicy.set(channelId, false);
-                // 立即停录并归档：只关开关的话要等流被空闲回收才收尾，
-                // 时段结束后还会多录好几分钟（用户看到的就是「计划不准」）。
-                if (recordService.isRecording(channelId)) {
-                    recordService.stopCloudRecord(channelId);
-                }
-                stopped++;
-            } catch (Exception e) {
-                log.warn("录像计划关闭失败: channel={} {}", channelId, e.getMessage());
-            }
-        }
-        if (started > 0 || stopped > 0) {
-            log.info("录像计划执行：开启 {} 路、关闭 {} 路（覆盖 {} 路通道，当前应在录 {} 路）",
-                    started, stopped, scope.governed().size(), scope.active().size());
-        }
+        // 退出的通道由 keepCloudRecordStreams 的「停录对账」收尾：
+        // 那边统一按「应录集合」比对，避免两处都去停录造成竞态。
     }
 
     /**
@@ -484,6 +433,66 @@ public class PlatformScheduler {
                 // 设备无响应/通道离线很常见，不刷 WARN，下个周期自然重试
                 log.debug("云端录像保活拉流失败: channel={} {}", channelId, e.getMessage());
             }
+        }
+        // 反向对账：正在录、但此刻不该录的通道 → 停录并归档。
+        //
+        // 【为什么必须在这里做】录像计划的「退出时段」只更新内存信号
+        // （ChannelRecordPolicy#replacePlanActive），不直接停录 ——
+        // 若两处都停会撞车。这里统一按「应录集合」对账，
+        // 无论是计划退出、用户关了开关、还是计划被删除/停用，都在这一处收尾。
+        stopRecordingsNotNeeded();
+    }
+
+    /**
+     * 停掉「正在录但此刻不该录」的通道。
+     *
+     * <p>触发场景：
+     * <ul>
+     *   <li>录像计划退出时段（内存信号消失）；</li>
+     *   <li>用户关掉通道的云端录像开关；</li>
+     *   <li>计划被删除 / 停用，或通道从计划里移除。</li>
+     * </ul>
+     *
+     * <p><b>为什么覆盖全部会话而不是只查计划通道</b>：
+     * {@code recordPolicy.enabledChannels()} 是「应该录」的权威集合，
+     * 拿它与「实际在录」比对即可，不必关心是哪个原因导致不该录。
+     *
+     * <p>停录会顺带归档（{@code stopCloudRecord} 内部落库），
+     * 所以计划退出时段的最后一段不会丢。
+     */
+    private void stopRecordingsNotNeeded() {
+        java.util.Set<String> shouldRecord = recordPolicy.enabledChannels();
+        RecordService rs = recordService;
+        for (RtpSession session : sessionsSnapshot()) {
+            try {
+                String channelId = session == null ? null : session.getChannelId();
+                // 只处理实时会话：回放/下载会话不涉及录像
+                if (channelId == null || session.getType() == null || session.getType().historical()) {
+                    continue;
+                }
+                if (shouldRecord.contains(channelId)) {
+                    continue;
+                }
+                if (!rs.isRecording(channelId)) {
+                    continue;
+                }
+                log.info("通道 {} 已不在录像时段/开关已关，停止录像并归档", channelId);
+                rs.stopCloudRecord(channelId);
+            } catch (Exception e) {
+                log.warn("停止多余录像失败: channel={} {}",
+                        session == null ? "?" : session.getChannelId(), e.getMessage());
+            }
+        }
+    }
+
+    /** 当前会话快照（会话管理器未就绪时返回空列表）。 */
+    private java.util.Collection<RtpSession> sessionsSnapshot() {
+        try {
+            java.util.List<RtpSession> list = streamService.sessions();
+            return list == null ? java.util.List.of() : list;
+        } catch (Exception e) {
+            log.debug("读取会话列表失败: {}", e.getMessage());
+            return java.util.List.of();
         }
     }
 

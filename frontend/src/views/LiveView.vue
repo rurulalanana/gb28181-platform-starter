@@ -267,18 +267,10 @@ const stoppers = {}
 /** 当前选中的画面格（加 2px 强调描边，方便看清操作的是哪一格）。 */
 const activeTileId = ref(1)
 
-/** 当前选中的画面格（描边高亮 + 下一次上屏的落点）。 */
-const activeTile = computed(
-  () =>
-    visibleTiles.value.find((t) => t.id === activeTileId.value) ||
-    visibleTiles.value[0] ||
-    null
-)
-
 /**
  * 云台面板绑定的小格：优先取最近操作的格子，该格没有通道时退回到第一个已选通道的格子。
  *
- * <p>为什么不直接用 activeTile：连续上屏时选中位置会自动前移（见 pickChannel），
+ * <p>不直接跟随 {@code activeTileId}：连续上屏时选中位置会自动前移（见 pickChannel），
  * 若云台跟着前移，刚播放的通道会立刻失去云台控制。
  */
 const ptzTile = computed(() => {

@@ -30,10 +30,10 @@
           value-format="YYYY-MM-DD"
           class="date-picker"
           :clearable="false"
-          :disabled-date="isDisabledDate"
+          :disabled-date="cellDisabled"
         >
           <template #default="cell">
-            <div class="cal-cell" :class="{ 'has-record': isRecordDay(cell) }">
+            <div class="cal-cell" :class="{ 'has-record': cellHasRecord(cell) }">
               {{ cell.text }}
             </div>
           </template>
@@ -53,10 +53,10 @@
         class="list-table"
       >
         <el-table-column prop="startAt" label="开始时间" min-width="180" sortable>
-          <template #default="{ row }"><span class="mono">{{ fmtTs(row.startAt) }}</span></template>
+          <template #default="{ row }"><span class="mono">{{ fmtCompactTs(row.startAt) }}</span></template>
         </el-table-column>
         <el-table-column prop="endTime" label="结束时间" min-width="180" sortable>
-          <template #default="{ row }"><span class="mono">{{ fmtTs(row.endTime) }}</span></template>
+          <template #default="{ row }"><span class="mono">{{ fmtCompactTs(row.endTime) }}</span></template>
         </el-table-column>
         <el-table-column prop="duration" label="录像时长" width="120" align="center" sortable>
           <template #default="{ row }">{{ fmtDuration(row) }}</template>
@@ -151,9 +151,9 @@
         <div ref="dialogVideoContainer" class="video-container" />
       </div>
       <div class="player-bar">
-        <span class="mono">{{ playingRecord ? fmtTs(playingRecord.startAt) : '' }}</span>
+        <span class="mono">{{ playingRecord ? fmtCompactTs(playingRecord.startAt) : '' }}</span>
         <span v-if="playingRecord?.endTime" class="text-dim">
-          至 {{ fmtTs(playingRecord.endTime) }}
+          至 {{ fmtCompactTs(playingRecord.endTime) }}
         </span>
         <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
         <span class="player-bar-spacer" />
@@ -163,7 +163,7 @@
         -->
         <el-button
           size="small"
-          :disabled="!canDownload(playingRecord)"
+          :disabled="!canDownloadRecord(playingRecord)"
           @click="download(playingRecord)"
         >
           <el-icon><Download /></el-icon> 下载本段
@@ -174,14 +174,26 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
 import { useRecordPlayer } from '@/composables/useRecordPlayer'
-import { downloadFile, recordFileName } from '@/utils/download'
+import {
+  canDownloadRecord,
+  downloadRecord,
+  fmtCompactTs,
+  formatSize,
+  isDisabledDate,
+  isRecordDay,
+  parseCompactTs,
+  recordDaysOf,
+  todayString,
+  uploadColor,
+  uploadText
+} from '@/utils/cloudRecord'
 import TablePager from '@/components/TablePager.vue'
 
 const route = useRoute()
@@ -191,7 +203,6 @@ const records = ref([])
 const monthFlags = ref('')
 const channelName = ref('')
 const loading = ref(false)
-const query = reactive({ q: '' })
 
 const tableRef = ref(null)
 
@@ -223,45 +234,11 @@ const loadedMonth = ref('')
 const flagsMonth = ref('')
 
 /** 本月有录像的日期。 */
-const recordDays = computed(() =>
-  monthFlags.value
-    .split('')
-    .map((flag, idx) => (flag === '1' ? idx + 1 : 0))
-    .filter(Boolean)
-)
-const recordDaySet = computed(() => new Set(recordDays.value))
+const recordDaySet = computed(() => new Set(recordDaysOf(monthFlags.value)))
 
-function todayString() {
-  const d = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
-/** 日历格子是否有录像。 */
-function isRecordDay(cell) {
-  if (!cell) return false
-  let dateStr = ''
-  if (cell.dayjs && typeof cell.dayjs.format === 'function') {
-    dateStr = cell.dayjs.format('YYYY-MM-DD')
-  } else if (typeof cell === 'string') {
-    dateStr = cell
-  } else if (cell.value) {
-    dateStr = String(cell.value)
-  }
-  if (!dateStr) return false
-  if (dateStr.slice(0, 7) !== flagsMonth.value) return false
-  return recordDaySet.value.has(Number(dateStr.slice(8, 10)))
-}
-
-/** 禁用「没有录像」的日期。 */
-function isDisabledDate(date) {
-  if (!date) return false
-  const d = date instanceof Date ? date : new Date(date)
-  if (Number.isNaN(d.getTime())) return false
-  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-  if (ym !== flagsMonth.value) return false
-  return !recordDaySet.value.has(d.getDate())
-}
+/** 日历格子是否有录像 / 是否禁用（绑定到日期选择器）。 */
+const cellHasRecord = (cell) => isRecordDay(cell, flagsMonth.value, recordDaySet.value)
+const cellDisabled = (date) => isDisabledDate(date, flagsMonth.value, recordDaySet.value)
 
 watch(period, async (value, old) => {
   if (!value || value === old) return
@@ -311,19 +288,14 @@ async function loadMonthFlags() {
 
 /* ==================== 格式化 ==================== */
 
-function fmtTs(v) {
-  if (!v) return '—'
-  const t = String(v).trim()
-  if (t.length !== 14 || !/^\d{14}$/.test(t)) return t
-  return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)} ${t.slice(8, 10)}:${t.slice(10, 12)}:${t.slice(12, 14)}`
-}
+/* fmtCompactTs / formatSize / uploadText / uploadColor 见 utils/cloudRecord.js */
 
 /** 录像时长：优先用 duration（秒），否则按起止时间算。 */
 function fmtDuration(row) {
   let secs = row.duration
   if (secs == null && row.startAt && row.endTime) {
-    const s = parseTs(row.startAt)
-    const e = parseTs(row.endTime)
+    const s = parseCompactTs(row.startAt)
+    const e = parseCompactTs(row.endTime)
     if (s && e && e > s) secs = Math.round((e - s) / 1000)
   }
   if (secs == null) return '—'
@@ -332,40 +304,6 @@ function fmtDuration(row) {
   const s = secs % 60
   if (h) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return `${m}:${String(s).padStart(2, '0')}`
-}
-
-function parseTs(v) {
-  const t = String(v || '').trim()
-  if (!/^\d{14}$/.test(t)) return null
-  return new Date(
-    +t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8),
-    +t.slice(8, 10), +t.slice(10, 12), +t.slice(12, 14)
-  )
-}
-
-function formatSize(size) {
-  if (!size) return '—'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let n = size
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
-}
-
-const UPLOAD_TEXT = { NONE: '无需上传', PENDING: '待上传', UPLOADED: '已上传', FAILED: '上传失败' }
-
-function uploadText(state) {
-  return UPLOAD_TEXT[state] || '—'
-}
-
-function uploadColor(state) {
-  if (state === 'UPLOADED') return 'success'
-  if (state === 'PENDING') return 'warning'
-  if (state === 'FAILED') return 'danger'
-  return 'info'
 }
 
 /* ==================== 操作 ==================== */
@@ -385,7 +323,7 @@ const playerTitle = computed(() => {
   if (!r) {
     return '录像回放'
   }
-  const span = r.endTime ? `${fmtTs(r.startAt)} 至 ${fmtTs(r.endTime)}` : fmtTs(r.startAt)
+  const span = r.endTime ? `${fmtCompactTs(r.startAt)} 至 ${fmtCompactTs(r.endTime)}` : fmtCompactTs(r.startAt)
   return `${channelName.value || '录像回放'} · ${span}`
 })
 
@@ -407,19 +345,6 @@ const playStateType = computed(() => {
 const recordPlayer = useRecordPlayer(dialogVideoContainer, {
   onFatal: (msg) => ElMessage.error('播放失败：' + msg)
 })
-
-/**
- * 能不能下载这段录像。
- *
- * <p>与时间轴页判据一致：{@code downloadUrl} 非空（文件确实存在）
- * 且不在录制中（文件还在增长，下到一半的残缺文件没意义）。
- *
- * @param {object|null} record
- * @returns {boolean}
- */
-function canDownload(record) {
-  return !!record && !!record.downloadUrl && !record.recording
-}
 
 /**
  * 弹窗点播一段录像。
@@ -464,21 +389,9 @@ function onPlayerClosed() {
   playingRecord.value = null
 }
 
-/**
- * 下载一段录像。
- *
- * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径
- * （{@code /record/...}，由 nginx sendfile 提供），丢给浏览器原生下载即可 ——
- * 有进度、能续传。早先的 {@code fetch + blob} 会把整个文件读进内存
- * （1 小时的录像是 136MB），且全程无进度反馈。
- */
+/** 下载一段录像（判据与动作统一在 {@code utils/cloudRecord.js}，与时间轴页共用）。 */
 function download(row) {
-  const url = row?.downloadUrl
-  if (!url) {
-    ElMessage.warning('该录像暂不可下载（可能仍在录制或文件已丢失）')
-    return
-  }
-  downloadFile(url, recordFileName(row, channelName.value))
+  downloadRecord(row, channelName.value)
 }
 
 async function toggleImportant(record) {
@@ -499,7 +412,7 @@ async function toggleImportant(record) {
 async function removeOne(record) {
   try {
     await ElMessageBox.confirm(
-      `确定删除该录像（${fmtTs(record.startAt)}）？文件将同时删除。`,
+      `确定删除该录像（${fmtCompactTs(record.startAt)}）？文件将同时删除。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )

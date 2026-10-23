@@ -9,6 +9,7 @@ import io.github.rurulalanana.gb28181.sip.event.SipCallback;
 import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
+import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -362,34 +363,15 @@ public class SipEventBridge implements SipCallback {
     }
 
     private static Integer intOf(org.w3c.dom.Element parent, String tag) {
-        return parseInt(text(parent, tag));
+        return Numbers.intOrNull(text(parent, tag));
     }
 
     private static Integer intOfChild(org.w3c.dom.Element parent, String container, String tag) {
-        return parseInt(textChild(parent, container, tag));
+        return Numbers.intOrNull(textChild(parent, container, tag));
     }
 
     private static Double doubleOf(org.w3c.dom.Element parent, String tag) {
-        String v = text(parent, tag);
-        if (v == null || v.isBlank()) {
-            return null;
-        }
-        try {
-            return Double.valueOf(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private static Integer parseInt(String v) {
-        if (v == null || v.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return Numbers.doubleOrNull(text(parent, tag));
     }
 
     /** 记录事件时间（供日志与状态日志使用）。 */

@@ -8,6 +8,7 @@ import io.github.rurulalanana.gb28181.sip.event.RegisterEvent;
 import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.starter.common.CharsetFix;
+import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
@@ -955,15 +956,7 @@ public class DeviceService {
     }
 
     private static Double firstDouble(ManscdpMessage msg, String tag) {
-        String v = msg.firstText(tag);
-        if (v == null || v.isBlank()) {
-            return null;
-        }
-        try {
-            return Double.valueOf(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return Numbers.doubleOrNull(msg.firstText(tag));
     }
 
     // ==================== 内部：MANSCDP 取值 ====================
@@ -979,14 +972,9 @@ public class DeviceService {
 
     private static void applyDouble(ManscdpMessage msg, String tag,
                                     java.util.function.Consumer<Double> setter) {
-        String v = msg.firstText(tag);
-        if (v == null || v.isBlank()) {
-            return;
-        }
-        try {
-            setter.accept(Double.valueOf(v));
-        } catch (NumberFormatException ignore) {
-            // 设备上报的坐标非数值，忽略
+        Double v = Numbers.doubleOrNull(msg.firstText(tag));
+        if (v != null) {
+            setter.accept(v);
         }
     }
 

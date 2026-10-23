@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.StringUtils;
 
 /**
  * 装配 GB28181 流媒体平台（信令 + 媒体）。
@@ -36,14 +37,13 @@ public class Gb28181PlatformConfiguration {
                 .autoRecord(props.isAutoRecord())
                 .recordMaxSecond(props.getRecordMaxSecond())
                 .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())
-                .recordRoot(isBlank(props.getRecordRoot())
-                        ? System.getProperty("user.dir") + "/record" : props.getRecordRoot());
+                .recordRoot(props.resolvedRecordRoot());
         // 注意：Lombok @Builder.Default 只在"未显式赋值"时生效，
         // 这里配置为空时不能传 null，否则 mediaIp 会变成 null（SDP 里写成 IN IP4 null）
-        if (!isBlank(props.getMediaIp())) {
+        if (StringUtils.hasText(props.getMediaIp())) {
             builder.mediaIp(props.getMediaIp());
         }
-        if (!isBlank(props.getRtcExternIp())) {
+        if (StringUtils.hasText(props.getRtcExternIp())) {
             builder.rtcExternIp(props.getRtcExternIp());
         }
         MediaServerProperties mediaProps = builder.build();
@@ -57,9 +57,5 @@ public class Gb28181PlatformConfiguration {
                 platform.mediaServer().isSinglePortMode()
                         ? ("单端口:" + platform.mediaServer().getSinglePort()) : "每通道独占端口");
         return platform;
-    }
-
-    private static boolean isBlank(String s) {
-        return s == null || s.trim().isEmpty();
     }
 }

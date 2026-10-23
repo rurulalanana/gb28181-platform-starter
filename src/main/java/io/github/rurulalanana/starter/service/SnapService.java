@@ -45,11 +45,7 @@ public class SnapService {
 
     /** 快照根目录。 */
     private Path root() {
-        String base = props.getRecordRoot();
-        if (base == null || base.isBlank()) {
-            base = System.getProperty("user.dir") + "/record";
-        }
-        return Path.of(base, SUBDIR);
+        return Path.of(props.resolvedRecordRoot(), SUBDIR);
     }
 
     /**

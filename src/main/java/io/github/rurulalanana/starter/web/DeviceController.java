@@ -3,12 +3,14 @@ package io.github.rurulalanana.starter.web;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.StreamIndex;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.common.TreeBuilder;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.dto.ChannelListQuery;
 import io.github.rurulalanana.starter.dto.DeviceListQuery;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import io.github.rurulalanana.starter.entity.GbDeviceGroup;
@@ -45,9 +47,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -86,9 +88,6 @@ public class DeviceController {
     private final ChannelRecordPolicy recordPolicy;
     private final GbDeviceGroupMapper groupMapper;
     private final Gb28181Properties props;
-
-    /** 列表时间字段统一格式。 */
-    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // ==================== 设备 ====================
 
@@ -210,7 +209,7 @@ public class DeviceController {
             }
         }
         TreeVo vo = new TreeVo();
-        vo.setNodeList(limit > 0 ? slice(nodes, start, limit) : nodes);
+        vo.setNodeList(limit > 0 ? PageQuery.slice(nodes, start, limit) : nodes);
         return ApiResponse.ok(vo);
     }
 
@@ -258,7 +257,7 @@ public class DeviceController {
         }
         PositionLogListVo vo = new PositionLogListVo();
         vo.setLogCount(list.size());
-        vo.setLogList(limit > 0 ? slice(list, start, limit) : list);
+        vo.setLogList(limit > 0 ? PageQuery.slice(list, start, limit) : list);
         return ApiResponse.ok(vo);
     }
 
@@ -408,7 +407,7 @@ public class DeviceController {
         StatusLogListVo vo = new StatusLogListVo();
         vo.setLogCount(list.size());
         vo.setLogReserveDays(30);
-        vo.setLogList(limit > 0 ? slice(list, start, limit) : list);
+        vo.setLogList(limit > 0 ? PageQuery.slice(list, start, limit) : list);
         return ApiResponse.ok(vo);
     }
 
@@ -442,7 +441,7 @@ public class DeviceController {
             throw BizException.notFound("设备不存在：" + serial);
         }
         device.setCustomName(customName);
-        device.setUpdateTime(java.time.LocalDateTime.now());
+        device.setUpdateTime(LocalDateTime.now());
         deviceService.updateDevice(device);
         return ApiResponse.ok();
     }
@@ -543,9 +542,9 @@ public class DeviceController {
             case "Firmware" -> channel.setFirmware(value);
             case "SerialNumber" -> channel.setSerialNumber(value);
             case "IPAddress" -> channel.setIpAddress(value);
-            case "Port" -> channel.setPort(parseInt(value));
-            case "Longitude" -> channel.setLongitude(parseDecimal(value));
-            case "Latitude" -> channel.setLatitude(parseDecimal(value));
+            case "Port" -> channel.setPort(Numbers.intOrNull(value));
+            case "Longitude" -> channel.setLongitude(Numbers.decimalOrNull(value));
+            case "Latitude" -> channel.setLatitude(Numbers.decimalOrNull(value));
             default -> throw BizException.badRequest("不支持的属性名：" + key);
         }
         deviceService.updateChannel(channel);
@@ -704,7 +703,7 @@ public class DeviceController {
         // 写进 BOGUS 之类脏值后该设备后续所有点播都会协商失败，
         // 而界面上只表现为「点播不出画面」，排查成本极高。
         applyMediaTransport(device, mediaTransport, mode);
-        device.setUpdateTime(java.time.LocalDateTime.now());
+        device.setUpdateTime(LocalDateTime.now());
         deviceService.updateDevice(device);
         return ApiResponse.ok();
     }
@@ -800,7 +799,7 @@ public class DeviceController {
         if (password != null) {
             device.setPassword(password);
         }
-        device.setUpdateTime(java.time.LocalDateTime.now());
+        device.setUpdateTime(LocalDateTime.now());
         deviceService.updateDevice(device);
         return ApiResponse.ok();
     }
@@ -823,7 +822,7 @@ public class DeviceController {
             throw BizException.notFound("设备不存在：" + serial);
         }
         device.setPassword(password == null || password.isBlank() ? null : password);
-        device.setUpdateTime(java.time.LocalDateTime.now());
+        device.setUpdateTime(LocalDateTime.now());
         deviceService.updateDevice(device);
         SetPasswordVo vo = new SetPasswordVo();
         vo.setDeviceId(serial);
@@ -914,19 +913,19 @@ public class DeviceController {
         if (query.getShared() != null && !query.getShared().equals(Boolean.TRUE.equals(c.getShared()))) {
             return false;
         }
-        if (notBlank(query.getSerial()) && !contains(query.getSerial(), c.getDeviceId())) {
+        if (StringUtils.hasText(query.getSerial()) && !contains(query.getSerial(), c.getDeviceId())) {
             return false;
         }
-        if (notBlank(query.getCode()) && !contains(query.getCode(), c.getChannelId())) {
+        if (StringUtils.hasText(query.getCode()) && !contains(query.getCode(), c.getChannelId())) {
             return false;
         }
-        if (notBlank(query.getCivilcode()) && !query.getCivilcode().equals(c.getCivilCode())) {
+        if (StringUtils.hasText(query.getCivilcode()) && !query.getCivilcode().equals(c.getCivilCode())) {
             return false;
         }
-        if (notBlank(query.getBlock()) && !query.getBlock().equals(c.getBlock())) {
+        if (StringUtils.hasText(query.getBlock()) && !query.getBlock().equals(c.getBlock())) {
             return false;
         }
-        if (notBlank(query.getDirSerial()) && !query.getDirSerial().equals(c.getParentId())) {
+        if (StringUtils.hasText(query.getDirSerial()) && !query.getDirSerial().equals(c.getParentId())) {
             return false;
         }
         if ("dir".equalsIgnoreCase(query.getChannelType())
@@ -1052,8 +1051,8 @@ public class DeviceController {
         vo.setSubCount(0);
         vo.setStreamId(c.getStreamId());
         vo.setNumOutputs(c.getStreamId() == null ? 0 : 1);
-        vo.setUpdatedAt(formatTime(c.getUpdateTime()));
-        vo.setCreatedAt(formatTime(c.getCreateTime()));
+        vo.setUpdatedAt(TimeFormats.toDisplay(c.getUpdateTime()));
+        vo.setCreatedAt(TimeFormats.toDisplay(c.getCreateTime()));
         // 正在直播时附带播放地址，前端可直接取用
         if (c.getStreamId() != null && !c.getStreamId().isBlank()) {
             // 用 (设备编码, 通道编码) 精确定位：通道编码跨设备可重复
@@ -1070,11 +1069,6 @@ public class DeviceController {
         return vo;
     }
 
-    /** 时间格式化，null 安全。 */
-    private static String formatTime(LocalDateTime time) {
-        return time == null ? null : TIME_FORMATTER.format(time);
-    }
-
     private List<TreeNodeVo> buildGroupLevel(String parentCode,
                                              Map<String, List<GbDeviceGroup>> byParent,
                                              boolean subfetch) {
@@ -1085,31 +1079,5 @@ public class DeviceController {
             out.add(TreeBuilder.groupNode(g.getGroupCode(), g.getGroupName(), children));
         }
         return out;
-    }
-
-    private static <T> List<T> slice(List<T> all, int start, int limit) {
-        int from = Math.min(Math.max(0, start), all.size());
-        int to = Math.min(from + Math.max(0, limit), all.size());
-        return all.subList(from, to);
-    }
-
-    private static boolean notBlank(String v) {
-        return v != null && !v.isBlank();
-    }
-
-    private static Integer parseInt(String v) {
-        try {
-            return v == null || v.isBlank() ? null : Integer.valueOf(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private static java.math.BigDecimal parseDecimal(String v) {
-        try {
-            return v == null || v.isBlank() ? null : new java.math.BigDecimal(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
     }
 }

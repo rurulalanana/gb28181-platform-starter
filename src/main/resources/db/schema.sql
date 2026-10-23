@@ -344,19 +344,6 @@ CREATE TABLE IF NOT EXISTS gb_device_group (
     UNIQUE (group_code)
 );
 
--- -------------------- 流量统计 --------------------
-
-CREATE TABLE IF NOT EXISTS gb_traffic_log (
-    id         BIGSERIAL PRIMARY KEY,
-    device_id  VARCHAR(20),
-    channel_id VARCHAR(20),
-    bytes_up   BIGINT  DEFAULT 0,
-    bytes_down BIGINT  DEFAULT 0,
-    stat_date  DATE    DEFAULT CURRENT_DATE,
-    stat_time  TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_gb_traffic_device ON gb_traffic_log (device_id, stat_time DESC);
-
 -- -------------------- 运行时配置（可在界面上改，无需重启） --------------------
 --
 -- 语义：<b>数据库优先，application.yml 兜底</b>。
@@ -774,16 +761,6 @@ COMMENT ON COLUMN gb_device_group.group_name  IS '分组名称';
 COMMENT ON COLUMN gb_device_group.parent_code IS '上级分组编码，空表示根分组';
 COMMENT ON COLUMN gb_device_group.sort_no     IS '同级排序号';
 COMMENT ON COLUMN gb_device_group.create_time IS '创建时间';
-
--- -------------------- gb_traffic_log --------------------
-COMMENT ON TABLE  gb_traffic_log IS '流量统计：按设备/通道按天汇总';
-COMMENT ON COLUMN gb_traffic_log.id         IS '自增主键';
-COMMENT ON COLUMN gb_traffic_log.device_id  IS '设备国标编码';
-COMMENT ON COLUMN gb_traffic_log.channel_id IS '通道国标编码';
-COMMENT ON COLUMN gb_traffic_log.bytes_up   IS '上行字节数';
-COMMENT ON COLUMN gb_traffic_log.bytes_down IS '下行字节数';
-COMMENT ON COLUMN gb_traffic_log.stat_date  IS '统计日期';
-COMMENT ON COLUMN gb_traffic_log.stat_time  IS '统计时刻';
 
 -- -------------------- gb_status_log --------------------
 COMMENT ON TABLE  gb_status_log IS '状态变更日志：设备/通道上下线记录';

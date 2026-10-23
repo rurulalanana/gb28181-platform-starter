@@ -116,8 +116,6 @@ const tableRef = ref(null)
 useFillTableRows(tableRef, () => rows.value.length)
 const loading = ref(false)
 const query = reactive({ method: '', keyword: '', dateRange: null })
-/** 保留天数（与后端 gb28181.starter.oplog-retain-days 对应，仅用于页面提示）。 */
-const retainDays = 7
 
 const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
   pageSize: 10,

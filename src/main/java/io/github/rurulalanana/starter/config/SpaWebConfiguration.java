@@ -114,20 +114,9 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         }
     }
 
-    /**
-     * 解析录像根目录。
-     *
-     * <p>与 {@code Gb28181PlatformConfiguration} 保持一致：配置为空时
-     * 用「工作目录 + /record」。
-     *
-     * @return 录像根目录（绝对路径）
-     */
+    /** 解析录像根目录（绝对路径）。 */
     private Path resolveRecordRoot() {
-        String root = props.getRecordRoot();
-        Path p = (root == null || root.isBlank())
-                ? Path.of(System.getProperty("user.dir"), "record")
-                : Path.of(root);
-        return p.toAbsolutePath().normalize();
+        return Path.of(props.resolvedRecordRoot()).toAbsolutePath().normalize();
     }
 
     /**

@@ -61,12 +61,6 @@ const form = reactive({ username: 'admin', password: '' })
 const loading = ref(false)
 const error = ref('')
 
-const features = [
-  { icon: 'Connection', title: '国标信令', desc: 'REGISTER / INVITE / Catalog 全流程' },
-  { icon: 'VideoCamera', title: '流媒体内核', desc: 'ZLMediaKit 内嵌，多协议转码分发' },
-  { icon: 'Share', title: '级联共享', desc: '上下级平台互联互通' }
-]
-
 async function onSubmit() {
   if (!form.username || !form.password) {
     error.value = '请输入用户名和密码'

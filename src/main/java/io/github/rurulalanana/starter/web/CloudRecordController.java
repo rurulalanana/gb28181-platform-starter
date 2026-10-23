@@ -6,6 +6,7 @@ import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbRecord;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.RecordService;
 import io.github.rurulalanana.starter.service.ShareTokenService;
@@ -122,7 +123,7 @@ public class CloudRecordController {
         }
         CloudChannelListVo vo = new CloudChannelListVo();
         vo.setTotal(rows.size());
-        vo.setRows(limit > 0 ? slice(rows, start, limit) : rows);
+        vo.setRows(limit > 0 ? PageQuery.slice(rows, start, limit) : rows);
         return ApiResponse.ok(vo);
     }
 
@@ -591,12 +592,6 @@ public class CloudRecordController {
             item.setDownloadUrl(playUrl != null ? playUrl : recordService.downloadUrl(r));
         }
         return item;
-    }
-
-    private static <T> List<T> slice(List<T> all, int start, int limit) {
-        int from = Math.min(Math.max(0, start), all.size());
-        int to = Math.min(from + Math.max(0, limit), all.size());
-        return all.subList(from, to);
     }
 
     // ==================== 通道快照 ====================

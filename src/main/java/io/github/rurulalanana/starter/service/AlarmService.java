@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.github.rurulalanana.gb28181.sip.event.ManscdpEvent;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbAlarm;
 import io.github.rurulalanana.starter.mapper.GbAlarmMapper;
@@ -12,8 +13,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -64,8 +65,8 @@ public class AlarmService {
         LocalDateTime time = TimeFormats.parse(msg.firstText("AlarmTime"));
         alarm.setStartTime(time == null ? LocalDateTime.now() : time);
         alarm.setState(STATE_ACTIVE);
-        alarm.setLongitude(parseDecimal(msg.firstText("Longitude")));
-        alarm.setLatitude(parseDecimal(msg.firstText("Latitude")));
+        alarm.setLongitude(Numbers.decimalOrNull(msg.firstText("Longitude")));
+        alarm.setLatitude(Numbers.decimalOrNull(msg.firstText("Latitude")));
         alarm.setCreateTime(LocalDateTime.now());
         alarmMapper.insert(alarm);
         log.info("收到报警: device={} channel={} priority={} method={} type={}",
@@ -99,8 +100,8 @@ public class AlarmService {
     public List<GbAlarm> list(String serial, String code, String startTime, String endTime,
                               Integer priority, Integer method) {
         LambdaQueryWrapper<GbAlarm> q = Wrappers.<GbAlarm>lambdaQuery()
-                .eq(notBlank(serial), GbAlarm::getDeviceId, serial)
-                .eq(notBlank(code), GbAlarm::getChannelId, code)
+                .eq(StringUtils.hasText(serial), GbAlarm::getDeviceId, serial)
+                .eq(StringUtils.hasText(code), GbAlarm::getChannelId, code)
                 .eq(priority != null, GbAlarm::getPriority, priority)
                 .eq(method != null, GbAlarm::getMethod, method);
         LocalDateTime from = TimeFormats.parse(startTime);
@@ -116,7 +117,7 @@ public class AlarmService {
 
     /** 单条报警详情。 */
     public GbAlarm find(String alarmId) {
-        if (!notBlank(alarmId)) {
+        if (!StringUtils.hasText(alarmId)) {
             throw BizException.badRequest("缺少报警 ID");
         }
         return alarmMapper.selectOne(Wrappers.<GbAlarm>lambdaQuery()
@@ -126,7 +127,7 @@ public class AlarmService {
     /** 删除报警（支持逗号分隔的多个 ID）。 */
     @Transactional
     public int remove(String ids) {
-        if (!notBlank(ids)) {
+        if (!StringUtils.hasText(ids)) {
             throw BizException.badRequest("缺少报警 ID");
         }
         List<String> list = java.util.Arrays.stream(ids.split(","))
@@ -135,8 +136,6 @@ public class AlarmService {
                 .in(GbAlarm::getAlarmId, list));
     }
 
-    /** 清空全部报警。 */
-    @Transactional
     /**
      * 清空全部报警。
      *
@@ -147,6 +146,7 @@ public class AlarmService {
      * 这里用一个永真的 id 条件代替，既绕开拦截器语义（仍然明确指定了范围），
      * 也能走索引。
      */
+    @Transactional
     public int clear() {
         return alarmMapper.delete(Wrappers.<GbAlarm>lambdaQuery().gt(GbAlarm::getId, 0));
     }
@@ -222,21 +222,6 @@ public class AlarmService {
             };
         }
         return "报警类型 " + type;
-    }
-
-    private static BigDecimal parseDecimal(String v) {
-        if (v == null || v.isBlank()) {
-            return null;
-        }
-        try {
-            return new BigDecimal(v.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private static boolean notBlank(String v) {
-        return v != null && !v.isBlank();
     }
 
     /** 便捷：从事件取报警并落库。 */

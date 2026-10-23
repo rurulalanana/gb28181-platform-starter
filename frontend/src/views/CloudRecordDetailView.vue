@@ -26,7 +26,7 @@
         <el-button size="small" :disabled="!playingRecord" @click="shareCurrent">
           <el-icon><Share /></el-icon> 分享页
         </el-button>
-        <el-button size="small" :disabled="!canDownload(playingRecord)" @click="downloadCurrent">
+        <el-button size="small" :disabled="!canDownloadRecord(playingRecord)" @click="downloadCurrent">
           <el-icon><Download /></el-icon> 下载
         </el-button>
         <span class="filter-bar-spacer" />
@@ -45,10 +45,10 @@
           value-format="YYYY-MM-DD"
           class="date-picker"
           :clearable="false"
-          :disabled-date="isDisabledDate"
+          :disabled-date="cellDisabled"
         >
           <template #default="cell">
-            <div class="cal-cell" :class="{ 'has-record': isRecordDay(cell) }">
+            <div class="cal-cell" :class="{ 'has-record': cellHasRecord(cell) }">
               {{ cell.text }}
             </div>
           </template>
@@ -87,13 +87,13 @@
         </div>
 
         <div v-if="playingRecord" class="player-bar">
-          <span class="mono">{{ fmtTs(playingRecord.startAt) }}</span>
+          <span class="mono">{{ fmtCompactTs(playingRecord.startAt) }}</span>
           <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
           <span class="filter-bar-spacer" />
           <el-button size="small" type="danger" plain @click="stopPlay">
             <el-icon><SwitchButton /></el-icon> 停止点播
           </el-button>
-          <el-button size="small" :disabled="!canDownload(playingRecord)" @click="download(playingRecord)">
+          <el-button size="small" :disabled="!canDownloadRecord(playingRecord)" @click="download(playingRecord)">
             <el-icon><Download /></el-icon> 下载本段
           </el-button>
           <el-button size="small" type="danger" plain :disabled="!records.length" @click="removeDaily">
@@ -159,19 +159,22 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { useRecordPlayer } from '@/composables/useRecordPlayer'
-import { downloadFile, recordFileName } from '@/utils/download'
+import {
+  canDownloadRecord,
+  downloadRecord,
+  fmtCompactTs,
+  formatSize,
+  isDisabledDate,
+  isRecordDay,
+  parseCompactTs,
+  recordDaysOf,
+  todayString,
+  uploadColor,
+  uploadText
+} from '@/utils/cloudRecord'
 
 const route = useRoute()
 const router = useRouter()
-
-/**
- * 原生播放判成功的门槛：{@code currentTime} 至少要推进这么多秒。
- *
- * <p>只等 {@code loadedmetadata} 不够 —— 那只说明索引读到了，
- * 坏码流要等解码器真正出帧才暴露（实测坏录像在 {@code t=0.03} 就报错）。
- *
- * <p>判据本身在 {@code useRecordPlayer} 里，这里只留注释说明为什么不看元数据。
- */
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
@@ -185,76 +188,13 @@ const channelName = ref('')
 const loadingDaily = ref(false)
 
 /**
- * 本月有录像的日期（只保留有录像的天，31 个空按钮太吵）。
+ * 日期格子是否「有录像」/ 是否禁用（判据见 {@code utils/cloudRecord.js}）。
  *
- * <p>现在这行按钮已被日历组件取代 —— 这些标记用于在日期选择器的
- * 面板里高亮「有录像」的日期格（见模板里的 #default 槽）。
+ * <p>日历面板逐格调用（28~42 次），所以用 Set 而不是数组 {@code includes}。
  */
-const recordDays = computed(() =>
-  monthFlags.value
-    .split('')
-    .map((flag, idx) => (flag === '1' ? idx + 1 : 0))
-    .filter(Boolean)
-)
-
-/**
- * 判断某个日期是否在「有录像」的月份里。
- *
- * <p>日历面板逐格调用（28~42 次），所以用 Set 而不是数组 includes。
- *
- * <p>Element 的日期格子对象结构（见 element-plus 的 use-basic-date-table）：
- * <ul>
- *   <li>{@code text}   —— 日号</li>
- *   <li>{@code dayjs}  —— dayjs 日期对象</li>
- *   <li>{@code type}   —— normal / prev / next（prev/next 是相邻月的日期）</li>
- * </ul>
- * 用 dayjs 取完整日期再比对，prev/next 的格子自然不会误高亮。
- *
- * @param cell 日期格子对象
- */
-const recordDaySet = computed(() => new Set(recordDays.value))
-
-function isRecordDay(cell) {
-  if (!cell) return false
-  let dateStr = ''
-  if (cell.dayjs && typeof cell.dayjs.format === 'function') {
-    dateStr = cell.dayjs.format('YYYY-MM-DD')
-  } else if (typeof cell === 'string') {
-    dateStr = cell
-  } else if (cell.value) {
-    dateStr = String(cell.value)
-  }
-  if (!dateStr) return false
-  // 标记只对已加载的那个月有效；面板翻到别的月就不高亮
-  if (dateStr.slice(0, 7) !== flagsMonth.value) return false
-  return recordDaySet.value.has(Number(dateStr.slice(8, 10)))
-}
-
-/**
- * 日历里禁用「没有录像」的日期。
- *
- * <p>Element 的 date-picker 会用这个函数决定某天能否选中：
- * 返回 true = 禁用（灰掉、点不动）。
- *
- * <p>判据：当天不在「本月有录像」的标记里，且不是今天之前（历史月份没数据）。
- * 实际上更严格的判据是「该日有录像」，但我们只加载了当前月的标记，
- * 所以：
- * <ul>
- *   <li>当前月：按标记判（有录像才可选）；</li>
- *   <li>其它月份：标记未知，一律不禁用（让用户能翻月去看）。</li>
- * </ul>
- *
- * @param date 日期（Element 传 Date 对象）
- */
-function isDisabledDate(date) {
-  if (!date) return false
-  const d = date instanceof Date ? date : new Date(date)
-  if (Number.isNaN(d.getTime())) return false
-  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-  // 只对已加载标记的那个月做判定
-  if (ym !== flagsMonth.value) return false
-  return !recordDaySet.value.has(d.getDate())
-}
+const recordDaySet = computed(() => new Set(recordDaysOf(monthFlags.value)))
+const cellHasRecord = (cell) => isRecordDay(cell, flagsMonth.value, recordDaySet.value)
+const cellDisabled = (date) => isDisabledDate(date, flagsMonth.value, recordDaySet.value)
 
 /** 跳到列表视图（独立页面，对齐 LiveGBS 的 #/cloudrecord/listview/...）。 */
 function goListView() {
@@ -281,9 +221,7 @@ watch(period, async (value, old) => {
   await loadDaily()
 })
 
-/** 视图模式：timeline=时间轴视图，list=列表视图。 */
-const viewMode = ref('timeline')
-
+/** 播放中的录像（底栏展示用）。 */
 const playingRecord = ref(null)
 
 /** 播放状态（展示用，直接映射播放器状态）。 */
@@ -355,12 +293,6 @@ function playNext() {
   }, 0)
 }
 
-function todayString() {
-  const d = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
 /* ==================== 时间轴 ==================== */
 
 const nowPercent = ref(null)
@@ -377,15 +309,6 @@ function updateNow() {
     nowPercent.value = null
     nowText.value = ''
   }
-}
-
-function parseCompactTs(v) {
-  const t = String(v || '').trim()
-  if (!/^\d{14}$/.test(t)) return null
-  return new Date(
-    +t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8),
-    +t.slice(8, 10), +t.slice(10, 12), +t.slice(12, 14)
-  )
 }
 
 const timelineSegments = computed(() => {
@@ -411,8 +334,8 @@ const timelineSegments = computed(() => {
 
 function segTitle(seg) {
   const r = seg.record
-  const bits = [fmtTs(r.startAt)]
-  if (r.endTime) bits.push('至 ' + fmtTs(r.endTime))
+  const bits = [fmtCompactTs(r.startAt)]
+  if (r.endTime) bits.push('至 ' + fmtCompactTs(r.endTime))
   if (r.duration != null) bits.push(r.duration + ' 秒')
   if (r.fileSize) bits.push(formatSize(r.fileSize))
   // 录制中的段不能播（见 play），提示里说清楚，别让用户反复点
@@ -439,37 +362,7 @@ const timelineSummary = computed(() => {
 
 /* ==================== 数据加载 ==================== */
 
-function fmtTs(v) {
-  if (!v) return '—'
-  const t = String(v).trim()
-  if (t.length !== 14 || !/^\d{14}$/.test(t)) return t
-  return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)} ${t.slice(8, 10)}:${t.slice(10, 12)}:${t.slice(12, 14)}`
-}
-
-function formatSize(size) {
-  if (!size) return '—'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let n = size
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
-}
-
-const UPLOAD_TEXT = { NONE: '无需上传', PENDING: '待上传', UPLOADED: '已上传', FAILED: '上传失败' }
-
-function uploadText(state) {
-  return UPLOAD_TEXT[state] || '—'
-}
-
-function uploadColor(state) {
-  if (state === 'UPLOADED') return 'success'
-  if (state === 'PENDING') return 'warning'
-  if (state === 'FAILED') return 'danger'
-  return 'info'
-}
+/* fmtCompactTs / formatSize / uploadText / uploadColor 见 utils/cloudRecord.js */
 
 async function loadDaily() {
   if (!serial.value || !code.value) {
@@ -511,10 +404,6 @@ const loadedMonth = ref('')
 
 /** 当前 monthFlags 对应的月份（YYYY-MM），日历高亮时比对用。 */
 const flagsMonth = ref('')
-
-function onViewChange() {
-  // 两种视图共用同一份数据，无需重新请求
-}
 
 function goBack() {
   router.push('/cloud')
@@ -593,38 +482,15 @@ function stopPlay() {
 }
 
 /**
- * 能不能下载这段录像。
+ * 下载一段录像（判据与动作统一在 {@code utils/cloudRecord.js}，与列表页共用）。
  *
- * <p>两个条件：
- * <ul>
- *   <li>{@code downloadUrl} 非空 —— 后端在文件不存在时不会回填；</li>
- *   <li>不在录制中 —— 文件还在增长，下到一半的残缺文件对用户没意义
- *       （和列表页的判据保持一致）。</li>
- * </ul>
- *
- * @param {object|null} record
- * @returns {boolean}
- */
-function canDownload(record) {
-  return !!record && !!record.downloadUrl && !record.recording
-}
-
-/**
- * 下载一段录像。
- *
- * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径
- * （{@code /record/...}，由 nginx sendfile 提供），所以只要丢给
- * {@link downloadFile} 让浏览器原生下载即可 —— 有进度、能续传、不占内存。
- *
- * <p>对象存储的地址是跨域的签名 URL，交给 {@code downloadFile} 新开窗口，
- * 由服务端 {@code Content-Disposition} 决定文件名。
+ * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径，交给
+ * {@code downloadFile} 让浏览器原生下载即可 —— 有进度、能续传、不占内存。
+ * 对象存储的地址是跨域的签名 URL，会新开窗口，由服务端的
+ * {@code Content-Disposition} 决定文件名。
  */
 function download(record) {
-  if (!canDownload(record)) {
-    ElMessage.warning('该录像暂不可下载（可能仍在录制或文件已丢失）')
-    return
-  }
-  downloadFile(record.downloadUrl, recordFileName(record, channelName.value))
+  downloadRecord(record, channelName.value)
 }
 
 /** 工具条上的「下载」：下载当前正在点播的那一段。 */
@@ -675,7 +541,7 @@ async function toggleImportant(record) {
 async function removeOne(record) {
   try {
     await ElMessageBox.confirm(
-      `确定删除该录像（${fmtTs(record.startAt)}）？文件将同时删除。`,
+      `确定删除该录像（${fmtCompactTs(record.startAt)}）？文件将同时删除。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )

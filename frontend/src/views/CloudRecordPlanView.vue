@@ -227,7 +227,11 @@
       </div>
       <div class="pick-hint">
         提示：可按住鼠标拖动连续勾选；点「全选本页」选中当前列表全部通道。
-        已关联到计划的通道，其云端录像开关<b>由计划决定</b>（时段内开、时段外关）。
+        <br />
+        <b>录制规则</b>：通道在「通道管理」里<b>手动开启</b>云端录像 → <b>全天录制</b>，
+        完全忽略本计划；<b>手动关闭</b> → 按本计划时段录制。
+        计划<b>不会改动</b>通道的「云端录像 / 按需直播」开关，那两个开关始终由你决定。
+        多个计划包含同一通道时取<b>并集</b>，任一时段命中即录制。
       </div>
       <template #footer>
         <el-button @click="chanDialog = false">取消</el-button>
@@ -239,14 +243,13 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
-const route = useRoute()
 const router = useRouter()
 
 const rows = ref([])
@@ -583,9 +586,10 @@ async function doSave() {
     const todayLabel = DAYS[todayIndex.value]?.label || '今天'
     try {
       await ElMessageBox.confirm(
-        `该计划没有覆盖「今天（${todayLabel}）」，保存后今天不会自动录像。\n\n` +
+        `该计划没有覆盖「今天（${todayLabel}）」，今天不会因本计划自动录像。\n\n` +
+        '（若该通道已在通道管理里手动开启云端录像，则不受影响，仍会录制。）\n\n' +
         '如果只想在其它星期录，可以继续保存；如果搞错了行，请点「取消」回去调整。',
-        '今天不会录像',
+        '今天不会自动录像',
         { type: 'warning', confirmButtonText: '仍然保存', cancelButtonText: '回去调整' }
       )
     } catch (e) {

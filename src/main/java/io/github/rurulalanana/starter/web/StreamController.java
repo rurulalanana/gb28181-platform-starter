@@ -7,6 +7,7 @@ import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.dto.StreamStartRequest;
 import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.service.RecordService;
@@ -133,7 +134,7 @@ public class StreamController {
         }
         StreamListVo vo = new StreamListVo();
         vo.setStreamCount(filtered.size());
-        vo.setStreams(limit > 0 ? slice(filtered, start, limit) : filtered);
+        vo.setStreams(limit > 0 ? PageQuery.slice(filtered, start, limit) : filtered);
         return ApiResponse.ok(vo);
     }
 
@@ -281,11 +282,5 @@ public class StreamController {
         vo.setRtmp(stream.getRtmp());
         vo.setStartAt(TimeFormats.toDisplay(stream.getStartTime()));
         return vo;
-    }
-
-    private static <T> List<T> slice(List<T> all, int start, int limit) {
-        int from = Math.min(Math.max(0, start), all.size());
-        int to = Math.min(from + Math.max(0, limit), all.size());
-        return all.subList(from, to);
     }
 }

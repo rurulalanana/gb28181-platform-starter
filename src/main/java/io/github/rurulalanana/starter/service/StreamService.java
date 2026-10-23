@@ -47,6 +47,15 @@ public class StreamService {
     private final DeviceService deviceService;
     private final SipRegistryHealer registryHealer;
 
+    /**
+     * 「此刻是否应该录」的权威判定（用户开关 ∪ 录像计划）。
+     *
+     * <p>空闲流回收必须用它而不是直接读 {@code gb_channel.cloud_record}：
+     * 录像计划不再写库，只读库会看不到计划生效的通道，导致计划刚开录、
+     * 流就被当成「无读者」回收掉。
+     */
+    private final ChannelRecordPolicy recordPolicy;
+
     // ==================== 点播 ====================
 
     /**
@@ -709,16 +718,21 @@ public class StreamService {
     }
 
     /**
-     * 找出「要求流常开」的通道编码集合。
+     * 找出「要求流常开、不能被空闲回收」的通道编码集合。
      *
-     * <p>两种通道必须常开：
+     * <p>两类通道必须常开：
      * <ol>
-     *   <li><b>开了云端录像</b>（{@code cloud_record=true}）——「平台持续把这段
-     *       录像存下来」的前提就是有流。虽然 ZLM 侧 {@code protocol.mp4_as_player=1}
-     *       让录制器算作「读者」，但录制尚未开始的那一瞬间读者数仍是 0，
-     *       存在被误关的竞态；</li>
-     *   <li><b>显式设置常开</b>（{@code on_demand=false}）—— 用户的明确意图。</li>
+     *   <li><b>此刻应该录云端录像</b> —— 用户手动开关 <b>或</b> 录像计划生效，
+     *       判定统一走 {@link ChannelRecordPolicy#enabledChannels()}。
+     *       虽然 ZLM 侧 {@code protocol.mp4_as_player=1} 让录制器算作「读者」，
+     *       但录制尚未开始的那一瞬间读者数仍是 0，存在被误关的竞态；</li>
+     *   <li><b>用户显式设置常开</b>（{@code on_demand=false}）—— 用户的明确意图。</li>
      * </ol>
+     *
+     * <p><b>为什么录像判定要走 recordPolicy 而不是直接读 {@code cloud_record}</b>：
+     * 录像计划不再写数据库（见 {@link ChannelRecordPolicy} 的说明），
+     * 只读库会看不到计划生效的通道 —— 于是计划刚开录、流就因「无读者」被回收，
+     * 表现为「计划里配了却录不起来」。
      *
      * <p>返回 {@code Set} 而不是逐个查：本方法被空闲流巡检每 20 秒调用一次，
      * 一次全量查库（几千行以内）远优于循环里 N 次单条查询。
@@ -729,13 +743,16 @@ public class StreamService {
     private java.util.Set<String> channelsRequiringStream() {
         try {
             java.util.Set<String> out = new java.util.HashSet<>();
+            // 1. 应录通道（用户开关 ∪ 录像计划，纯内存，不查库）
+            if (recordPolicy != null && recordPolicy.isLoaded()) {
+                out.addAll(recordPolicy.enabledChannels());
+            }
+            // 2. 用户显式设成常开的通道（读库）
             for (GbChannel ch : deviceService.allChannels()) {
                 if (ch.getChannelId() == null) {
                     continue;
                 }
-                boolean record = Boolean.TRUE.equals(ch.getCloudRecord());
-                boolean pinnedOpen = Boolean.FALSE.equals(ch.getOnDemand());
-                if (record || pinnedOpen) {
+                if (Boolean.FALSE.equals(ch.getOnDemand())) {
                     out.add(ch.getChannelId());
                 }
             }

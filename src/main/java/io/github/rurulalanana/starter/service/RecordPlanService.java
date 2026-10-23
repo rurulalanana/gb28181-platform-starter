@@ -173,31 +173,44 @@ public class RecordPlanService {
     /**
      * 计划执行结果快照（供定时任务决策）。
      *
-     * @param active   此刻<b>应在录制</b>的通道编码集合
+     * @param active   此刻<b>应在录制</b>的通道编码集合（多个计划的并集）
      * @param governed 被任一启用计划<b>覆盖</b>的通道编码集合（含此刻不该录的）
      */
     public record PlanScope(Set<String> active, Set<String> governed) {
-        /** 被计划覆盖、但此刻不该录的通道。 */
-        public Set<String> shouldStop() {
-            Set<String> out = new HashSet<>(governed);
-            out.removeAll(active);
-            return out;
-        }
     }
 
     /**
-     * 计算此刻的计划执行范围。
+     * 计算此刻「计划判定应录」的通道集合。
      *
      * <p><b>为什么需要它</b>：本类原先只提供 CRUD，<b>没有任何地方真正执行计划</b>——
      * 用户在界面上配好时段、关联通道后什么都不会发生。这是功能缺失，不是配置问题。
      *
-     * <p><b>语义：计划对覆盖的通道有完全控制权</b>（与 LiveGBS 一致）：
+     * <h3>语义：只产出一个信号，不控制用户配置</h3>
+     *
+     * <p>返回值只表示「此刻按时间表应该录」，<b>不表示「要把通道开关改成什么」</b>。
+     * 调用方（{@code PlatformScheduler#applyRecordPlans}）只把它写进内存
+     * （{@code ChannelRecordPolicy#replacePlanActive}），
+     * <b>不写数据库、不改 {@code cloud_record}、不改 {@code on_demand}</b>。
+     *
+     * <h3>与用户手动开关的关系</h3>
+     *
+     * <p>最终「是否录」= 用户手动开关 <b>∪</b> 本信号，等价于：
      * <ul>
-     *   <li>时段内 → 云端录像应为「开」；</li>
-     *   <li>时段外 → 云端录像应为「关」（即使之前是手动开的）。</li>
+     *   <li><b>手动开启 → 全天录制，完全忽略计划</b>（用户意图更强，短路判定）；</li>
+     *   <li><b>手动关闭 → 走计划时段</b>（本信号决定）；</li>
+     *   <li>计划退出时段后，通道的 {@code cloud_record}/{@code on_demand}
+     *       原样不动（除了手动开启的本来就在录，不受影响），
+     *       界面上不会出现「状态自己变」。</li>
      * </ul>
-     * 这样行为可预期：关联到计划的通道，开关由计划决定。
-     * 界面需明确提示这一点，否则用户会困惑「我手动开的怎么自己关了」。
+     * 所以「手动关掉某通道就能让它不录」是成立的 —— 除非该通道在计划时段内。
+     * 若用户希望彻底不录，应把该通道从所有计划里移除（或停用计划）。
+     *
+     * <h3>多个计划包含同一通道</h3>
+     *
+     * <p>取<b>并集</b>：任一计划处于时段内即应录制。
+     * 这符合直觉——给同一通道配「白班 8-18」和「夜班 20-6」两个计划，
+     * 期望是两段都录，而不是只在重叠时段录。本方法的实现天然是 union
+     * （{@code active} 是个 Set，任何计划命中就 add）。
      *
      * @param now 计算基准时刻（便于测试与「跨零点」判断）
      */
@@ -222,6 +235,7 @@ public class RecordPlanService {
                 continue;
             }
             governed.add(c.getChannelId());
+            // 并集：任一计划命中即 active。多个计划覆盖同一通道不会互相抵消。
             if (inPlanWindow(plan.getPlan(), now)) {
                 active.add(c.getChannelId());
             }
