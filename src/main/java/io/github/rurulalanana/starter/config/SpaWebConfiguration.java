@@ -39,6 +39,44 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        /*
+         * 缓存策略：这是「发版后用户是否需要强刷」的关键。
+         *
+         * <p><b>不配的后果</b>：Spring Boot 默认不给 Cache-Control，只给
+         * Last-Modified。浏览器此时走<b>启发式缓存</b>（取
+         * 「距上次修改时间的 10%」当新鲜期），于是：
+         * <ul>
+         *   <li>刚发版时新鲜期接近 0，看似正常；</li>
+         *   <li>跑了几天后，index.html 的启发式新鲜期变成几小时 ——
+         *       用户拿到的是<b>旧 index.html</b>，里面引用的是<b>已被删除</b>
+         *       的旧 chunk（vite 构建用 emptyOutDir 清目录）；</li>
+         *   <li>点进懒加载的路由 → chunk 404 → 页面白屏或报错，
+         *       必须手动强刷才恢复。</li>
+         * </ul>
+         * 实测线上日志里散落着各种旧 hash 的 chunk 404（LoginView-CW1M4nM3.js 等）。
+         *
+         * <p><b>正确做法是分开配</b>：
+         * <ul>
+         *   <li>index.html → {@code no-cache}：允许缓存，但每次都要回源校验
+         *       （靠 ETag/Last-Modified 协商，没变就是 304，代价极小）。
+         *       这样一发版用户下次访问就拿到新页面。</li>
+         *   <li>带内容 hash 的构建产物 → 一年 immutable：
+         *       文件名变了内容才会变，可以放心长缓存。</li>
+         * </ul>
+         */
+        registry.addResourceHandler("/index.html")
+                .addResourceLocations("classpath:/static/index.html")
+                .setCacheControl(CacheControl.noCache().mustRevalidate());
+
+        registry.addResourceHandler("/assets/**")
+                .addResourceLocations("classpath:/static/assets/")
+                .setCacheControl(CacheControl.maxAge(Duration.ofDays(365)).cachePublic().immutable());
+
+        // 图标：文件名固定，但内容基本不变，给一天足够（发版换图标时最多脏一天）
+        registry.addResourceHandler("/favicon.svg")
+                .addResourceLocations("classpath:/static/favicon.svg")
+                .setCacheControl(CacheControl.maxAge(Duration.ofDays(1)).cachePublic());
+
         // 播放器 SDK（jessibuca.js + decoder.wasm，约 1.3MB）加长缓存：
         // 避免每次进实时预览都重新下载（或 304 往返）。文件名无内容哈希，
         // 所以用 7 天而非 immutable：升级 SDK 后最多脏缓存一周。

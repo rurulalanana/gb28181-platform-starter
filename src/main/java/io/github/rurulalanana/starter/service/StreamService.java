@@ -152,6 +152,21 @@ public class StreamService {
     }
 
     /**
+     * 取该通道当前的实时会话（没有则返回 {@code null}）。
+     *
+     * <p>供云端录像保活判断「该不该再点播一次」用：已有会话时不必重复建流。
+     *
+     * @param deviceId  设备编码
+     * @param channelId 通道编码
+     * @return 会话；不存在或已 CLOSED 时返回 {@code null}
+     */
+    public RtpSession liveSession(String deviceId, String channelId) {
+        String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+        RtpSession s = platform.sessionManager().getByChannel(deviceId, channel);
+        return s == null || RtpSession.CLOSED.equals(s.getState()) ? null : s;
+    }
+
+    /**
      * 开始实时直播（设备直连：设备编码即通道编码）。
      *
      * <p>适用于直连摄像机或设备自身就是一路通道的场景；

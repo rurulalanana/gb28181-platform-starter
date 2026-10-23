@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.service;
 
+import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import lombok.RequiredArgsConstructor;
@@ -7,6 +8,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 平台定时任务。
@@ -29,6 +33,24 @@ public class PlatformScheduler {
     private final StreamService streamService;
     private final CatalogPager catalogPager;
     private final Gb28181Properties props;
+
+    /**
+     * 会话停在 {@code NEGOTIATING} 多久才允许重建一次（毫秒）。
+     *
+     * <p>取值权衡：太短等于没退避（30 秒一轮照旧轰炸设备），
+     * 太长会让「设备刚恢复」的通道多等很久。2 分钟是折中 ——
+     * 正常设备收到 INVITE 后 1~2 秒就开始推流，
+     * 能拖过 2 分钟的基本是设备侧真有问题，慢点重试无妨。
+     */
+    private static final long STUCK_RETRY_MS = 120_000;
+
+    /**
+     * 通道 → 首次观察到「协商中」的时间戳（毫秒）。
+     *
+     * <p>用来判断会话是「刚发起、还在等设备推流」还是「卡死了」。
+     * 会话转 {@code ONLINE} 或消失时清除，避免长期占用内存。
+     */
+    private final Map<String, Long> negotiatingSince = new ConcurrentHashMap<>();
 
     /** 操作日志保留天数（默认 7 天）。 */
     @Value("${gb28181.starter.oplog-retain-days:7}")
@@ -126,12 +148,26 @@ public class PlatformScheduler {
      * 这些通道就永远不会开始录 —— 表现为「开了云端录像却什么都没发生」。
      * 开关的语义是「平台持续把这段录像存下来」，不应依赖用户手动拉流。
      *
-     * <p><b>不重复拉流</b>：{@code startLive} 内部会复用可用的活会话，
-     * 已在线时是空操作（不重新 INVITE）。所以本任务的成本只是每周期一次
-     * 内存查表 + 必要的探测，不产生多余信令。
+     * <p><b>不重复拉流</b>：会话已 {@code ONLINE} 时直接跳过，
+     * 不产生任何信令。
      *
-     * <p><b>失败不重试轰炸设备</b>：通道离线、设备无响应等都会抛异常，
-     * 这里只记 DEBUG 并跳过，等下一个周期自然重试。
+     * <p><b>失败要退避，不能每轮硬重建</b>：这是踩过的坑 ——
+     * 设备侧不推流时（级联下级平台掉线、设备不认 INVITE），会话会长期停在
+     * {@code NEGOTIATING}。{@code startLive} 的复用判断要求「ZLM 确实在收 RTP」，
+     * 于是每轮都判定「不可复用」→ 关旧会话 → 重新 INVITE。
+     * 实测表现为每 30 秒一次 BYE + INVITE，SSRC 逐次递增
+     * （{@code 0100020013 → 0100020014 → …}），日志里刷满
+     * 「已有会话，先关闭旧会话」，而录像一段都没生成。
+     *
+     * <p>现在按会话状态分三档处理：
+     * <ul>
+     *   <li>{@code ONLINE} → 跳过，什么都不做；</li>
+     *   <li>{@code NEGOTIATING} 且停留时间 &lt; {@link #STUCK_RETRY_MS}
+     *       → 跳过（给设备留出推流时间，正常设备 1~2 秒就开始推）；</li>
+     *   <li>{@code NEGOTIATING} 超时或压根没会话 → 才重建一次，并重置计时。</li>
+     * </ul>
+     * 重试频率因此从「每 30 秒」降到「每 2 分钟」，对设备的压力小 4 倍，
+     * 恢复速度也够用（设备一恢复，下一个周期就能建上）。
      */
     @Scheduled(fixedDelayString = "${gb28181.starter.record-keepalive-interval-ms:30000}",
             initialDelayString = "${gb28181.starter.record-keepalive-initial-delay-ms:45000}")
@@ -139,13 +175,36 @@ public class PlatformScheduler {
         if (!recordPolicy.isLoaded()) {
             return;
         }
+        long now = System.currentTimeMillis();
         for (String channelId : recordPolicy.enabledChannels()) {
             try {
                 GbChannel ch = deviceService.findChannel(channelId);
                 if (ch == null || !ch.isOnline()) {
+                    // 设备不在线：清掉计时，等它上线后从头开始算
+                    negotiatingSince.remove(channelId);
                     continue;
                 }
-                // 已有可复用会话时内部直接返回，不会重复 INVITE
+                RtpSession session = streamService.liveSession(ch.getDeviceId(), channelId);
+                if (session != null && RtpSession.ONLINE.equals(session.getState())) {
+                    // 流正常在推，无需干预
+                    negotiatingSince.remove(channelId);
+                    continue;
+                }
+                if (session != null) {
+                    /*
+                     * 有会话但还没收到 RTP（NEGOTIATING）：先给一个窗口等设备推流。
+                     * 正常设备收到 INVITE 后 1~2 秒就开始推，拖过一个窗口还没动静
+                     * 才认为卡住了，允许重建一次。
+                     */
+                    long since = negotiatingSince.computeIfAbsent(channelId, k -> now);
+                    if (now - since < STUCK_RETRY_MS) {
+                        continue;
+                    }
+                    log.debug("云端录像保活：会话协商超时，重建一次 channel={} 已等待={}ms",
+                            channelId, now - since);
+                }
+                // 两种情况走到这里：压根没会话，或协商已超时 → 建流并重置计时
+                negotiatingSince.put(channelId, now);
                 streamService.startLive(ch.getDeviceId(), channelId);
             } catch (Exception e) {
                 // 设备无响应/通道离线很常见，不刷 WARN，下个周期自然重试

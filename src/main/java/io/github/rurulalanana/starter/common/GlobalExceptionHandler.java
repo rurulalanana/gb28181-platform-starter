@@ -4,6 +4,7 @@ import cn.dev33.satoken.exception.NotLoginException;
 import cn.dev33.satoken.exception.NotPermissionException;
 import cn.dev33.satoken.exception.NotRoleException;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.catalina.connector.ClientAbortException;
 import org.springframework.beans.TypeMismatchException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -19,10 +21,23 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
  *
  * <p>不改变 HTTP 状态码（一律 200），与 GBS 的约定一致：
  * 客户端只需看 {@code code} 字段。
+ *
+ * <p><b>日志分级的原则</b>：只有「服务端真出了问题」才配 ERROR + 堆栈。
+ * 调用方错误（参数不合法、设备离线、资源不存在）和客户端行为
+ * （主动断开连接）都是<b>预期内的日常</b>，给 WARN/DEBUG 一行就够。
+ * 之前不分级的结果是 1600 多条 ERROR 里 95% 是噪音，
+ * 真故障要靠关键字过滤才看得见 —— 等于白记。
  */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    /**
+     * 信令库在设备未注册 / 会话失效时抛出的异常消息前缀。
+     *
+     * <p>与 {@code Gb28181SipClient#requireSession} 保持一致。
+     */
+    private static final String MSG_DEVICE_NOT_REGISTERED = "设备未注册或会话已失效";
 
     @ExceptionHandler(NotLoginException.class)
     public ApiResponse<Void> handleNotLogin(NotLoginException e) {
@@ -135,6 +150,52 @@ public class GlobalExceptionHandler {
     public ApiResponse<Void> handleNoResource(NoResourceFoundException e) {
         log.warn("静态资源不存在：{}", e.getResourcePath());
         return ApiResponse.fail(404, "资源不存在：" + e.getResourcePath());
+    }
+
+    /**
+     * 客户端主动断开连接。
+     *
+     * <p><b>这是正常现象，不是故障</b>：用户切页面、暂停/停止播放、
+     * 拖动进度条取消上一段 Range 下载，都会让容器在写响应时发现对端已关闭，
+     * 抛 {@code ClientAbortException}（Tomcat）或
+     * {@code AsyncRequestNotUsableException}（Spring 6 的异步请求）。
+     *
+     * <p>之前它们落到兜底的 {@code handleOther}，每条都打 ERROR + 二十多行堆栈。
+     * 实测攒了 <b>830 条</b>（ClientAbort 741 + AsyncNotUsable 89），
+     * 真正的故障全被埋在中间 —— 排查时只能靠关键字过滤，等于没有日志。
+     *
+     * <p>这里降级为 DEBUG（连 WARN 都不给：切页是高频动作，WARN 一样会刷屏），
+     * 并且<b>不返回响应体</b> —— 对端已经关了，写什么都没人收。
+     */
+    @ExceptionHandler({ClientAbortException.class, AsyncRequestNotUsableException.class})
+    public void handleClientAbort(Exception e) {
+        log.debug("客户端已断开连接：{}", e.getClass().getSimpleName());
+    }
+
+    /**
+     * 设备未注册 / 会话已失效。
+     *
+     * <p>信令库（{@code gb28181-sip}）零 Spring 依赖，无法抛 {@code BizException}，
+     * 只能抛 {@code IllegalStateException}，于是这类<b>最常见的正常情况</b>
+     * 也走了兜底的 ERROR + 完整堆栈：现场 7 台设备常年只有 1 台在线，
+     * 用户点一下离线设备就多一条假故障（实测 203 条）。
+     *
+     * <p>按<b>消息前缀</b>识别并转成 400 业务错误。前缀常量与
+     * {@code Gb28181SipClient#requireSession} 保持一致 —— 那边改文案的话
+     * 这里要同步；不同步的后果只是退回成打 ERROR，不影响功能。
+     *
+     * <p>其余 {@code IllegalStateException} 仍按服务端故障处理（打堆栈），
+     * 免得把真正的状态机 bug 一起吞掉。
+     */
+    @ExceptionHandler(IllegalStateException.class)
+    public ApiResponse<Void> handleIllegalState(IllegalStateException e) {
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        if (msg.startsWith(MSG_DEVICE_NOT_REGISTERED)) {
+            log.warn("设备未注册或会话已失效：{}", msg);
+            return ApiResponse.fail(ApiResponse.CODE_BAD_REQUEST, msg);
+        }
+        log.error("接口异常", e);
+        return ApiResponse.fail(ApiResponse.CODE_ERROR, msg.isEmpty() ? e.getClass().getSimpleName() : msg);
     }
 
     @ExceptionHandler(Exception.class)
