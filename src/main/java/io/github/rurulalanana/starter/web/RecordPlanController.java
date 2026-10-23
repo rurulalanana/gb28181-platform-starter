@@ -55,7 +55,7 @@ public class RecordPlanController {
                 continue;
             }
             RecordPlanVo vo = new RecordPlanVo();
-            vo.setID(p.getPlanId());
+            vo.setId(p.getPlanId());
             vo.setName(p.getName());
             vo.setPlan(p.getPlan());
             vo.setEnable(p.getEnable());

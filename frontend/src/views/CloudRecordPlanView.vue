@@ -28,13 +28,13 @@
       </div>
 
       <el-table ref="tableRef" v-loading="loading" :data="rows" stripe>
-        <el-table-column prop="Name" label="名称" min-width="160" sortable>
-          <template #default="{ row }">{{ row.Name }}</template>
+        <el-table-column prop="name" label="名称" min-width="160" sortable>
+          <template #default="{ row }">{{ row.name }}</template>
         </el-table-column>
         <el-table-column label="是否启用" width="100" align="center">
           <template #default="{ row }">
             <el-switch
-              :model-value="row.Enable"
+              :model-value="row.enable"
               size="small"
               @change="(v) => toggleEnable(row, v)"
             />
@@ -42,14 +42,14 @@
         </el-table-column>
         <el-table-column label="录像计划详情" min-width="380">
           <template #default="{ row }">
-            <span class="plan-detail">{{ describePlan(row.Plan) }}</span>
+            <span class="plan-detail">{{ describePlan(row.plan) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="CreatedAt" label="创建时间" width="180" sortable>
-          <template #default="{ row }"><span class="mono">{{ row.CreatedAt }}</span></template>
+        <el-table-column prop="createdAt" label="创建时间" width="180" sortable>
+          <template #default="{ row }"><span class="mono">{{ row.createdAt }}</span></template>
         </el-table-column>
-        <el-table-column prop="UpdatedAt" label="更新时间" width="180" sortable>
-          <template #default="{ row }"><span class="mono">{{ row.UpdatedAt }}</span></template>
+        <el-table-column prop="updatedAt" label="更新时间" width="180" sortable>
+          <template #default="{ row }"><span class="mono">{{ row.updatedAt }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="230" align="center" fixed="right">
           <template #default="{ row }">
@@ -92,9 +92,11 @@
           <el-checkbox v-model="form.enable">启用</el-checkbox>
         </el-form-item>
         <el-form-item label="录像计划详情">
-          <div class="plan-editor">
+          <div class="plan-editor" @mouseleave="endGridDrag">
             <div class="plan-editor-head">
-              <span class="text-muted">配置云端录像开启时段</span>
+              <span class="text-muted">
+                配置云端录像开启时段（可按住鼠标拖动批量选择）
+              </span>
               <div class="plan-editor-actions">
                 <el-button link type="primary" size="small" @click="resetPlan">重置</el-button>
                 <el-button link type="primary" size="small" @click="selectAll">全选</el-button>
@@ -105,6 +107,11 @@
               每周七天的时段网格：横轴 0~24 小时，按小时分格。
               选中 = 该小时开启云端录像。数据结构与 LiveGBS 一致：
               plan = [[{s1,e1}], [], [{s3,e3}], ...]（外层 7 个数组 = 周一~周日）。
+
+              <p><b>支持拖动批量选择</b>：7 天 × 24 小时 = 168 格，
+              一格格点太慢。按住鼠标从起点拖到终点，按「矩形区域」批量设置
+              （与 Excel 选单元格一致：起点状态取反，拖过的格子统一成该值）。
+              起点未选 → 拖过的全选；起点已选 → 拖过的全取消。
             -->
             <div v-for="day in DAYS" :key="day.key" class="plan-day">
               <span class="plan-day-label">{{ day.label }}</span>
@@ -116,7 +123,8 @@
                     class="plan-hour"
                     :class="{ 'is-on': isOn(day.key, h) }"
                     :title="`${day.label} ${h}:00-${h + 1}:00`"
-                    @click="toggleHour(day.key, h)"
+                    @mousedown.prevent="onHourMouseDown(day.key, h)"
+                    @mouseenter="onHourMouseEnter(day.key, h)"
                   />
                 </div>
                 <div class="plan-ticks">
@@ -139,7 +147,7 @@
     </el-dialog>
 
     <!-- 关联通道 -->
-    <el-dialog v-model="chanDialog" :title="'录像计划关联通道(' + (chanTarget?.Name || '') + ')'" width="900px">
+    <el-dialog v-model="chanDialog" :title="'录像计划关联通道(' + (chanTarget?.name || '') + ')'" width="900px">
       <div class="filter-bar">
         <el-input
           v-model="chanQuery"
@@ -286,6 +294,79 @@ function toggleHour(dayKey, hour) {
   else s.add(hour)
 }
 
+/* ==================== 时段格子：拖动批量选择 ==================== */
+
+/**
+ * 拖动状态。
+ *
+ * <p>{@code anchor} 是按下鼠标的那一格（天, 小时）；{@code value} 是这一段
+ * 要统一设成的值 —— 起点状态取反，与 Excel 选区一致：
+ * 从空白格开始拖 = 全部选中，从已选格开始拖 = 全部取消。
+ *
+ * <p>选区按<b>矩形</b>算（起点的天到当前的天 × 起点的小时到当前的小时），
+ * 这样「周三 8 点 → 周五 18 点」一次就能刷出 3 天 × 11 小时的时段。
+ */
+const gridDrag = reactive({
+  active: false,
+  anchorDay: -1,
+  anchorHour: -1,
+  value: true
+})
+
+function onHourMouseDown(dayKey, hour) {
+  // 起点状态取反：未选 → 这一段全选；已选 → 这一段全取消
+  gridDrag.value = !isOn(dayKey, hour)
+  gridDrag.anchorDay = dayKey
+  gridDrag.anchorHour = hour
+  gridDrag.active = true
+  setHour(dayKey, hour, gridDrag.value)
+}
+
+function onHourMouseEnter(dayKey, hour) {
+  if (!gridDrag.active) return
+  applyGridRect(dayKey, hour)
+}
+
+/** 把「锚点 → 当前格」的矩形区域统一设为 {@link gridDrag}.value。 */
+function applyGridRect(dayKey, hour) {
+  const d0 = Math.min(gridDrag.anchorDay, dayKey)
+  const d1 = Math.max(gridDrag.anchorDay, dayKey)
+  const h0 = Math.min(gridDrag.anchorHour, hour)
+  const h1 = Math.max(gridDrag.anchorHour, hour)
+  for (let d = d0; d <= d1; d++) {
+    for (let h = h0; h <= h1; h++) {
+      setHour(d, h, gridDrag.value)
+    }
+  }
+}
+
+/** 幂等写值（避免重复 new Set / 反复触发响应式）。 */
+function setHour(dayKey, hour, on) {
+  if (!planHours[dayKey]) planHours[dayKey] = new Set()
+  const s = planHours[dayKey]
+  const had = s.has(hour)
+  if (on === had) return
+  if (on) s.add(hour)
+  else s.delete(hour)
+}
+
+/**
+ * 结束时段拖拽。
+ *
+ * <p><b>只能挂在最外层 {@code .plan-editor} 上，不能挂在每行的
+ * {@code .plan-hours} 上</b>：行与行之间有 margin，行下方还有刻度条
+ * （{@code .plan-ticks}），从周二拖到周四时鼠标必然经过这些非格子元素，
+ * 触发行的 mouseleave 就会中断拖拽 —— 表现为「只能选中起点那一格」
+ * （实测踩过）。
+ *
+ * <p>挂在最外层则「只要还在编辑器内」就一直有效，跨行、跨刻度都不中断。
+ */
+function endGridDrag() {
+  gridDrag.active = false
+  gridDrag.anchorDay = -1
+  gridDrag.anchorHour = -1
+}
+
 function selectAll() {
   for (let i = 0; i < 7; i++) {
     if (!planHours[i]) planHours[i] = new Set()
@@ -390,13 +471,38 @@ function describePlan(json) {
 
 /* ==================== 数据加载 ==================== */
 
+/**
+ * 把接口返回的计划行归一化为本地结构。
+ *
+ * <p><b>为什么需要这一步</b>：后端历史上把 VO 字段写成 {@code ID / Name / Plan}
+ * （大写开头），而 Jackson 按 getter 推导属性名时会 decapitalize 成
+ * {@code id / name / plan} —— 前端照字段名读 {@code row.Name} 拿到 undefined，
+ * 于是列表名称空白、时段全显示 ✗、编辑弹窗回显不出内容，
+ * 「关联通道」拿到 undefined 的 id 导致通道表格为空、拖拽选择看起来也失效。
+ *
+ * <p>后端已统一改为小写驼峰。这里仍兼容两种写法：让前端不受后端序列化细节
+ * 影响，任一侧改动都不会再出现「界面空了但接口有数据」这种难查的问题。
+ */
+function normalizePlan(r) {
+  if (!r) return null
+  return {
+    id: r.id ?? r.ID ?? '',
+    name: r.name ?? r.Name ?? '',
+    plan: r.plan ?? r.Plan ?? '[[],[],[],[],[],[],[]]',
+    enable: r.enable ?? r.Enable ?? true,
+    createdAt: r.createdAt ?? r.CreatedAt ?? '',
+    updatedAt: r.updatedAt ?? r.UpdatedAt ?? '',
+    channelCount: r.channelCount ?? r.ChannelCount ?? 0
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     const params = { start: offset.value, limit: pager.size }
     if (query.q) params.q = query.q
     const data = await cloudRecordApi.planList(params)
-    rows.value = data?.rows || []
+    rows.value = (data?.rows || []).map(normalizePlan).filter(Boolean)
     setTotal(data?.total ?? rows.value.length)
   } catch (e) {
     ElMessage.error(e.message || '加载录像计划失败')
@@ -423,10 +529,10 @@ const form = reactive({ name: '', enable: true })
 
 function openEdit(row) {
   editTarget.value = row
-  form.name = row?.Name || ''
-  form.enable = row ? !!row.Enable : true
+  form.name = row?.name || ''
+  form.enable = row ? !!row.enable : true
   resetPlanState()
-  if (row?.Plan) fromPlanJson(row.Plan)
+  if (row?.plan) fromPlanJson(row.plan)
   editDialog.value = true
 }
 
@@ -438,7 +544,7 @@ async function doSave() {
   saving.value = true
   try {
     await cloudRecordApi.planSave({
-      id: editTarget.value?.ID,
+      id: editTarget.value?.id,
       name: form.name.trim(),
       plan: toPlanJson(),
       enable: form.enable
@@ -455,8 +561,8 @@ async function doSave() {
 
 async function toggleEnable(row, enable) {
   try {
-    await cloudRecordApi.planEnable({ id: row.ID, enable })
-    row.Enable = enable
+    await cloudRecordApi.planEnable({ id: row.id, enable })
+    row.enable = enable
     ElMessage.success(enable ? '已启用' : '已停用')
   } catch (e) {
     ElMessage.error(e.message || '操作失败')
@@ -465,7 +571,7 @@ async function toggleEnable(row, enable) {
 
 async function removePlan(row) {
   try {
-    await ElMessageBox.confirm(`确定删除录像计划「${row.Name}」？`, '删除确认', {
+    await ElMessageBox.confirm(`确定删除录像计划「${row.name}」？`, '删除确认', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消'
@@ -474,7 +580,7 @@ async function removePlan(row) {
     return
   }
   try {
-    await cloudRecordApi.planRemove({ id: row.ID })
+    await cloudRecordApi.planRemove({ id: row.id })
     ElMessage.success('已删除')
     load()
   } catch (e) {
@@ -504,7 +610,7 @@ function openChannels(row) {
   related.clear()
   chanDialog.value = true
   loadChannels()
-  loadRelated(row.ID)
+  loadRelated(row.id)
 }
 
 async function loadRelated(planId) {
@@ -522,7 +628,7 @@ async function loadChannels() {
   chanLoading.value = true
   try {
     const list = await cloudRecordApi.planChannelList({
-      id: chanTarget.value.ID,
+      id: chanTarget.value.id,
       q: chanQuery.value,
       related: onlyRelated.value,
       limit: 500
@@ -628,7 +734,7 @@ async function saveChannels() {
   chanSaving.value = true
   try {
     await cloudRecordApi.planSetChannels({
-      id: chanTarget.value.ID,
+      id: chanTarget.value.id,
       channels: [...picked]
     })
     ElMessage.success('已保存关联通道')
@@ -641,15 +747,21 @@ async function saveChannels() {
   }
 }
 
+/** 统一的松手收尾：两种拖拽（时段格子 / 关联通道表格）都要复位。 */
+function onWindowMouseUp() {
+  endGridDrag()
+  endChanDrag()
+}
+
 onMounted(() => {
   load()
-  // 拖拽可能在表格外松手（甚至拖出浏览器窗口），
-  // 挂在 window 上兜底，否则 dragging 会一直为 true、行高亮不消失。
-  window.addEventListener('mouseup', endChanDrag)
+  // 拖拽可能在容器外松手（甚至拖出浏览器窗口），
+  // 挂在 window 上兜底，否则 dragging / gridDrag 会一直为 true。
+  window.addEventListener('mouseup', onWindowMouseUp)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('mouseup', endChanDrag)
+  window.removeEventListener('mouseup', onWindowMouseUp)
 })
 </script>
 
@@ -681,6 +793,9 @@ onUnmounted(() => {
 .plan-editor {
   width: 100%;
   background: var(--bg-sunken);
+  /* 拖动选时段时不要选中文字/不要触发浏览器原生拖拽 */
+  user-select: none;
+  -webkit-user-select: none;
   border-radius: 6px;
   padding: 12px 16px 16px;
 }
