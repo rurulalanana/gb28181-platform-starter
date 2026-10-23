@@ -361,6 +361,16 @@ public class PlatformScheduler {
                     continue;
                 }
                 ch.setCloudRecord(false);
+                // 【必须同时恢复「按需直播」】
+                //
+                // 计划开启录像时把 on_demand 强制设成了 false（两者互斥）。
+                // 关的时候若不还原，这个通道就变成「不录也不按需」——
+                // 而空闲流回收会跳过 on_demand=false 的通道（见
+                // StreamService#channelsRequiringStream），于是设备会一直被拉着推流，
+                // 白占带宽直到有人手动停。实测踩过。
+                //
+                // 还原成按需 = 时段外没人看就停流，这正是计划的语义。
+                ch.setOnDemand(true);
                 deviceService.updateChannel(ch);
                 recordPolicy.set(channelId, false);
                 // 立即停录并归档：只关开关的话要等流被空闲回收才收尾，

@@ -113,18 +113,28 @@
               （与 Excel 选单元格一致：起点状态取反，拖过的格子统一成该值）。
               起点未选 → 拖过的全选；起点已选 → 拖过的全取消。
             -->
-            <div v-for="day in DAYS" :key="day.key" class="plan-day">
-              <span class="plan-day-label">{{ day.label }}</span>
+            <div
+              v-for="day in DAYS"
+              :key="day.key"
+              class="plan-day"
+              :class="{ 'is-today': day.key === todayIndex }"
+            >
+              <span class="plan-day-label">
+                {{ day.label }}
+                <el-tag v-if="day.key === todayIndex" size="small" type="success" effect="plain">
+                  今天
+                </el-tag>
+              </span>
               <div class="plan-day-track">
                 <div class="plan-hours">
                   <span
                     v-for="h in HOURS"
                     :key="h"
                     class="plan-hour"
-                    :class="{ 'is-on': isOn(day.key, h) }"
+                    :class="{ 'is-on': isOn(day.key, h), 'is-now': day.key === todayIndex && h === nowHour }"
                     :title="`${day.label} ${h}:00-${h + 1}:00`"
                     @mousedown.prevent="onHourMouseDown(day.key, h)"
-                    @mouseenter="onHourMouseEnter(day.key, h)"
+                    @mouseenter="onHourEnter(day.key, h)"
                   />
                 </div>
                 <div class="plan-ticks">
@@ -263,6 +273,26 @@ const DAYS = [
   { key: 6, label: '星期日' }
 ]
 
+/**
+ * 今天在 {@link DAYS} 里的下标（周一 = 0），以及当前小时。
+ *
+ * <p><b>为什么界面上必须标出来</b>：7 行格子长得一模一样，用户很容易
+ * 在「星期五」那行画了却发现没录 —— 其实他画的是「星期六」。实测踩过：
+ * 今天是周五、计划只配了周六 08:00-22:00，用户以为坏了，
+ * 实际是配错了行，而界面完全看不出哪行是今天。
+ *
+ * <p>用 `getDay()`：0 = 周日，所以 `(getDay() + 6) % 7` 换成
+ * 「周一 = 0」的索引，与 {@link DAYS} 对齐。
+ */
+const nowInfo = ref(currentNow())
+const todayIndex = computed(() => nowInfo.value.dayIndex)
+const nowHour = computed(() => nowInfo.value.hour)
+
+function currentNow() {
+  const d = new Date()
+  return { dayIndex: (d.getDay() + 6) % 7, hour: d.getHours() }
+}
+
 /** 0~23 共 24 格。 */
 const HOURS = Array.from({ length: 24 }, (_, i) => i)
 
@@ -322,7 +352,7 @@ function onHourMouseDown(dayKey, hour) {
   setHour(dayKey, hour, gridDrag.value)
 }
 
-function onHourMouseEnter(dayKey, hour) {
+function onHourEnter(dayKey, hour) {
   if (!gridDrag.active) return
   applyGridRect(dayKey, hour)
 }
@@ -533,6 +563,9 @@ function openEdit(row) {
   form.enable = row ? !!row.enable : true
   resetPlanState()
   if (row?.plan) fromPlanJson(row.plan)
+  // 每次打开都重新取「今天/当前小时」：页面可能开了很久，
+  // 跨过零点后高亮会错位
+  nowInfo.value = currentNow()
   editDialog.value = true
 }
 
@@ -540,6 +573,24 @@ async function doSave() {
   if (!form.name.trim()) {
     ElMessage.warning('请填写计划名称')
     return
+  }
+  // 【保存前提醒】计划没覆盖「今天」时给一次确认。
+  //
+  // 实测踩过：用户在今天（周五）画了格子，其实画到了「星期六」那行，
+  // 保存后一直不录，以为是 bug。格子本身没有语义上的"今天"，
+  // 光靠视觉标「今天」还不够 —— 保存时再确认一次，代价很小。
+  if (form.enable && !planCoversToday()) {
+    const todayLabel = DAYS[todayIndex.value]?.label || '今天'
+    try {
+      await ElMessageBox.confirm(
+        `该计划没有覆盖「今天（${todayLabel}）」，保存后今天不会自动录像。\n\n` +
+        '如果只想在其它星期录，可以继续保存；如果搞错了行，请点「取消」回去调整。',
+        '今天不会录像',
+        { type: 'warning', confirmButtonText: '仍然保存', cancelButtonText: '回去调整' }
+      )
+    } catch (e) {
+      return
+    }
   }
   saving.value = true
   try {
@@ -557,6 +608,12 @@ async function doSave() {
   } finally {
     saving.value = false
   }
+}
+
+/** 当前编辑中的计划是否覆盖「今天」的任意时段。 */
+function planCoversToday() {
+  const s = planHours[todayIndex.value]
+  return !!s && s.size > 0
 }
 
 async function toggleEnable(row, enable) {
@@ -863,6 +920,29 @@ onUnmounted(() => {
 
 .plan-hour.is-on {
   background: var(--brand-400);
+}
+
+/* 今天这一行：整体加浅色底 + 左侧色条，与其它 6 行一眼区分 */
+.plan-day.is-today .plan-hours {
+  outline: 1px solid var(--el-color-success-light-5);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+.plan-day.is-today .plan-day-label {
+  color: var(--el-color-success-dark-2);
+  font-weight: 600;
+}
+
+/*
+ * 当前小时：加一条竖向标记。
+ * 让用户打开弹窗就知道「现在正处于哪一格」，配合「今天」标签，
+ * 一眼能判断当前时刻是否在计划时段内。
+ */
+.plan-hour.is-now {
+  box-shadow: inset 0 0 0 2px var(--el-color-warning);
+  position: relative;
+  z-index: 1;
 }
 
 /* 下方刻度：每 2 小时一个 */
