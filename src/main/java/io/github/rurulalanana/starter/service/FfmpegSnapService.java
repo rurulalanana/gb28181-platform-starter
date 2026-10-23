@@ -14,7 +14,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -87,6 +86,20 @@ public class FfmpegSnapService {
      * @return JPEG 字节；失败返回 {@code null}
      */
     public byte[] capture(String flvUrl) {
+        return capture(flvUrl, true);
+    }
+
+    /**
+     * 抓取一帧 JPEG。
+     *
+     * @param flvUrl           ZLM 的 FLV 播放地址
+     * @param requireKeyFrame  {@code true} = 只取关键帧（画面完整，但流刚建立时
+     *                         可能几秒内一个关键帧都没有，导致 0 字节）；
+     *                         {@code false} = 不限制帧类型（一定能出图，
+     *                         但如果起点是 P 帧会花屏）
+     * @return JPEG 字节；失败返回 {@code null}
+     */
+    public byte[] capture(String flvUrl, boolean requireKeyFrame) {
         if (flvUrl == null || flvUrl.isBlank()) {
             return null;
         }
@@ -97,23 +110,27 @@ public class FfmpegSnapService {
 
         Process proc = null;
         try {
-            List<String> cmd = List.of(
+            java.util.List<String> cmd = new java.util.ArrayList<>(java.util.List.of(
                     FFMPEG,
                     "-hide_banner",
                     "-loglevel", "error",
                     // 容忍解码报错：刚开始拉流时可能丢到半个 GOP
-                    "-err_detect", "ignore_err",
-                    // 只输出关键帧。H265 的 P 帧依赖参考帧，
-                    // 而 ZLM 刚建源时缓冲区里的帧可能不是从关键帧开始的 ——
-                    // 直接解会报「Could not find ref with POC xx」并出一张坏图。
-                    "-skip_frame", "nokey",
+                    "-err_detect", "ignore_err"));
+            if (requireKeyFrame) {
+                // 只输出关键帧。H265 的 P 帧依赖参考帧，
+                // 而 ZLM 刚建源时缓冲区里的帧可能不是从关键帧开始的 ——
+                // 直接解会报「Could not find ref with POC xx」并出一张坏图。
+                cmd.add("-skip_frame");
+                cmd.add("nokey");
+            }
+            cmd.addAll(java.util.List.of(
                     // 从 stdin 读 FLV 流；解出第一帧就结束
                     "-i", "pipe:0",
                     "-frames:v", "1",
                     "-f", "image2pipe",
                     "-vcodec", "mjpeg",
                     "-q:v", "3",
-                    "pipe:1");
+                    "pipe:1"));
             Process p = new ProcessBuilder(cmd).start();
             proc = p;
 
@@ -139,7 +156,10 @@ public class FfmpegSnapService {
 
             byte[] bytes = jpeg.toByteArray();
             if (bytes.length < 1024) {
-                log.warn("抓拍失败：未取到有效 JPEG（{} 字节）", bytes.length);
+                // 降级为 debug：上层会重试并最终给出用户可见的错误，
+                // 这里再打 WARN 只是同一件事刷两遍
+                log.debug("抓拍未取到有效 JPEG（{} 字节, requireKeyFrame={}）",
+                        bytes.length, requireKeyFrame);
                 return null;
             }
             return bytes;

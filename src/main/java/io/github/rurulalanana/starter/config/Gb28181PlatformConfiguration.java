@@ -25,6 +25,7 @@ public class Gb28181PlatformConfiguration {
                 .sipAdvertisedIp(props.getSipAdvertisedIp())
                 .sipPort(props.getSipPort())
                 .sipPassword(props.getSipPassword())
+                .sipTransports(props.getSipTransports())
                 .httpPort(props.getHttpPort())
                 .rtmpPort(props.getRtmpPort())
                 .rtspPort(props.getRtspPort())

@@ -44,15 +44,22 @@
         <el-table-column label="快照" width="120" align="center">
           <template #default="{ row }">
             <!--
-              通道快照：与 LiveGBS 的 snap_url 行为一致 —— 有快照就显示缩略图，
-              没有则显示占位。快照由服务端抓（拉 ZLM 流 → ffmpeg 解 H265 → 存盘），
-              抓到后缓存 1 小时，列表下次加载直接用缓存，不再拉流。
+              通道快照：有快照显示缩略图（点击看大图），没有则显示「抓取」按钮。
+              快照由服务端抓：拉 ZLM 流 → ffmpeg 解 H265 → 存盘，缓存 1 小时。
+
+              <p>点击放大用 el-image 的 preview 能力（内置缩放/旋转/下载），
+              比自己套一个 el-dialog 更省事，且移动端手势也支持。
             -->
-            <img
+            <el-image
               v-if="row.snapUrl"
               class="snap-img"
               :src="row.snapUrl"
               :alt="row.name || row.code"
+              :preview-src-list="[row.snapUrl]"
+              :initial-index="0"
+              fit="cover"
+              preview-teleported
+              hide-on-click-modal
               @error="onSnapError(row)"
             />
             <el-button
@@ -145,16 +152,27 @@ async function load() {
 /**
  * 给还没有快照的通道补抓一帧。
  *
- * 快照由服务端抓：拉 ZLM 的流 → ffmpeg 解码 → 存盘（详见后端 SnapCaptureService）。
- * 抓完缓存 1 小时，第二次进列表不会重复拉流。
+ * <p><b>只在首次进入页面时跑一次</b>（{@code snapAutoDone} 守卫）：
+ * 原实现在每次 {@code load()} 都调用，于是翻页、搜索、刷新都会重新抓一遍
+ * 之前失败的通道 —— 每次都要点播拉流，设备上行带宽被反复占用，
+ * 而且失败的通道通常是因为设备不支持/离线，重试也不会成功。
+ *
+ * <p>失败的通道记到 {@code snapFailed} 里，本次会话不再重试；
+ * 用户想重试可以点「抓取」按钮手动触发。
+ *
+ * <p>仍然保留错开启动：即使后端已有限流，前端错开能少触发几个「任务繁忙」。
  */
+let snapAutoDone = false
+const snapFailed = reactive(new Set())
+
 function autoSnap() {
-  rows.value
-    .filter((r) => !r.snapUrl)
-    .forEach((row, i) => {
-      // 错开启动，避免同时拉多路把设备打爆；失败静默，不打扰用户
-      setTimeout(() => grabSnap(row, true), 400 + i * 1500)
-    })
+  if (snapAutoDone) return
+  snapAutoDone = true
+  const todo = rows.value.filter((r) => !r.snapUrl && !snapFailed.has(`${r.serial}/${r.code}`))
+  todo.forEach((row, i) => {
+    // 错开启动，避免同时拉多路把设备打爆；失败静默，不打扰用户
+    setTimeout(() => grabSnap(row, true), 400 + i * 1500)
+  })
 }
 
 function search() {
@@ -194,10 +212,13 @@ async function grabSnap(row, silent = false) {
     const data = await cloudRecordApi.snapGrab({ serial: row.serial, code: row.code })
     if (data?.url) {
       row.snapUrl = data.url
+      snapFailed.delete(key)
     } else if (!silent) {
       ElMessage.error('抓取快照失败')
     }
   } catch (e) {
+    // 自动补抓失败记下来，本次会话不再重试（否则每次翻页都重新拉一遍流）
+    snapFailed.add(key)
     if (!silent) ElMessage.error(e.message || '抓取快照失败')
   } finally {
     capturing.value = ''
@@ -242,11 +263,17 @@ onMounted(load)
 .snap-img {
   width: 96px;
   height: 54px;
-  object-fit: cover;
   border-radius: 4px;
   border: 1px solid var(--line);
   background: #070a10;
   display: block;
   margin: 0 auto;
+  /* 可点击看大图 —— 必须给出可点的视觉提示，否则用户不会想到去点 */
+  cursor: zoom-in;
+  transition: border-color 0.15s ease;
+}
+
+.snap-img:hover {
+  border-color: var(--el-color-primary);
 }
 </style>

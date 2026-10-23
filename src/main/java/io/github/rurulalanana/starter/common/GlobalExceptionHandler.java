@@ -148,8 +148,17 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(NoResourceFoundException.class)
     public ApiResponse<Void> handleNoResource(NoResourceFoundException e) {
-        log.warn("静态资源不存在：{}", e.getResourcePath());
-        return ApiResponse.fail(404, "资源不存在：" + e.getResourcePath());
+        String path = e.getResourcePath();
+        // sourcemap 请求降级为 debug：浏览器 DevTools 打开时会自动拉
+        // xxx.css.map / xxx.js.map，而构建产物默认不生成 sourcemap。
+        // 这不是故障，也不该占用 WARN —— 每次开 DevTools 就刷两条日志，
+        // 真正的问题反而被埋掉。
+        if (path != null && path.endsWith(".map")) {
+            log.debug("sourcemap 不存在（构建未生成，正常）: {}", path);
+        } else {
+            log.warn("静态资源不存在：{}", path);
+        }
+        return ApiResponse.fail(404, "资源不存在：" + path);
     }
 
     /**

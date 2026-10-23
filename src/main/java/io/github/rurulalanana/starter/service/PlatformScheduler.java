@@ -40,6 +40,7 @@ public class PlatformScheduler {
     private final ChannelRecordPolicy recordPolicy;
     private final StreamService streamService;
     private final CatalogPager catalogPager;
+    private final RecordPlanService recordPlanService;
     private final Gb28181Properties props;
 
     /**
@@ -288,6 +289,93 @@ public class PlatformScheduler {
             }
         } catch (Exception e) {
             log.warn("录像磁盘水位清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 录像计划执行（默认每 30 秒）。
+     *
+     * <p><b>为什么必须有</b>：{@link RecordPlanService} 原先只提供 CRUD，
+     * <b>没有任何地方真正执行计划</b> —— 用户在界面上配好时段、关联通道后
+     * 什么都不会发生。这是功能缺失，不是配置问题。
+     *
+     * <p><b>语义：计划对覆盖的通道有完全控制权</b>（与 LiveGBS 一致）：
+     * 时段内云端录像应为开、时段外应为关，即使之前是手动开的。
+     * 这样行为可预期；界面需明确提示，否则用户会困惑「手动开的怎么自己关了」。
+     *
+     * <p><b>只驱动「开关」，不直接拉流</b>：开启后由既有的
+     * {@link #keepCloudRecordStreams()} 保活任务负责保证流在线，
+     * 避免两个任务同时发 INVITE 打架。
+     *
+     * <p>30 秒周期：计划的最小粒度是「分钟」，30 秒足以在一个分钟内跟上，
+     * 又不至于频繁查库（本任务每轮 2 次查询）。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void applyRecordPlans() {
+        if (!recordPolicy.isLoaded()) {
+            return;
+        }
+        if (!due("record-plan", 30_000L)) {
+            return;
+        }
+        RecordPlanService.PlanScope scope;
+        try {
+            scope = recordPlanService.scopeAt(java.time.LocalDateTime.now());
+        } catch (Exception e) {
+            log.warn("录像计划计算失败: {}", e.getMessage());
+            return;
+        }
+        if (scope.governed().isEmpty()) {
+            return;
+        }
+        int started = 0;
+        int stopped = 0;
+        // 1) 时段内：确保开关为开
+        for (String channelId : scope.active()) {
+            try {
+                if (recordPolicy.isEnabled(channelId)) {
+                    continue;
+                }
+                GbChannel ch = deviceService.findChannel(channelId);
+                if (ch == null) {
+                    continue;
+                }
+                ch.setCloudRecord(true);
+                // 互斥：计划要录像，就必须常开推流
+                ch.setOnDemand(false);
+                deviceService.updateChannel(ch);
+                recordPolicy.set(channelId, true);
+                started++;
+            } catch (Exception e) {
+                log.warn("录像计划开启失败: channel={} {}", channelId, e.getMessage());
+            }
+        }
+        // 2) 时段外：确保开关为关（计划覆盖的通道由计划决定，即使曾手动开过）
+        for (String channelId : scope.shouldStop()) {
+            try {
+                if (!recordPolicy.isEnabled(channelId)) {
+                    continue;
+                }
+                GbChannel ch = deviceService.findChannel(channelId);
+                if (ch == null) {
+                    continue;
+                }
+                ch.setCloudRecord(false);
+                deviceService.updateChannel(ch);
+                recordPolicy.set(channelId, false);
+                // 立即停录并归档：只关开关的话要等流被空闲回收才收尾，
+                // 时段结束后还会多录好几分钟（用户看到的就是「计划不准」）。
+                if (recordService.isRecording(channelId)) {
+                    recordService.stopCloudRecord(channelId);
+                }
+                stopped++;
+            } catch (Exception e) {
+                log.warn("录像计划关闭失败: channel={} {}", channelId, e.getMessage());
+            }
+        }
+        if (started > 0 || stopped > 0) {
+            log.info("录像计划执行：开启 {} 路、关闭 {} 路（覆盖 {} 路通道，当前应在录 {} 路）",
+                    started, stopped, scope.governed().size(), scope.active().size());
         }
     }
 

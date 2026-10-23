@@ -153,30 +153,64 @@
         <el-button type="primary" @click="loadChannels">
           <el-icon><Search /></el-icon> 搜索
         </el-button>
+        <el-button :disabled="!chanRows.length" @click="pickAllVisible">全选本页</el-button>
+        <el-button :disabled="!picked.size" @click="clearPicked">清空选择</el-button>
         <span class="filter-bar-spacer" />
-        <el-checkbox v-model="onlyRelated">只看已选({{ chanRows.filter(isPicked).length }})</el-checkbox>
+        <el-checkbox v-model="onlyRelated">只看已选({{ picked.size }})</el-checkbox>
       </div>
-      <el-table v-loading="chanLoading" :data="chanRows" stripe height="380">
-        <el-table-column label="选择" width="60" align="center">
-          <template #default="{ row }">
-            <el-checkbox :model-value="isPicked(row)" @change="(v) => togglePick(row, v)" />
-          </template>
-        </el-table-column>
-        <el-table-column prop="deviceId" label="设备国标编号" min-width="190">
-          <template #default="{ row }"><span class="mono">{{ row.deviceId }}</span></template>
-        </el-table-column>
-        <el-table-column prop="channelId" label="通道国标编号" min-width="190">
-          <template #default="{ row }"><span class="mono">{{ row.channelId }}</span></template>
-        </el-table-column>
-        <el-table-column prop="name" label="通道名称" min-width="200" show-overflow-tooltip />
-        <el-table-column label="在线状态" width="100" align="center">
-          <template #default="{ row }">
-            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
-              {{ row.online ? '在线' : '离线' }}
-            </span>
-          </template>
-        </el-table-column>
-      </el-table>
+      <!--
+        批量勾选：整行可点，且支持「按下鼠标拖动」连续勾选。
+
+        <p>原实现只有一个小复选框，几十个通道要点几十次 —— 这是用户明确
+        抱怨的痛点。现在三种方式并存：
+        <ol>
+          <li>点复选框（精确增减）；</li>
+          <li>点行其它位置（切换该行）；</li>
+          <li>按住鼠标从第一行拖到最后一行（整段按「首行状态取反」批量设置，
+              Excel 风格：首行原本未选则全选，原本已选则全不选）。</li>
+        </ol>
+
+        <p><b>为什么 mousedown 挂在外层 div 而不是 el-table 事件</b>：
+        Element Plus 的 Table 只有 cell-mouse-enter / cell-click 等，
+        <b>没有 row-mousedown</b>。用外层原生监听 + closest('tr') 定位行索引，
+        比给每一行绑定更好维护（不用改渲染结构）。
+      -->
+      <div @mousedown="onChanTableMouseDown" @mouseleave="endChanDrag">
+        <el-table
+          ref="chanTableRef"
+          v-loading="chanLoading"
+          :data="chanRows"
+          stripe
+          height="380"
+          row-key="channelId"
+          :row-class-name="chanRowClass"
+          @cell-mouse-enter="onChanCellEnter"
+        >
+          <el-table-column label="选择" width="60" align="center">
+            <template #default="{ row }">
+              <el-checkbox :model-value="isPicked(row)" @change="(v) => togglePick(row, v)" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="deviceId" label="设备国标编号" min-width="190">
+            <template #default="{ row }"><span class="mono">{{ row.deviceId }}</span></template>
+          </el-table-column>
+          <el-table-column prop="channelId" label="通道国标编号" min-width="190">
+            <template #default="{ row }"><span class="mono">{{ row.channelId }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="通道名称" min-width="200" show-overflow-tooltip />
+          <el-table-column label="在线状态" width="100" align="center">
+            <template #default="{ row }">
+              <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
+                {{ row.online ? '在线' : '离线' }}
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div class="pick-hint">
+        提示：可按住鼠标拖动连续勾选；点「全选本页」选中当前列表全部通道。
+        已关联到计划的通道，其云端录像开关<b>由计划决定</b>（时段内开、时段外关）。
+      </div>
       <template #footer>
         <el-button @click="chanDialog = false">取消</el-button>
         <el-button type="primary" :loading="chanSaving" @click="saveChannels">确定</el-button>
@@ -186,7 +220,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
@@ -511,6 +545,84 @@ function togglePick(row, checked) {
   else picked.delete(k)
 }
 
+// ==================== 批量选择（点行 / 拖拽） ====================
+
+const chanTableRef = ref(null)
+
+/**
+ * 拖拽状态。
+ *
+ * <p>{@code anchor} 是按下鼠标的那一行；{@code dragValue} 是这一整段要设成的值。
+ * 「首行状态取反」是 Excel 的习惯：从已选行拖到未选行 = 全部取消，
+ * 反之全部选中 —— 用户不必先想「我要选还是取消」。
+ */
+const dragging = ref(false)
+/** 当前拖到第几行（用于高亮覆盖范围）。 */
+const dragHover = ref(-1)
+let dragAnchor = -1
+let dragValue = true
+
+/** 拖拽范围内整段高亮，让用户看清这次拖拽覆盖了哪些行。 */
+function chanRowClass({ rowIndex }) {
+  if (!dragging.value || dragAnchor < 0) return ''
+  const lo = Math.min(dragAnchor, dragHover.value)
+  const hi = Math.max(dragAnchor, dragHover.value)
+  return rowIndex >= lo && rowIndex <= hi ? 'is-drag-range' : ''
+}
+
+/**
+ * 按下鼠标：定位行 → 记锚点 → 立即切换该行 → 进入拖拽态。
+ *
+ * <p>点复选框列时直接返回，让 checkbox 自己的 change 处理（否则会切换两次，
+ * 表现为「点了没反应」）。
+ */
+function onChanTableMouseDown(event) {
+  if (event.button !== 0) return
+  if (event.target?.closest?.('.el-checkbox')) return
+  const tr = event.target?.closest?.('.el-table__body tbody tr')
+  if (!tr) return
+  const idx = Array.from(tr.parentElement.children).indexOf(tr)
+  const row = chanRows.value[idx]
+  if (!row) return
+  dragAnchor = idx
+  dragHover.value = idx
+  // 首行状态取反：未选 → 本次全选；已选 → 本次全取消
+  dragValue = !isPicked(row)
+  dragging.value = true
+  togglePick(row, dragValue)
+}
+
+/** 鼠标移入某单元格：若在拖拽中，把锚点到该行整段应用 dragValue。 */
+function onChanCellEnter(row) {
+  if (!dragging.value) return
+  const idx = chanRows.value.indexOf(row)
+  if (idx < 0) return
+  dragHover.value = idx
+  const lo = Math.min(dragAnchor, idx)
+  const hi = Math.max(dragAnchor, idx)
+  for (let i = lo; i <= hi; i++) {
+    const r = chanRows.value[i]
+    if (r) togglePick(r, dragValue)
+  }
+}
+
+/** 结束拖拽：在行上松手、拖出表格、窗口任意位置松手都会走到。 */
+function endChanDrag() {
+  dragging.value = false
+  dragAnchor = -1
+  dragHover.value = -1
+}
+
+/** 全选当前列表（受搜索/只看已选影响，即「所见即所选」）。 */
+function pickAllVisible() {
+  for (const r of chanRows.value) togglePick(r, true)
+}
+
+/** 清空全部选择（含不在当前列表里的，所以直接 clear 而不是遍历）。 */
+function clearPicked() {
+  picked.clear()
+}
+
 async function saveChannels() {
   if (!chanTarget.value) return
   chanSaving.value = true
@@ -529,7 +641,16 @@ async function saveChannels() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  // 拖拽可能在表格外松手（甚至拖出浏览器窗口），
+  // 挂在 window 上兜底，否则 dragging 会一直为 true、行高亮不消失。
+  window.addEventListener('mouseup', endChanDrag)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('mouseup', endChanDrag)
+})
 </script>
 
 <style scoped>
@@ -540,6 +661,19 @@ onMounted(load)
 .plan-detail {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* 批量选择提示：弱化色，避免抢表格的注意力 */
+.pick-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 拖拽覆盖范围高亮：让用户看清这次拖拽选中了哪一段 */
+:deep(.el-table__body tr.is-drag-range > td) {
+  background: var(--el-color-primary-light-9) !important;
 }
 
 /* ==================== 计划时段编辑器 ==================== */

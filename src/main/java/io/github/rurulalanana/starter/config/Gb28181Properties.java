@@ -18,6 +18,21 @@ public class Gb28181Properties {
     private int sipPort = 5060;
 
     /**
+     * SIP 信令要监听的传输协议，逗号分隔（默认 {@code UDP,TCP}）。
+     *
+     * <p><b>只监听 UDP 是常见的踩坑点</b>：GB/T 28181 允许设备用 UDP 或 TCP
+     * 传信令，由设备侧配置决定。配成 TCP 的设备在只有 UDP 监听时<b>完全注册不上</b>，
+     * 而且平台日志里一条记录都没有 —— 极易误判成网络不通或鉴权失败。
+     *
+     * <p>两个协议共用 {@link #sipPort}：SIP 的 UDP 与 TCP 属于不同传输层，
+     * 同端口不冲突，防火墙需同时放行 udp 与 tcp。
+     *
+     * <p>取值：{@code "UDP,TCP"}（默认）/ {@code "UDP"} / {@code "TCP"}。
+     * 非法值会被忽略并告警，不会让整个 SIP 起不来。
+     */
+    private String sipTransports = "UDP,TCP";
+
+    /**
      * SIP 对外通告地址（写入 INVITE 的 From / Contact）。
      *
      * <p>留空自动推断本机非回环 IPv4。平台在 NAT 后或多网卡时必须显式配置，

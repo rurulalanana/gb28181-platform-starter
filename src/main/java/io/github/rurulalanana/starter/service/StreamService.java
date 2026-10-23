@@ -665,6 +665,9 @@ public class StreamService {
         }
         long graceMs = Math.max(20000L, mediaServer.noneReaderDelayMs());
         long now = System.currentTimeMillis();
+        // 一次性取出「要求常开推流」的通道，避免在循环里逐个查库。
+        // 每 20 秒跑一次 × 通道数 次查询是纯浪费，一次全量反而更划算。
+        java.util.Set<String> keepAlive = channelsRequiringStream();
         int closed = 0;
         for (RtpSession session : sessions.sessions()) {
             try {
@@ -677,6 +680,14 @@ public class StreamService {
                     continue;
                 }
                 if (now - session.getCreatedAt() < graceMs) {
+                    continue;
+                }
+                // 【必须尊重通道的「常开」设置，否则按需/常开开关形同虚设】
+                //
+                // 原实现只按 ZLM 读者数判断，等于「所有通道都按需」——
+                // 用户把 onDemand 关掉（期望常开）也照样被关流，
+                // 表现为「设了常开还是过一会儿就断」。
+                if (keepAlive.contains(session.getChannelId())) {
                     continue;
                 }
                 if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
@@ -695,6 +706,44 @@ public class StreamService {
             }
         }
         return closed;
+    }
+
+    /**
+     * 找出「要求流常开」的通道编码集合。
+     *
+     * <p>两种通道必须常开：
+     * <ol>
+     *   <li><b>开了云端录像</b>（{@code cloud_record=true}）——「平台持续把这段
+     *       录像存下来」的前提就是有流。虽然 ZLM 侧 {@code protocol.mp4_as_player=1}
+     *       让录制器算作「读者」，但录制尚未开始的那一瞬间读者数仍是 0，
+     *       存在被误关的竞态；</li>
+     *   <li><b>显式设置常开</b>（{@code on_demand=false}）—— 用户的明确意图。</li>
+     * </ol>
+     *
+     * <p>返回 {@code Set} 而不是逐个查：本方法被空闲流巡检每 20 秒调用一次，
+     * 一次全量查库（几千行以内）远优于循环里 N 次单条查询。
+     *
+     * <p>查库失败返回空集合：此时退化为「全部按需」，与旧行为一致，
+     * 不会因为一次查询异常就把流全留着不关。
+     */
+    private java.util.Set<String> channelsRequiringStream() {
+        try {
+            java.util.Set<String> out = new java.util.HashSet<>();
+            for (GbChannel ch : deviceService.allChannels()) {
+                if (ch.getChannelId() == null) {
+                    continue;
+                }
+                boolean record = Boolean.TRUE.equals(ch.getCloudRecord());
+                boolean pinnedOpen = Boolean.FALSE.equals(ch.getOnDemand());
+                if (record || pinnedOpen) {
+                    out.add(ch.getChannelId());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            log.debug("读取常开通道失败（本次按全部按需处理）: {}", e.getMessage());
+            return java.util.Set.of();
+        }
     }
 
     /**

@@ -552,7 +552,17 @@ public class DeviceController {
         return ApiResponse.ok();
     }
 
-    /** 设置通道按需直播。 */
+    /**
+     * 设置通道按需直播。
+     *
+     * <p><b>与云端录像互斥</b>：两者的语义直接冲突，不可能同时成立 ——
+     * <ul>
+     *   <li><b>按需直播</b> = 没人看就停流，省设备带宽；</li>
+     *   <li><b>云端录像</b> = 平台持续录像，必须有流一直在推。</li>
+     * </ul>
+     * 「有人看就录、没人看就停」录出来的必然是残缺片段，
+     * 用户会以为录像功能坏了。因此这里强制互斥：开按需就关录像（并归档已有片段）。
+     */
     @PostMapping("/setchannelondemand")
     public ApiResponse<Void> setChannelOndemand(@RequestParam String serial,
                                                 @RequestParam String code,
@@ -562,8 +572,25 @@ public class DeviceController {
         StpUtil.checkLogin();
         GbChannel channel = requireChannel(code);
         channel.setOnDemand(ondemand);
+        // 互斥：开按需直播必须同时关掉云端录像
+        boolean turnedOffRecord = false;
+        if (Boolean.TRUE.equals(ondemand) && Boolean.TRUE.equals(channel.getCloudRecord())) {
+            channel.setCloudRecord(false);
+            turnedOffRecord = true;
+        }
         deviceService.updateChannel(channel);
-        // 由「按需」切到「常开」时无需处理；反向切换且当前无人观看则停流
+        if (turnedOffRecord) {
+            recordPolicy.set(code, false);
+            try {
+                if (recordService.isRecording(code)) {
+                    recordService.stopCloudRecord(code);
+                }
+            } catch (Exception e) {
+                log.warn("开按需直播时停止录像失败（开关已关闭，下次流上下线自会停）: channel={} {}",
+                        code, e.getMessage());
+            }
+            log.info("通道 {} 开启按需直播，已同时关闭云端录像（两者互斥）", code);
+        }
         if (Boolean.TRUE.equals(ondemand) && Boolean.TRUE.equals(checkOutputs)) {
             log.info("通道 {} 已设为按需直播，无人观看时将由 ZLM 自动停流", code);
         }
@@ -594,8 +621,22 @@ public class DeviceController {
         StpUtil.checkLogin();
         GbChannel channel = requireChannel(code);
         channel.setCloudRecord(cloudrecord);
+        // 互斥：开云端录像必须关掉按需直播。
+        //
+        // 「按需」= 没人看就停流，而云端录像要求流一直推着；
+        // 二者同开只能录出「有人看时的那几段」，用户会以为录像坏了。
+        // 这里是 {@link #setChannelOndemand} 的反方向，两条路径都要兜住，
+        // 否则先开哪个就取决于操作顺序（实测踩过）。
+        boolean turnedOffOnDemand = false;
+        if (Boolean.TRUE.equals(cloudrecord) && Boolean.TRUE.equals(channel.getOnDemand())) {
+            channel.setOnDemand(false);
+            turnedOffOnDemand = true;
+        }
         deviceService.updateChannel(channel);
         recordPolicy.set(code, Boolean.TRUE.equals(cloudrecord));
+        if (turnedOffOnDemand) {
+            log.info("通道 {} 开启云端录像，已同时关闭按需直播（两者互斥，改为常开推流）", code);
+        }
         try {
             if (Boolean.TRUE.equals(cloudrecord)) {
                 // 用库里的 device_id 而不是入参 serial：serial 由前端传入，
