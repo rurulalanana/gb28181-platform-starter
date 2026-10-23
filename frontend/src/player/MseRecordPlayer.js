@@ -32,7 +32,7 @@
  * @module MseRecordPlayer
  */
 
-import { Mp4Remuxer, scanParamSets, getCachedMoov } from './Mp4Remuxer.js'
+import { Mp4Remuxer, scanParamSets } from './Mp4Remuxer.js'
 
 /** 重建 MediaSource 的最大次数，超过就放弃。 */
 const MAX_REBUILD = 12
@@ -687,14 +687,6 @@ export class MseRecordPlayer {
    * @returns {Promise<{bytes:Uint8Array, offset:number}>}
    */
   async _fetchMoov() {
-    /*
-     * 编码探测时已经把文件尾的 moov 读下来了，这里直接复用，
-     * 不用再下一次（公网带宽 ~80KB/s，重复读 64KB 就是白等 0.8 秒）。
-     */
-    const cached = getCachedMoov(this.url)
-    if (cached) {
-      return cached
-    }
     let take = Math.min(MOOV_PROBE_BYTES, this.fileSize)
     for (;;) {
       const offset = this.fileSize - take
