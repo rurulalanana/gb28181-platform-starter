@@ -94,6 +94,14 @@
         </el-table-column>
 
         <el-table-column label="按需直播" min-width="88" align="center">
+          <template #header>
+            <el-tooltip
+              content="按需直播：无人观看时自动停流以节省设备带宽。与「云端录像」互斥——开启它会自动关闭云端录像。"
+              placement="top"
+            >
+              <span class="th-with-tip">按需直播 <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <el-switch
               v-model="row.ondemand"
@@ -108,6 +116,14 @@
         </el-table-column>
 
         <el-table-column label="云端录像" min-width="88" align="center">
+          <template #header>
+            <el-tooltip
+              content="云端录像：平台持续把这段流录成 MP4，要求流一直在线。与「按需直播」互斥——开启它会自动关闭按需直播。"
+              placement="top"
+            >
+              <span class="th-with-tip">云端录像 <el-icon><QuestionFilled /></el-icon></span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <el-switch
               v-model="row.cloudRecord"
@@ -639,7 +655,17 @@ async function toggleCloudRecord(row, enable) {
     // 参数名必须是 cloudrecord（后端 @RequestParam Boolean cloudrecord），
     // 传 enable 会被忽略并落到默认值 false，开关看似生效实则永远关着
     await deviceApi.setChannelCloudRecord({ serial: row.deviceId, code: row.id, cloudrecord: enable })
-    ElMessage.success(enable ? '已开启云端录像' : '已关闭云端录像')
+    // 【互斥：后端会自动关掉「按需直播」，这里必须同步本地状态】
+    //
+    // 否则用户看到的是「两个开关都显示开」，可实际库里是按需=关。
+    // 不清同步就只能刷新页面才对得上（这是用户反馈的原问题）。
+    const turnedOffOnDemand = enable && row.ondemand
+    if (turnedOffOnDemand) {
+      row.ondemand = false
+    }
+    ElMessage.success(turnedOffOnDemand
+      ? '已开启云端录像，同时关闭按需直播（两者互斥）'
+      : (enable ? '已开启云端录像' : '已关闭云端录像'))
   } catch (e) {
     row.cloudRecord = !enable
     ElMessage.error(e.message || '操作失败')
@@ -763,7 +789,13 @@ async function savePosition() {
 
 /* ---------------- 按需直播 / 停止推流 ---------------- */
 
-/** 切换「按需直播」开关。 */
+/**
+ * 切换「按需直播」开关。
+ *
+ * <p><b>与云端录像互斥</b>：后端开按需时会自动关掉云端录像并归档，
+ * 这里必须同步 row.cloudRecord，否则界面会显示「两个都开」——
+ * 与实际库里状态不符，用户只能刷新页面才发现变了。
+ */
 async function toggleOndemand(row, enable) {
   ondemandPending.add(row.id)
   try {
@@ -772,7 +804,14 @@ async function toggleOndemand(row, enable) {
       code: row.id,
       ondemand: enable
     })
-    ElMessage.success(enable ? '已开启按需直播' : '已关闭按需直播')
+    // 互斥：开按需会被后端连带关掉云端录像
+    const turnedOffRecord = enable && row.cloudRecord
+    if (turnedOffRecord) {
+      row.cloudRecord = false
+    }
+    ElMessage.success(turnedOffRecord
+      ? '已开启按需直播，同时关闭云端录像（两者互斥）'
+      : (enable ? '已开启按需直播' : '已关闭按需直播'))
   } catch (e) {
     row.ondemand = !enable
     ElMessage.error(e.message || '操作失败')
@@ -831,6 +870,25 @@ onUnmounted(() => player.stop())
 /* 操作列：四个按钮必须排在一行，否则行高会翻倍 */
 :deep(td.op-col .el-button + .el-button) {
   margin-left: 4px;
+}
+
+/*
+ * 带提示的表头：文字 + 问号图标。
+ *
+ * 「按需直播」与「云端录像」互斥，但在表头只写四个字看不出来 ——
+ * 用户会以为两个可以同时开，点了一个另一个自动关掉时还以为出 bug 了。
+ * 加个问号让语义可发现（悬停显示完整说明）。
+ */
+.th-with-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: help;
+}
+
+.th-with-tip .el-icon {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 
 /* 国标编号：20 位等宽字符，用小一号字才塞得进 168px 的列 */
