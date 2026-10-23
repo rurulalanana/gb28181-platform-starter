@@ -15,8 +15,16 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 平台定时任务。
  *
- * <p>当前做五件事：心跳超时设备标记离线；操作日志过期清理；系统指标采样；
- * 自动录像对账；云端录像保活。
+ * <p>职责（按调度周期从短到长）：
+ * <ul>
+ *   <li>系统指标采样（3 秒）；</li>
+ *   <li>孤儿流认领（15 秒）；</li>
+ *   <li>空闲流回收（20 秒）；</li>
+ *   <li>目录分页批次回收（30 秒）、云端录像保活（30 秒）；</li>
+ *   <li>心跳超时设备标记离线（60 秒）、录像对账（60 秒）；</li>
+ *   <li>录像磁盘清理（10 分钟）；</li>
+ *   <li>操作日志清理（1 小时）、状态日志清理（1 小时）。</li>
+ * </ul>
  *
  * <p>通道只由设备上报的目录应答产生，这里不做任何兜底登记。
  */
@@ -33,6 +41,59 @@ public class PlatformScheduler {
     private final StreamService streamService;
     private final CatalogPager catalogPager;
     private final Gb28181Properties props;
+
+    /**
+     * 可热更新配置的来源（<b>数据库优先、application.yml 兜底</b>）。
+     *
+     * <p>所有「用户可能在界面上改」的参数都从这里读，<b>不要用 {@code @Value}</b>：
+     * {@code @Value} 只在启动时解析一次，改 yml 或改库都不生效，必须重启 ——
+     * 而这正是要消灭的运维成本。
+     */
+    private final RuntimeConfigService config;
+
+    /**
+     * 各动态任务上一次实际执行的时刻（任务名 → 毫秒）。
+     *
+     * <p><b>为什么需要它</b>：{@code @Scheduled(fixedDelayString = "${...}")}
+     * 的占位符只在<b>启动时</b>解析一次，改了 yml 或数据库都不会生效。
+     * 为了支持「界面上改间隔立即生效」，做法是：
+     * <ul>
+     *   <li>{@code @Scheduled} 固定高频 tick（{@link #TICK_MS}）；</li>
+     *   <li>任务内部用 {@link #due} 判断「距上次执行是否已达最新配置的间隔」。</li>
+     * </ul>
+     * 代价是每个 tick 一次 HashMap 查找，相对任务本身耗时可以忽略。
+     *
+     * <p>附带好处：间隔调小<b>立刻</b>体现（下一 tick 就判定到期），
+     * 调大则自然延后，都不需要重启。
+     */
+    private final Map<String, Long> lastRunAt = new ConcurrentHashMap<>();
+
+    /**
+     * 动态任务的调度心跳（毫秒）。
+     *
+     * <p>取 5 秒：抱证实际间隔误差不超过 5 秒，又不至于空转太频繁。
+     * 现有可配置间隔的下限都是 5~10 秒级，5 秒 tick 足够表达。
+     */
+    private static final long TICK_MS = 5_000;
+
+    /**
+     * 判断某个周期任务本次是否该执行。
+     *
+     * <p>首次调用直接返回 {@code true}（允许立刻跑一次），之后按
+     * {@link RuntimeConfigService} 里的<b>当前</b>间隔判断。
+     *
+     * @param taskId     任务标识（{@link #lastRunAt} 的 key）
+     * @param intervalMs 间隔（毫秒，调用方从 config 实时读取）
+     */
+    private boolean due(String taskId, long intervalMs) {
+        long now = System.currentTimeMillis();
+        Long prev = lastRunAt.get(taskId);
+        if (prev != null && now - prev < Math.max(intervalMs, TICK_MS)) {
+            return false;
+        }
+        lastRunAt.put(taskId, now);
+        return true;
+    }
 
     /**
      * 会话停在 {@code NEGOTIATING} 多久才允许重建一次（毫秒）。
@@ -55,6 +116,36 @@ public class PlatformScheduler {
     /** 操作日志保留天数（默认 7 天）。 */
     @Value("${gb28181.starter.oplog-retain-days:7}")
     private int oplogRetainDays;
+
+    /**
+     * 云端录像保留天数（默认 7 天）；{@code <=0} 表示不按天数删，只受磁盘水位约束。
+     *
+     * <p>配合 {@link #recordDiskMaxUsedPercent} 使用：天数保证「至少留 7 天」，
+     * 水位保证「盘不能满」。单通道 24 小时录像约 350MB/小时，
+     * 30G 的盘只够 3 天左右，因此水位兜底是必需的。
+     */
+    @Value("${gb28181.starter.record-retain-days:7}")
+    private int recordRetainDays;
+
+    /**
+     * 录像磁盘使用率上限（百分比，默认 85）。
+     *
+     * <p>超过就删最老的录像（跳过 important 与最近
+     * {@link #recordKeepMinDays} 天），直到降回阈值以下。
+     *
+     * <p>为什么不是 95：留出 15% 给数据库、日志、临时转码文件。
+     * 同盘写满时 PostgreSQL 报错会连带整个平台不可用，比丢老录像严重得多。
+     */
+    @Value("${gb28181.starter.record-disk-max-used-percent:85}")
+    private int recordDiskMaxUsedPercent;
+
+    /** 磁盘告急时，无论多大压力都至少保留最近几天（默认 1 天）。 */
+    @Value("${gb28181.starter.record-keep-min-days:1}")
+    private int recordKeepMinDays;
+
+    /** 状态变更日志保留天数（默认 30 天）；{@code <=0} 表示不清理。 */
+    @Value("${gb28181.starter.status-log-retain-days:30}")
+    private int statusLogRetainDays;
 
     /** 心跳超时巡检，默认每 60 秒一次。 */
     @Scheduled(fixedDelayString = "${gb28181.starter.offline-scan-interval-ms:60000}")
@@ -101,21 +192,102 @@ public class PlatformScheduler {
         }
     }
 
-    /**
-     * 操作日志过期清理：启动 1 分钟后首跑，之后每小时一次。
-     *
-     * <p>保留天数由 {@code gb28181.starter.oplog-retain-days} 控制（默认 7 天）。
-     */
-    @Scheduled(fixedDelayString = "${gb28181.starter.oplog-purge-interval-ms:3600000}",
-            initialDelayString = "${gb28181.starter.oplog-purge-initial-delay-ms:60000}")
+    /** 操作日志过期清理（每小时，保留天数由 {@link ConfigKeys#LOG_OPLOG_RETAIN_DAYS} 控制）。 */
+    @Scheduled(fixedDelay = TICK_MS)
     public void purgeOperationLogs() {
+        if (!due("oplog-purge", 3_600_000L)) {
+            return;
+        }
+        int retainDays = config.getInt(ConfigKeys.LOG_OPLOG_RETAIN_DAYS);
         try {
-            int deleted = operationLogService.purgeExpired(oplogRetainDays);
+            int deleted = operationLogService.purgeExpired(retainDays);
             if (deleted > 0) {
-                log.info("操作日志清理：{} 条过期记录已删除（保留 {} 天）", deleted, oplogRetainDays);
+                log.info("操作日志清理：{} 条过期记录已删除（保留 {} 天）", deleted, retainDays);
             }
         } catch (Exception e) {
             log.warn("操作日志清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 状态变更日志过期清理（默认每小时一次，保留 30 天）。
+     *
+     * <p><b>为什么需要</b>：{@code gb_status_log} 记录设备/通道的在线离线变更，
+     * 每次心跳超时、每次重连都写一条。实测 10 天积累了 1 万条 ——
+     * 量不大但<b>没有任何清理路径</b>，跑一年就是 36 万条，
+     * 而它参与 {@code ORDER BY create_time DESC} 的分页查询，
+     * 表越大翻页越慢。
+     *
+     * <p>保留期比操作日志（7 天）长得多：状态变更是排查
+     * 「某天设备为什么掉线」的关键证据，比谁点了哪个按钮更值得留。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void purgeStatusLogs() {
+        if (!due("status-log-purge", 3_600_000L)) {
+            return;
+        }
+        int retainDays = config.getInt(ConfigKeys.LOG_STATUS_RETAIN_DAYS);
+        if (retainDays <= 0) {
+            return;
+        }
+        try {
+            int deleted = deviceService.purgeStatusLogs(retainDays);
+            if (deleted > 0) {
+                log.info("状态日志清理：{} 条超过 {} 天的记录已删除", deleted, retainDays);
+            }
+        } catch (Exception e) {
+            log.warn("状态日志清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 录像磁盘清理（默认每 10 分钟一次，启动 2 分钟后首跑）。
+     *
+     * <p>两级策略：
+     * <ol>
+     *   <li><b>按保留天数</b>：超过 {@link #recordRetainDays} 的非重要录像删掉；</li>
+     *   <li><b>按磁盘水位</b>：用完 1 之后若仍超过
+     *       {@link #recordDiskMaxUsedPercent}，继续删最老的
+     *       （跳过 important 与最近 {@link #recordKeepMinDays} 天）。</li>
+     * </ol>
+     *
+     * <p><b>为什么必须有</b>：云端录像 24 小时不停写，单通道约 8GB/天。
+     * 服务器只有 30G 盘，没有清理就是一颗定时炸弹 —— 磁盘写满后
+     * ZLM 分片写失败、PostgreSQL（同盘）也可能写失败，整个平台瘫痪。
+     *
+     * <p>跑在 Spring 的调度线程上，不与 {@code gb28181-persist} 抢（删文件是 I/O，
+     * 落库是事务，混在一个线程会互相拖慢）。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void purgeRecordings() {
+        long interval = config.getLong(ConfigKeys.RECORD_PURGE_INTERVAL_MS);
+        if (!due("record-purge", interval)) {
+            return;
+        }
+        int retainDays = config.getInt(ConfigKeys.RECORD_RETAIN_DAYS);
+        int maxUsedPercent = config.getInt(ConfigKeys.RECORD_DISK_MAX_USED_PERCENT);
+        int keepMinDays = config.getInt(ConfigKeys.RECORD_KEEP_MIN_DAYS);
+        // 1. 按天清理
+        try {
+            int deleted = recordService.purgeExpiredRecords(retainDays);
+            if (deleted > 0) {
+                log.info("录像清理：{} 条超过保留期（{} 天）的记录已删除", deleted, retainDays);
+            }
+        } catch (Exception e) {
+            log.warn("录像过期清理失败: {}", e.getMessage());
+        }
+        // 2. 磁盘水位兜底
+        try {
+            String root = props.getRecordRoot();
+            if (root == null || root.isBlank()) {
+                root = System.getProperty("user.dir") + "/record";
+            }
+            int deleted = recordService.purgeOldestUntilFree(root, maxUsedPercent, keepMinDays);
+            if (deleted > 0) {
+                log.info("录像清理：磁盘水位超限，删除了 {} 条最老的录像", deleted);
+            }
+        } catch (Exception e) {
+            log.warn("录像磁盘水位清理失败: {}", e.getMessage());
         }
     }
 
@@ -127,9 +299,11 @@ public class PlatformScheduler {
      * 丢了事件的录像在 ZLM 侧已经结束，但库里永远缺一条终态记录。
      * 这里周期性把「已结束却未落库」的录像补归档，保证云端录像列表完整。
      */
-    @Scheduled(fixedDelayString = "${gb28181.starter.record-reconcile-interval-ms:60000}",
-            initialDelayString = "${gb28181.starter.record-reconcile-initial-delay-ms:30000}")
+    @Scheduled(fixedDelay = TICK_MS)
     public void reconcileRecordings() {
+        if (!due("record-reconcile", config.getLong(ConfigKeys.RECORD_RECONCILE_INTERVAL_MS))) {
+            return;
+        }
         try {
             int archived = recordService.reconcileAutoRecordings();
             if (archived > 0) {
@@ -169,10 +343,12 @@ public class PlatformScheduler {
      * 重试频率因此从「每 30 秒」降到「每 2 分钟」，对设备的压力小 4 倍，
      * 恢复速度也够用（设备一恢复，下一个周期就能建上）。
      */
-    @Scheduled(fixedDelayString = "${gb28181.starter.record-keepalive-interval-ms:30000}",
-            initialDelayString = "${gb28181.starter.record-keepalive-initial-delay-ms:45000}")
+    @Scheduled(fixedDelay = TICK_MS)
     public void keepCloudRecordStreams() {
         if (!recordPolicy.isLoaded()) {
+            return;
+        }
+        if (!due("record-keepalive", config.getLong(ConfigKeys.RECORD_KEEPALIVE_INTERVAL_MS))) {
             return;
         }
         long now = System.currentTimeMillis();
@@ -258,9 +434,11 @@ public class PlatformScheduler {
      * <p>与孤儿流巡检配合成闭环：孤儿流巡检负责「让它可见」，
      * 本任务负责「没人看就关掉」，两者都以 ZLM 的实际媒体源为准。
      */
-    @Scheduled(fixedDelayString = "${gb28181.starter.idle-reap-interval-ms:20000}",
-            initialDelayString = "${gb28181.starter.idle-reap-initial-delay-ms:40000}")
+    @Scheduled(fixedDelay = TICK_MS)
     public void reapIdleStreams() {
+        if (!due("idle-reap", config.getLong(ConfigKeys.STREAM_IDLE_REAP_INTERVAL_MS))) {
+            return;
+        }
         try {
             int closed = streamService.reapIdleStreams();
             if (closed > 0) {

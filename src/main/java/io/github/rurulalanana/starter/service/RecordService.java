@@ -30,6 +30,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -97,6 +98,25 @@ public class RecordService {
 
     /** 墓碑保留时长（毫秒）：超过后允许对账重新登记（文件若仍在）。 */
     private static final long TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000L;
+
+    /**
+     * 临时录像文件「多久没被写入」即认定为孤儿（毫秒）。
+     *
+     * <p>ZLM 正在写的分片带 {@code .} 前缀且持续被追加，修改时间一直在更新；
+     * 进程异常退出后没人再碰它，修改时间就冻住了。
+     * 取 10 分钟：远大于任何正常的分片写盘间隔（实测 60 分钟一段、
+     * 每秒都在写），又足够短以便及时告警。
+     */
+    private static final long ORPHAN_STALE_MS = 10 * 60 * 1000L;
+
+    /**
+     * 已告警过的孤儿文件路径（去重）。
+     *
+     * <p>对账每 60 秒跑一次，若不去重，一个 319 MB 的孤儿文件会每分钟
+     * 刷一条同样的告警，把日志淹掉。重启后重新告警一次是可接受的
+     * （反而能提醒运维「上次的还没清理」）。
+     */
+    private final java.util.Set<String> warnedOrphans = ConcurrentHashMap.newKeySet();
 
     // ==================== 设备侧录像（RecordInfo） ====================
 
@@ -419,6 +439,13 @@ public class RecordService {
         if (channelDirs == null) {
             return 0;
         }
+        // 【性能】一次性把所有已入库的文件路径读进内存，而不是「每个文件查一次库」。
+        //
+        // 原来是 for 循环里 selectCount(file_path = ?)：本任务每 60 秒跑一次，
+        // 录像按天累积到 1000 个文件时就是每分钟 1000 条 SQL ——
+        // 白白占满连接池，拖慢同库的会话/设备查询。
+        // 现在一条 SELECT 换一个 HashSet，复杂度从 O(n·SQL) 降到 O(n) 内存比对。
+        Set<String> known = loadKnownFilePaths();
         for (File channelDir : channelDirs) {
             String channelId = channelDir.getName();
             List<File> files = new ArrayList<>();
@@ -426,6 +453,7 @@ public class RecordService {
             for (File f : files) {
                 // 正在写的分片是临时名（ZLM 用 . 前缀，关闭后改名）：跳过
                 if (f.getName().startsWith(".")) {
+                    warnOrphanIfStale(channelId, f);
                     continue;
                 }
                 String absPath = f.getAbsolutePath();
@@ -433,9 +461,7 @@ public class RecordService {
                 if (isDeleted(absPath)) {
                     continue;
                 }
-                Long exists = recordMapper.selectCount(Wrappers.<GbRecord>lambdaQuery()
-                        .eq(GbRecord::getFilePath, absPath));
-                if (exists != null && exists > 0) {
+                if (known.contains(absPath)) {
                     continue;
                 }
                 try {
@@ -448,6 +474,73 @@ public class RecordService {
             }
         }
         return count;
+    }
+
+    /**
+     * 对「长时间未收尾的临时录像」告警。
+     *
+     * <p><b>为什么需要</b>：ZLM 写入中的分片带 {@code .} 前缀，正常关闭后会改名。
+     * 若进程被强杀 / ZLM 原生崩溃（实测 {@code RtmpMediaSourceMuxer::getOwnerPoller
+     * not implemented} 导致 SIGABRT），改名与 moov 回写都来不及做，
+     * 磁盘上就留下一个大小正常、<b>但没有 moov</b> 的文件 ——
+     * 任何播放器都打不开（{@code moov atom not found}），且无法修复。
+     *
+     * <p>原来这类文件被直接 {@code continue} 跳过，静默消失，
+     * 运维完全不知道丢过录像。这里只告警不删除：
+     * 文件可能仍有残余价值（例如可用工具抢救部分帧），
+     * 也避免误删正在写入的正常分片。
+     *
+     * <p>判据用「最后修改时间距今超过阈值」而不是「文件名以 . 开头」，
+     * 因为正在录制的分片同样带 {@code .} 前缀，不能一视同仁。
+     * 录制中文件会持续被写入，修改时间一直在更新，因此不会被误报。
+     *
+     * @param channelId 通道编码（仅用于日志定位）
+     * @param f         疑似未收尾的临时文件
+     */
+    private void warnOrphanIfStale(String channelId, File f) {
+        long age = System.currentTimeMillis() - f.lastModified();
+        if (age < ORPHAN_STALE_MS) {
+            return;
+        }
+        // 按路径去重：对账每 60 秒跑一次，不去重会每分钟刷一条同样的告警
+        if (warnedOrphans.add(f.getAbsolutePath())) {
+            log.warn("发现未收尾的录像临时文件（进程异常退出，无法播放，需人工清理）: "
+                            + "channel={} file={} size={}MB 最后写入={} 分钟前",
+                    channelId, f.getAbsolutePath(), f.length() / 1048576,
+                    age / 60000);
+        }
+    }
+
+    /**
+     * 一次性读出库里所有已登记的录像文件路径（对账用）。
+     *
+     * <p><b>为什么是「全部」而不是「按通道查」</b>：对账要判断的是
+     * 「磁盘上这个文件是否已入库」，本质是全集比对。按通道查会变成
+     * 每通道一次 SQL，仍然是 N 次；全部取回只有一条 SQL，
+     * 且录像路径是短字符串，10 万条约 10MB —— 对本任务的调用频率（60 秒）
+     * 可以接受。真到百万级应改为「只取最近 N 天的路径」。
+     *
+     * <p>只 select 路径字段、不查整行：{@code gb_record} 有大字段
+     * （file_path/file_name 之外还有对象存储 key、URL 等），
+     * 查整行会让这条 SQL 慢一个数量级。
+     */
+    private Set<String> loadKnownFilePaths() {
+        Set<String> out = new java.util.HashSet<>();
+        try {
+            List<Object> paths = recordMapper.selectObjs(Wrappers.<GbRecord>lambdaQuery()
+                    .select(GbRecord::getFilePath)
+                    .isNotNull(GbRecord::getFilePath));
+            for (Object p : paths) {
+                if (p != null) {
+                    out.add(p.toString());
+                }
+            }
+        } catch (Exception e) {
+            // 查不到就退回「全部当作未登记」—— 会多补几条，但由
+            // uk_gb_record_file_path 唯一索引兜底，不会产生重复记录
+            log.warn("读取已登记录像路径失败，本次对账退化为逐文件判断: {}", e.getMessage());
+        }
+        return out;
     }
 
     /** 递归收集目录下的 mp4 文件。 */
@@ -602,7 +695,20 @@ public class RecordService {
         }
         // 路径一：ZLM 内存索引的终态条目
         Recording recording = awaitTerminalRecording(channelId, sinceMillis);
-        if (recording != null) {
+        // 【必须判 filePath】索引条目可能「已结束但没有文件路径」——
+        // 典型场景是停机：SIP 先停 → 设备不再推流 → ZLM 抢先自动停录并落盘，
+        // 而我们的 mk_recorder_stop 晚了一步，on_mk_record_mp4 回调没送到，
+        // 索引里 endTime 有了、filePath 仍是 null。
+        //
+        // 这种条目一旦入库就是**坏记录**：file_path 为空、size=0，
+        // 前端点播放/下载会 Path.of(null) 抛 NPE（返回 500），
+        // 而且文件明明在磁盘上却「打不开、删不掉」。
+        // 更糟的是它与随后对账补登记的正确记录**重复**（实测同一文件两条记录）。
+        //
+        // 所以：没有路径就不入库，直接落到路径二按磁盘文件补登记 ——
+        // 那里能拿到真实路径、真实大小、真实时长（c0ntinue 到 archiveFromDisk）。
+        if (recording != null && recording.getFilePath() != null
+                && !recording.getFilePath().isBlank()) {
             GbRecord record = toRecord(recording);
             record.setStorageType(storage.type());
             record.setUploadState(storage.enabled() ? "PENDING" : "NONE");
@@ -612,7 +718,7 @@ public class RecordService {
             }
             return record;
         }
-        // 路径二：索引不可用，扫该通道目录补登记（取最新一个未入库的文件）
+        // 路径二：索引不可用（或索引条目缺文件路径），扫该通道目录补登记
         return archiveFromDisk(channelId, sinceMillis);
     }
 
@@ -640,6 +746,7 @@ public class RecordService {
         files.sort((a, b) -> Long.compare(b.lastModified(), a.lastModified()));
         for (File f : files) {
             if (f.getName().startsWith(".")) {
+                warnOrphanIfStale(channelId, f);
                 continue;
             }
             // 早于本次会话开始的文件是历史录像，不归本次归档负责
@@ -904,9 +1011,125 @@ public class RecordService {
                 .eq(GbRecord::getRecordId, recordId)) > 0;
     }
 
+    /**
+     * 按保留天数清理过期录像（删库 + 删文件）。
+     *
+     * <p><b>为什么必须有</b>：云端录像 24 小时不停写，单通道按
+     * 800 kbps 估算约 <b>350 MB/小时 ≈ 8 GB/天</b>。实测服务器只有 30G 盘，
+     * 一旦磁盘写满，不只是录像丢失 —— ZLM 写不进分片会持续报错，
+     * 数据库（同一块盘）也可能写失败，整个平台瘫痪。
+     *
+     * <p><b>跳过「重要」标记</b>：用户的 {@code important=true} 是明确的
+     * 「这段不能删」，清理必须尊重它；磁盘告急时由
+     * {@link #purgeOldestUntilFree} 单独处理（它同样跳过重要录像）。
+     *
+     * <p>删除顺序是<b>先删文件、再删库</b>：反过来若文件删除失败，
+     * 库里记录已没了，文件就成了永远没人管的孤儿（对账也不会再登记，
+     * 因为对账只补「库里有但磁盘上没记录」的反向场景）。
+     *
+     * @param retainDays 保留天数；{@code <= 0} 表示不限（只受磁盘水位约束）
+     * @return 清理掉的录像条数
+     */
+    public int purgeExpiredRecords(int retainDays) {
+        if (retainDays <= 0) {
+            return 0;
+        }
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(retainDays);
+        List<GbRecord> expired = recordMapper.selectList(Wrappers.<GbRecord>lambdaQuery()
+                .lt(GbRecord::getStartTime, cutoff)
+                .eq(GbRecord::getImportant, false)
+                .orderByAsc(GbRecord::getStartTime));
+        int n = 0;
+        for (GbRecord r : expired) {
+            try {
+                deleteFile(r);
+                removeRecord(r.getRecordId());
+                n++;
+            } catch (Exception e) {
+                log.warn("清理过期录像失败: recordId={} file={} {}", 
+                        r.getRecordId(), r.getFilePath(), e.getMessage());
+            }
+        }
+        return n;
+    }
+
+    /**
+     * 磁盘水位兜底：删最老的录像直到剩余空间占比达标。
+     *
+     * <p>与 {@link #purgeExpiredRecords} 互补：保留天数保证「至少留 N 天」，
+     * 本方法保证「盘不能满」。先到先删——只要水位超阈值，最老的先走，
+     * 与是否过保留期无关（磁盘满了就什么都存不下去了）。
+     *
+     * <p><b>永远跳过</b>：{@code important=true} 的录像、正在录制的分片
+     * （文件名 {@code .} 前缀）。
+     *
+     * @param recordRoot     录像根目录（用于读磁盘水位）
+     * @param maxUsedPercent 磁盘使用率上限（如 85 表示超过 85% 开始删）
+     * @param keepMinDays    无论如何至少保留最近这么多天（防止配置失误把盘清空）
+     * @return 清理掉的录像条数
+     */
+    public int purgeOldestUntilFree(String recordRoot, int maxUsedPercent, int keepMinDays) {
+        if (maxUsedPercent <= 0 || recordRoot == null || recordRoot.isBlank()) {
+            return 0;
+        }
+        File root = new File(recordRoot);
+        if (!root.isDirectory()) {
+            return 0;
+        }
+        // 目录所在文件系统的整体水位（录像和数据库通常同盘，必须看整盘）
+        long total;
+        long usable;
+        try {
+            total = root.getTotalSpace();
+            usable = root.getUsableSpace();
+        } catch (Exception e) {
+            log.debug("读取磁盘水位失败: {}", e.getMessage());
+            return 0;
+        }
+        if (total <= 0) {
+            return 0;
+        }
+        long usedPercent = (total - usable) * 100 / total;
+        if (usedPercent < maxUsedPercent) {
+            return 0;
+        }
+        log.warn("录像磁盘水位告急：已用 {}%（阈值 {}%），开始清理最老的录像",
+                usedPercent, maxUsedPercent);
+        LocalDateTime protectAfter = LocalDateTime.now().minusDays(Math.max(keepMinDays, 1));
+        int n = 0;
+        // 每批 50 条，边删边重算水位：避免一次性把全部记录读进内存
+        while (true) {
+            List<GbRecord> batch = recordMapper.selectList(Wrappers.<GbRecord>lambdaQuery()
+                    .eq(GbRecord::getImportant, false)
+                    .lt(GbRecord::getStartTime, protectAfter)
+                    .orderByAsc(GbRecord::getStartTime)
+                    .last("limit 50"));
+            if (batch.isEmpty()) {
+                log.warn("磁盘清理已无更多可删的录像（重要录像与最近 {} 天均受保护），"
+                        + "当前水位 {}%", keepMinDays, usedPercent);
+                return n;
+            }
+            for (GbRecord r : batch) {
+                try {
+                    deleteFile(r);
+                    removeRecord(r.getRecordId());
+                    n++;
+                } catch (Exception e) {
+                    log.warn("磁盘清理删除失败: recordId={} {}", r.getRecordId(), e.getMessage());
+                }
+            }
+            // 重算水位，达标就停
+            usable = root.getUsableSpace();
+            usedPercent = (total - usable) * 100 / total;
+            if (usedPercent < maxUsedPercent) {
+                log.info("磁盘清理完成：本次删除 {} 条录像，水位降到 {}%", n, usedPercent);
+                return n;
+            }
+        }
+    }
+
     /** 设置重要标记。 */
-    public boolean setImportant(String recordId, boolean important) {
-        GbRecord record = findRecord(recordId);
+    public boolean setImportant(String recordId, boolean important) {        GbRecord record = findRecord(recordId);
         if (record == null) {
             return false;
         }

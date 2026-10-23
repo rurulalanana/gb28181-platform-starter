@@ -18,6 +18,22 @@ export const metricsApi = {
   get: () => get('/system/metrics')
 }
 
+/**
+ * 运行时配置接口（`/api/v1/config/*`）。
+ *
+ * <p>这些配置改完<b>立即生效，不需要重启</b>：
+ * 保存 → 写数据库 + 更新内存 → 定时任务下一次执行就按新值跑；
+ * 需要推送到媒体层的项（分片时长、无人观看时长）会同步 apply。
+ *
+ * <p>语义是「数据库优先、application.yml 兜底」：
+ * 库里没有该 key 时用 yml 的值，保存过则覆盖，`reset` 回落 yml。
+ */
+export const configApi = {
+  list: () => get('/config/list'),
+  save: (key, value) => post('/config/save', { key, value }),
+  reset: (key) => post('/config/reset', { key })
+}
+
 /** 设备与通道接口（`/api/v1/device/*`）。 */
 export const deviceApi = {
   list: (params) => get('/device/list', params),

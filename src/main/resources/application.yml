@@ -13,6 +13,20 @@ server:
 spring:
   application:
     name: gb28181-platform-starter
+  # ==================== 定时任务线程池 ====================
+  # 【必须配置】Spring Boot 默认 pool.size=1，所有 @Scheduled 共用一个线程。
+  # 本平台有 8 个定时任务（心跳巡检、录像对账、录像保活、空闲流回收、
+  # 孤儿流认领、磁盘清理、操作日志清理、状态日志清理），一旦某个慢下来
+  # （录像对账要递归遍历整个录像目录、磁盘清理要删大量文件），
+  # 其它任务全被推迟 —— 表现为「设备掉线了但界面迟迟不更新」。
+  #
+  # 取 4：足够让耗时的清理类任务与秒级的巡检类任务互不阻塞，
+  # 又不至于让并发事务数过多。
+  task:
+    scheduling:
+      pool:
+        size: 4
+      thread-name-prefix: gb-sched-
   jackson:
     default-property-inclusion: non_null
   datasource:
@@ -118,6 +132,22 @@ gb28181:
   auto-record: false
   record-root: ""
 
+  # 云端录像单文件最长时长（秒），到点由 ZLM 自动切分片。
+  #
+  # 这是「崩溃损失上限」，不是磁盘优化参数。ZLM 原生库存在未捕获的 C++ 异常
+  # （实测 RtmpMediaSourceMuxer::getOwnerPoller not implemented → terminate()
+  # → SIGABRT），整个进程会崩掉，正在写的分片来不及写 moov，留下大小正常但
+  # 无法播放的孤儿文件（moov atom not found，无法修复）。
+  #
+  # 因此这个值 = 一次崩溃最多丢多久录像：
+  #   3600（1 小时，ZLM 默认）→ 实测崩一次丢 55 分钟 / 319 MB
+  #   1800（30 分钟，当前值） → 最多丢 30 分钟，一天 24 个文件
+  #   300 （5 分钟）          → 最多丢 5 分钟，但一天 288 个文件（太碎）
+  #
+  # 取 1800：崩溃损失与文件数量折中。磁盘占用不变，列表按段展示。
+  # 原生库崩溃若被上游修复，可调回 3600 减少文件数。
+  record-max-second: 1800
+
   # 是否由本进程提供 /record/** 录像文件。
   # 默认 false，交给 nginx 的 location /record/（sendfile 直读）——
   # Spring Boot 静态映射的 Range 请求只有 110KB/s，nginx 有 24MB/s，差 200 倍，
@@ -147,6 +177,31 @@ gb28181:
     record-reconcile-interval-ms: 60000
     # 对账首跑延迟（毫秒）：给启动过程中的流上下线事件留出到达时间
     record-reconcile-initial-delay-ms: 30000
+
+    # ==================== 录像磁盘清理（必须配，否则磁盘会被写满） ====================
+    # 云端录像 24 小时不停写，单通道约 350MB/小时 ≈ 8GB/天。
+    # 没有清理时实测 30G 的盘只够 3 天，写满后 ZLM 分片写失败、
+    # PostgreSQL（同盘）也可能写失败，整个平台瘫痪。
+    #
+    # 两级策略：
+    #   1) 按天：删掉超过 record-retain-days 的非重要录像
+    #   2) 按水位：若仍超过 record-disk-max-used-percent，继续删最老的
+    #      （永远跳过 important=true 与最近 record-keep-min-days 天）
+    # 清理间隔（毫秒）
+    record-purge-interval-ms: 600000
+    # 首跑延迟（毫秒）：启动后先让对账/保活跑稳，再动删文件
+    record-purge-initial-delay-ms: 120000
+    # 录像保留天数；<=0 表示不按天删，只受磁盘水位约束
+    record-retain-days: 7
+    # 磁盘使用率上限（%）：超过就删最老的录像。不要设到 95，
+    # 必须给数据库/日志/转码临时文件留余量
+    record-disk-max-used-percent: 85
+    # 磁盘告急时也必须保留最近几天（防止配置失误把录像清空）
+    record-keep-min-days: 1
+
+    # 状态变更日志保留天数（gb_status_log）；<=0 表示不清理。
+    # 比操作日志（7 天）长：它是排查「某天设备为什么掉线」的关键证据。
+    status-log-retain-days: 30
 
   # 对象存储（云端录像归档）。采用 S3 兼容协议，一套配置覆盖主流对象存储：
   #   阿里云 OSS：endpoint=https://oss-cn-hangzhou.aliyuncs.com  region=cn-hangzhou  path-style=false

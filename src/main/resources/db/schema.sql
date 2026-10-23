@@ -357,6 +357,29 @@ CREATE TABLE IF NOT EXISTS gb_traffic_log (
 );
 CREATE INDEX IF NOT EXISTS idx_gb_traffic_device ON gb_traffic_log (device_id, stat_time DESC);
 
+-- -------------------- 运行时配置（可在界面上改，无需重启） --------------------
+--
+-- 语义：<b>数据库优先，application.yml 兜底</b>。
+-- 表里没有某个 key 时用 yml 里配置的默认值；用户一旦在界面保存，
+-- 就写入本表，之后启动也从这里读 —— 覆盖 yml。
+--
+-- 只存「改了不该重启」的运维参数（保留天数、间隔、阈值、开关）。
+-- 端口、路径、数据库连接等影响进程装配的配置仍归 application.yml，
+-- 改它们必须重启，放进本表只会造成「界面显示改了但实际没生效」的误解。
+CREATE TABLE IF NOT EXISTS gb_config (
+    id          BIGSERIAL PRIMARY KEY,
+    config_key  VARCHAR(64)  NOT NULL,
+    config_value VARCHAR(512),
+    -- 分组（前端按此分区展示：record / log / task / stream / device / media）
+    config_group VARCHAR(32)  DEFAULT 'other',
+    -- 数据类型：INT / LONG / BOOLEAN / STRING，决定前端控件与后端校验
+    value_type  VARCHAR(16)  DEFAULT 'STRING',
+    -- 界面上显示的说明（同时也是「这个值影响什么」的文档）
+    description VARCHAR(512),
+    update_time TIMESTAMP    DEFAULT NOW(),
+    UNIQUE (config_key)
+);
+
 -- -------------------- 状态变更日志 --------------------
 
 CREATE TABLE IF NOT EXISTS gb_status_log (

@@ -37,6 +37,8 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
     private final RecordService recordService;
     private final PlatformAsyncExecutor asyncExecutor;
     private final ChannelRecordPolicy recordPolicy;
+    private final RuntimeConfigService runtimeConfig;
+    private final RuntimeConfigApplier runtimeConfigApplier;
     private final GbStreamMapper streamMapper;
 
     @PostConstruct
@@ -75,6 +77,13 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
         // 通道云端录像开关是逐通道的库表数据，启动时载入内存镜像；
         // 放在 attach()（@PostConstruct）里而不是构造器：此时数据源已装配完毕
         recordPolicy.reload();
+        // 运行时配置同样要等数据源就绪后才能读库（gb_config 表）。
+        // 顺序必须在 recordPolicy 之后：保活任务读 recordPolicy，
+        // 而它的间隔来自 runtimeConfig —— 先有数据再算间隔更直观。
+        runtimeConfig.reload();
+        // 必须在 reload 之后推送：reload 之前缓存里只有 yml 默认值，
+        // 此时推给 ZLM 会用错值（界面显示 600 而实际按 1800 录，实测踩过）。
+        runtimeConfigApplier.applyAll();
         // 同时挂 ZLM 原生流事件，覆盖「流上线但会话未跟踪」的场景。
         // 必须用 addStreamListener：媒体平台内部已注册了一个监听者驱动会话状态，
         // 用 set 会把它顶掉，导致会话永远停在 NEGOTIATING（画面能播但状态不变）。
@@ -228,12 +237,12 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
     @Override
     public void onSessionOffline(RtpSession session) {
         log.info("媒体流已下线（端口保留等待恢复）: {}", session.getSessionKey());
-        asyncExecutor.run("流下线处理", () -> {
-            streamService.markOffline(session.getSessionKey());
-            // 流「异常」下线（设备拔线、ZLM 内部超时）时归档。
-            // 主动 stop 不走这里 —— 它由 preSourceCloseListener 归档（见 attach）。
-            archiveRecordingQuietly(session, "流下线");
-        });
+        // 状态落库走保序队列（快）
+        asyncExecutor.run("流下线处理", () -> streamService.markOffline(session.getSessionKey()));
+        // 归档走独立队列：内部要轮询等 ZLM 写终态（最多 3 秒），
+        // 放在保序队列里会堵住所有设备的心跳/状态落库 ——
+        // 多路同时掉线时表现为「设备离线了界面还显示在线」。
+        asyncExecutor.runArchive("流下线归档", () -> archiveRecordingQuietly(session, "流下线"));
     }
 
     @Override

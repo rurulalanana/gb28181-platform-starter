@@ -384,9 +384,18 @@ public class CloudRecordController {
             response.sendRedirect(url);
             return;
         }
-        Path path = Path.of(record.getFilePath());
+        // filePath 可能为 null：库里的条目来自两处 —— ZLM 回调回填的（有路径）、
+        // 以及定期对账按磁盘文件补登记的（也有路径）。但「录制中途被停、回调未到」
+        // 的条目会以 filePath=null 入库（见 RecordingService#stopRecording）。
+        // 直接 Path.of(null) 会抛 NPE → 全局异常处理器返回 500，
+        // 前端看到的是「服务器错误」而不是「录像文件不存在」，无从排查。
+        String filePath = record.getFilePath();
+        if (filePath == null || filePath.isBlank()) {
+            throw BizException.notFound("该录像尚未生成文件（可能录制中断）：" + recordId);
+        }
+        Path path = Path.of(filePath);
         if (!Files.exists(path)) {
-            throw BizException.notFound("录像文件已丢失：" + record.getFilePath());
+            throw BizException.notFound("录像文件已丢失：" + filePath);
         }
         long size = Files.size(path);
 

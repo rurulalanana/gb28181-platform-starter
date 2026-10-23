@@ -124,6 +124,82 @@
       </div>
     </el-card>
 
+    <!-- 运行时配置：改完立即生效，不需要重启 -->
+    <el-card shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span><el-icon><Setting /></el-icon> 运行时配置</span>
+          <div class="card-header-actions">
+            <el-tag size="small" type="success" effect="plain">保存后立即生效</el-tag>
+            <el-button link type="primary" :loading="cfgLoading" @click="loadConfig">
+              <el-icon><Refresh /></el-icon> 刷新
+            </el-button>
+          </div>
+        </div>
+      </template>
+
+      <p class="muted mb-3">
+        这些参数保存在数据库中，修改后<b>立即生效、无需重启</b>，重启后依然保留。
+        语义是「数据库优先、application.yml 兜底」：
+        未改过的项用 yml 的值，点「恢复默认」即回落 yml。
+        <br />
+        注意：端口、路径、数据库连接等影响进程装配的配置仍需改
+        <code>application.yml</code> 并重启，故不在此处。
+      </p>
+
+      <el-tabs v-model="cfgActiveGroup">
+        <el-tab-pane
+          v-for="g in cfgGroups"
+          :key="g.key"
+          :label="g.label"
+          :name="g.key"
+        >
+          <el-table :data="cfgRowsOf(g.key)" size="small" border>
+            <el-table-column label="配置项" min-width="220">
+              <template #default="{ row }">
+                <div class="cfg-key">{{ cfgLabel(row.key) }}</div>
+                <div class="cfg-desc">{{ row.description }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="当前值" width="200">
+              <template #default="{ row }">
+                <el-input
+                  v-model="cfgDraft[row.key]"
+                  size="small"
+                  :placeholder="row.defaultValue"
+                  @keyup.enter="saveConfig(row)"
+                >
+                  <template v-if="row.type === 'INT' || row.type === 'LONG'" #append>
+                    {{ row.key.endsWith('-ms') ? '毫秒' : (row.key.endsWith('-days') ? '天' : '') }}
+                  </template>
+                </el-input>
+              </template>
+            </el-table-column>
+            <el-table-column label="默认值" width="110" align="center">
+              <template #default="{ row }">
+                <span class="mono">{{ row.defaultValue }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" align="center">
+              <template #default="{ row }">
+                <el-button
+                  type="primary"
+                  link
+                  :loading="cfgSaving === row.key"
+                  @click="saveConfig(row)"
+                >保存</el-button>
+                <el-button
+                  link
+                  :disabled="!row.overridden"
+                  @click="resetConfig(row)"
+                >恢复默认</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+
     <!-- 对象存储 -->
     <el-card shadow="never">
       <template #header>
@@ -163,7 +239,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { systemApi, webrtcApi } from '@/api'
+import { configApi, systemApi, webrtcApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -220,6 +296,150 @@ async function loadServer() {
     }
   } catch (e) {
     ElMessage.error(e.message || '加载失败')
+  }
+}
+
+// ==================== 运行时配置 ====================
+
+const cfgLoading = ref(false)
+const cfgSaving = ref('')
+/** 后端返回的全部配置项。 */
+const cfgItems = ref([])
+/** 编辑中的草稿（key → 值），与 cfgItems 分离，避免未保存就刷新列表。 */
+const cfgDraft = reactive({})
+const cfgActiveGroup = ref('record')
+
+/**
+ * 分组展示顺序与中文名。
+ *
+ * <p>顺序固定而不是按后端返回顺序：分类应该稳定，
+ * 不然后端加一个配置项就会让界面的 tab 顺序跳变。
+ */
+const CFG_GROUPS = [
+  { key: 'record', label: '录像与磁盘' },
+  { key: 'stream', label: '流与点播' },
+  { key: 'device', label: '设备' },
+  { key: 'log', label: '日志清理' }
+]
+
+/** 实际有配置项的分组（后端未来可能新增分组）。 */
+const cfgGroups = computed(() => {
+  const present = new Set(cfgItems.value.map((i) => i.group))
+  const known = CFG_GROUPS.filter((g) => present.has(g.key))
+  const extra = [...present]
+    .filter((k) => !CFG_GROUPS.some((g) => g.key === k))
+    .map((k) => ({ key: k, label: k }))
+  return [...known, ...extra]
+})
+
+function cfgRowsOf(group) {
+  return cfgItems.value.filter((i) => i.group === group)
+}
+
+/**
+ * 配置项的中文名。
+ *
+ * <p>后端只给 key 和长说明，标题由前端映射：说明文字会随实现变化，
+ * 而「录像保留天数」这种标题应该稳定，便于运维快速定位。
+ */
+const CFG_LABELS = {
+  'record.retain-days': '录像保留天数',
+  'record.disk-max-used-percent': '磁盘使用率上限',
+  'record.keep-min-days': '磁盘告急时最少保留',
+  'record.max-second': '录像分片时长',
+  'record.purge-interval-ms': '录像清理间隔',
+  'record.keepalive-interval-ms': '云端录像保活间隔',
+  'record.reconcile-interval-ms': '录像对账间隔',
+  'log.oplog-retain-days': '操作日志保留天数',
+  'log.status-retain-days': '状态日志保留天数',
+  'stream.idle-reap-interval-ms': '空闲流回收间隔',
+  'stream.none-reader-delay-ms': '无人观看关流等待',
+  'device.offline-seconds': '设备离线判定阈值'
+}
+
+function cfgLabel(key) {
+  return CFG_LABELS[key] || key
+}
+
+async function loadConfig() {
+  cfgLoading.value = true
+  try {
+    const list = await configApi.list()
+    cfgItems.value = Array.isArray(list) ? list : []
+    for (const item of cfgItems.value) {
+      cfgDraft[item.key] = item.value
+    }
+    // 默认停在第一个有内容的分组
+    const first = cfgGroups.value[0]
+    if (first) {
+      cfgActiveGroup.value = first.key
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '加载运行时配置失败')
+  } finally {
+    cfgLoading.value = false
+  }
+}
+
+/**
+ * 保存单项配置。
+ *
+ * <p>保存成功后立即刷新该项的「当前值」和「已修改」标记：
+ * 后端可能对值做规范化（如布尔值统一成 true/false），
+ * 用后端返回的值回填才不会出现「界面显示 abc、实际生效 true」。
+ */
+async function saveConfig(row) {
+  const value = String(cfgDraft[row.key] ?? '').trim()
+  if (!value) {
+    ElMessage.warning('配置值不能为空')
+    return
+  }
+  cfgSaving.value = row.key
+  try {
+    const saved = await configApi.save(row.key, value)
+    if (saved) {
+      const idx = cfgItems.value.findIndex((i) => i.key === row.key)
+      if (idx >= 0) {
+        cfgItems.value[idx] = saved
+      }
+      cfgDraft[row.key] = saved.value
+    }
+    ElMessage.success(`${cfgLabel(row.key)} 已生效`)
+  } catch (e) {
+    // 后端会带出具体原因（越界 / 非数字 / 未知 key）
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    cfgLoading.value = false
+    cfgSaving.value = ''
+  }
+}
+
+/** 恢复默认：删除库里的覆盖值，回落 application.yml。 */
+async function resetConfig(row) {
+  try {
+    await ElMessageBox.confirm(
+      `将「${cfgLabel(row.key)}」恢复为默认值 ${row.defaultValue}？\n\n这会删除数据库中的自定义值，改为使用 application.yml 的配置。`,
+      '恢复默认',
+      { type: 'warning', confirmButtonText: '恢复', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  cfgSaving.value = row.key
+  try {
+    const saved = await configApi.reset(row.key)
+    if (saved) {
+      const idx = cfgItems.value.findIndex((i) => i.key === row.key)
+      if (idx >= 0) {
+        cfgItems.value[idx] = saved
+      }
+      cfgDraft[row.key] = saved.value
+    }
+    ElMessage.success(`${cfgLabel(row.key)} 已恢复默认`)
+  } catch (e) {
+    ElMessage.error(e.message || '恢复失败')
+  } finally {
+    cfgSaving.value = ''
   }
 }
 
@@ -292,12 +512,33 @@ async function changePassword() {
 
 onMounted(() => {
   loadServer()
+  loadConfig()
 })
 </script>
 
 <style scoped>
 .full-height {
   height: 100%;
+}
+
+/* 卡片头右侧的操作区（标签 + 刷新按钮） */
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 运行时配置：项名 + 说明两行排布，说明用弱化色避免抢视觉 */
+.cfg-key {
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.cfg-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 
 .form-actions {

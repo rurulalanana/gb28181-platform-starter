@@ -33,6 +33,7 @@ public class Gb28181PlatformConfiguration {
                 .rtpSinglePort(props.isRtpSinglePort())
                 .rtpSinglePortNumber(props.getRtpSinglePortNumber())
                 .autoRecord(props.isAutoRecord())
+                .recordMaxSecond(props.getRecordMaxSecond())
                 .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())
                 .recordRoot(isBlank(props.getRecordRoot())
                         ? System.getProperty("user.dir") + "/record" : props.getRecordRoot());

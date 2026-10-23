@@ -75,6 +75,30 @@ public class Gb28181Properties {
     private boolean autoRecord = false;
 
     /**
+     * 云端录像单文件最长时长（秒），到点由 ZLM 自动切分片。
+     *
+     * <p><b>这是「崩溃损失上限」，不是磁盘优化参数。</b>ZLM 的原生库存在
+     * 未捕获的 C++ 异常（实测 {@code RtmpMediaSourceMuxer::getOwnerPoller
+     * not implemented} → {@code terminate()} → SIGABRT），进程会整个崩掉。
+     * 崩溃时正在写的分片来不及写 moov，留下一个大小正常但<b>无法播放</b>的
+     * 孤儿文件（{@code moov atom not found}，且无法修复）。
+     *
+     * <p>因此这个值直接等于「一次崩溃最多丢多久的录像」：
+     * <ul>
+     *   <li>{@code 3600}（1 小时，ZLM 默认）：实测崩一次丢 55 分钟 / 319 MB；</li>
+     *   <li>{@code 1800}（30 分钟，本平台默认）：最多丢 30 分钟，
+     *       一天 24 个文件；</li>
+     *   <li>{@code 300}（5 分钟）：最多丢 5 分钟，但一天 288 个文件，太碎。</li>
+     * </ul>
+     *
+     * <p>云端录像列表按「一段 = 一条记录」展示，对账会把每个分片都登记进来，
+     * 因此不影响检索。磁盘占用不变。
+     *
+     * <p>若确认原生库崩溃已被上游修复，可调回 3600 进一步减少文件数。
+     */
+    private int recordMaxSecond = 1800;
+
+    /**
      * 「无人观看」自动关流的延迟（毫秒）。
      *
      * <p>点播后若在此时长内没有任何播放器拉流，ZLM 会关闭该路流并向设备发 BYE。

@@ -870,6 +870,26 @@ public class DeviceService {
         statusLogMapper.insert(logEntry);
     }
 
+    /**
+     * 清理超过保留期的状态变更记录。
+     *
+     * <p>{@code gb_status_log} 没有任何清理路径时，跑一年会积累几十万条，
+     * 而分页查询按 {@code create_time DESC} 排序，表越大越慢。
+     *
+     * <p>用单条 {@code DELETE ... WHERE create_time < ?} 而不是先 select 再删：
+     * 过期记录可能有上万条，全部读进内存没有必要。
+     *
+     * @param retainDays 保留天数；{@code <=0} 直接跳过
+     * @return 删除的行数
+     */
+    public int purgeStatusLogs(int retainDays) {
+        if (retainDays <= 0) {
+            return 0;
+        }
+        return statusLogMapper.delete(Wrappers.<GbStatusLog>lambdaQuery()
+                .lt(GbStatusLog::getCreateTime, LocalDateTime.now().minusDays(retainDays)));
+    }
+
     /** 状态变更记录查询。 */
     public List<GbStatusLog> statusLogs(String deviceId, String channelId,
                                         String startTime, String endTime) {

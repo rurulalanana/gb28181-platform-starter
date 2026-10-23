@@ -108,6 +108,42 @@ pid_of() {
     pgrep -f "java .*-jar $JAR" 2>/dev/null | head -1
 }
 
+# ----------------------------------------------------------------------
+# 清理上次异常退出遗留的录像临时文件
+# ----------------------------------------------------------------------
+# ZLM 写入中的分片带 . 前缀，正常关闭时会把 moov 回写、再改名去掉前缀。
+# 若进程异常退出（原生库 SIGABRT / OOM / kill -9），这一步来不及做，
+# 磁盘上就留下一个大小正常、但没有 moov 的文件 —— 任何播放器都打不开
+# （ffmpeg 报 moov atom not found），且无法修复。
+#
+# 实测一次崩溃丢了 55 分钟 / 319 MB。这类文件永久占磁盘又没有价值，
+# 因此启动时清掉；但只清「最后写入超过 30 分钟」的，避免误删
+# 正在录制中的分片（它们同样带 . 前缀，但修改时间一直在更新）。
+clean_orphan_records() {
+    local root="$APP_DIR/record"
+    [ -d "$root" ] || return 0
+    local n=0 freed=0
+    while IFS= read -r -d '' f; do
+        local sz age_min
+        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+        # 修改时间距今的分钟数
+        age_min=$(( ( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ) / 60 ))
+        [ "$age_min" -lt 30 ] && continue
+        # 只有真的没有 moov 才删：极少数情况下 ZLM 已回写 moov
+        # 但改名失败，那种文件还能救，不能删
+        if tail -c 2000000 "$f" 2>/dev/null | grep -qa "moov"; then
+            echo "  保留（含 moov，可修复）: $f ($((sz/1048576))MB)"
+            continue
+        fi
+        rm -f "$f" && {
+            n=$((n+1)); freed=$((freed+sz))
+            echo "  删除损坏录像: $(basename "$f") ($((sz/1048576))MB, $age_min 分钟前)"
+        }
+    done < <(find "$root" -name ".*.mp4" -print0 2>/dev/null)
+    [ "$n" -gt 0 ] && echo "已清理 $n 个无法播放的录像文件，释放 $((freed/1048576))MB"
+    return 0
+}
+
 guard_pid_of() {
     if [ -f "$GUARD_PID_FILE" ]; then
         local p
@@ -139,6 +175,8 @@ case "$1" in
         mkdir -p "$APP_DIR/logs"
         # 必须在拉起 guard 之前归档：guard 一旦启动就长期持有 console.log 的 fd
         rotate_log
+        # 上次若是崩溃退出，这里会留下无法播放的录像临时文件，先清掉
+        clean_orphan_records
         echo "启动 $APP_NAME（守护模式）..."
         cd "$APP_DIR" || exit 1
         setsid nohup "$GB_SH" guard >> "$LOG" 2>&1 &
@@ -157,8 +195,22 @@ case "$1" in
         # 内部模式：守护循环，由 start 通过 setsid 调用，勿手动执行
         echo "[guard] $(date '+%F %T') 守护循环启动"
         trap 'echo "[guard] $(date "+%F %T") 收到停止信号，退出守护"; exit 0' TERM INT
+        # 崩溃退避：启动时刻 + 连续失败次数。
+        #
+        # 原生库崩溃（exit=134 SIGABRT / 139 SIGSEGV）时会瞬间退出，
+        # 若固定 3 秒重启，就会出现「起 → 崩 → 起」的高频循环：
+        # 实测一天内 29 次 core dumped，每次都要重新点播、重新开录，
+        # 录像被切成碎片，日志也被冲爆。
+        #
+        # 退避策略：连续崩溃按 3/10/30/60/120 秒递增；只要有一次
+        # 存活超过 STABLE_SECONDS，就重置为 3 秒。这样：
+        #   - 偶发崩溃：立刻恢复，无感；
+        #   - 崩溃风暴：逐步降温，避免把 CPU 和磁盘 IO 打满。
+        STABLE_SECONDS=120
+        backoff=0
         while true; do
             echo "[guard] $(date '+%F %T') 拉起 JVM ..."
+            start_ts=$(date +%s)
             java $JAVA_OPTS -jar "$JAR" \
                 --spring.profiles.active=$SPRING_PROFILE \
                 --server.port="${GB_APP_PORT:-48088}" \
@@ -167,8 +219,23 @@ case "$1" in
             echo "$java_pid" > "$PID_FILE"
             wait "$java_pid"
             code=$?
-            echo "[guard] $(date '+%F %T') JVM 退出 (exit=$code)，3 秒后自动拉起"
-            sleep 3
+            ran=$(( $(date +%s) - start_ts ))
+            if [ "$ran" -ge "$STABLE_SECONDS" ]; then
+                # 稳定运行过：故障已过去，恢复快速重启
+                backoff=0
+                delay=3
+            else
+                case "$backoff" in
+                    0) delay=3 ;;
+                    1) delay=10 ;;
+                    2) delay=30 ;;
+                    3) delay=60 ;;
+                    *) delay=120 ;;
+                esac
+                backoff=$((backoff + 1))
+            fi
+            echo "[guard] $(date '+%F %T') JVM 退出 (exit=$code, 存活 ${ran}s)，${delay} 秒后自动拉起"
+            sleep "$delay"
         done
         ;;
     stop)
@@ -209,10 +276,22 @@ case "$1" in
         fi
         echo "停止 $APP_NAME (JVM PID=$p) ..."
         kill "$p" 2>/dev/null
-        if ! wait_gone "$p" 8; then
-            echo "  优雅停止超时，强制杀掉"
-            # Spring 的优雅停机默认最多 30 秒，这里给 8 秒 —— 录像收尾、
-            # 心跳等还没做完的部分交给下次启动时的对账（RecordService#reconcile）
+        # 等 20 秒就够，不要等 60 秒。
+        #
+        # 【为什么不是 8 秒】停机收尾要 flush 录像缓冲、回写 moov、把 . 前缀的
+        # 临时名改成正式名。8 秒不够，kill -9 会留下没有 moov 的孤儿文件
+        # （大小正常但打不开，且无法修复 —— 实测丢过 55 分钟）。
+        #
+        # 【为什么不是 60 秒】实测应用层关闭只要 4~12 秒
+        # （stopAll 现在每路最多等 3 秒），之后卡住的是 ZLM 原生库的静态析构
+        # （~EventPoller 等 C++ 析构），那部分只能靠 kill -9，等多久都一样 ——
+        # 之前等满 60 秒，进程仍然活着。
+        #
+        # 20 秒 = 应用层收尾（≤12 秒）+ 8 秒余量。超时即强杀：
+        # 此时录像已由 Gb28181MediaPlatform#stop() 停过，剩下交给下次启动的
+        # 录像对账（RecordService#reconcileAutoRecordings）+ 孤儿清理。
+        if ! wait_gone "$p" 20; then
+            echo "  优雅停止超时（20 秒），强制杀掉（原生库析构卡住，属已知问题）"
             kill -9 "$p" 2>/dev/null
             if ! wait_gone "$p" 5; then
                 echo "  错误：JVM $p 无法停止"
