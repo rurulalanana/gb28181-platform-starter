@@ -87,4 +87,31 @@ public class ConfigController {
         }
         return ApiResponse.ok(null);
     }
+
+    /**
+     * 批量保存（一次提交整页改动）。
+     *
+     * <p><b>为什么需要</b>：配置页的常规交互是「改几项、最后点一次保存」。
+     * 让前端循环发 N 个单项请求，一旦中途某项失败，前面的已经生效而界面
+     * 提示「保存失败」，用户不知道到底存进去了哪些。
+     *
+     * <p>整体先校验再落库：任何一项非法就整体拒绝，不做部分成功 ——
+     * 半套配置生效比全都不生效更难排查。
+     *
+     * @param body key → 期望值（JSON 对象）
+     * @return 实际生效的 key → 规范化后的值
+     */
+    @PostMapping("/save-batch")
+    public ApiResponse<java.util.Map<String, String>> saveBatch(
+            @org.springframework.web.bind.annotation.RequestBody
+            java.util.Map<String, String> body) {
+        StpUtil.checkLogin();
+        java.util.Map<String, String> applied = config.setBatch(body);
+        // 需要推送到媒体层的项（分片时长、无人观看时长）逐个应用
+        for (String key : applied.keySet()) {
+            applier.apply(key);
+        }
+        log.info("配置批量保存成功：{} 项", applied.size());
+        return ApiResponse.ok(applied);
+    }
 }

@@ -122,13 +122,34 @@ public class PlatformScheduler {
      * 留着只会让人以为「改 yml 能生效」，与类注释里的说明恰好相反。
      */
 
-    /** 心跳超时巡检，默认每 60 秒一次。 */
-    @Scheduled(fixedDelayString = "${gb28181.starter.offline-scan-interval-ms:60000}")
+    /**
+     * 心跳超时巡检。
+     *
+     * <p><b>间隔也走运行时配置</b>：{@code device.offline-scan-interval-ms}
+     * 在界面上可改，所以不能用 {@code @Scheduled(fixedDelayString=...)} 固定
+     * （那表达式只在启动时求值一次，改完不生效）。改成「固定 tick + due 判断」，
+     * 与其它可调间隔的任务保持一致。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
     public void scanOfflineDevices() {
+        if (!due("offline-scan", config.getLong(ConfigKeys.DEVICE_OFFLINE_SCAN_INTERVAL_MS))) {
+            return;
+        }
         try {
-            int count = deviceService.offlineSilentDevices(props.getStarter().getDeviceOfflineSeconds());
+            /*
+             * 必须从 {@link RuntimeConfigService} 实时读取，不能用
+             * {@code props.getStarter().getDeviceOfflineSeconds()}。
+             *
+             * <p>后者是启动时绑定的 yml 快照：`device.offline-seconds` 在界面上
+             * 是可热更新的（存库 + 立即生效），但这里读 props 就永远不会变，
+             * 表现为「界面上保存成功、阈值实际没变」。实测过这个坑 ——
+             * 其余清理任务都已改成 config.getXxx()，唯独这一处漏了。
+             */
+            int timeoutSeconds = config.getInt(ConfigKeys.DEVICE_OFFLINE_SECONDS);
+            int count = deviceService.offlineSilentDevices(timeoutSeconds);
             if (count > 0) {
-                log.info("离线巡检：{} 个设备因心跳超时被标记离线", count);
+                log.info("离线巡检：{} 个设备因心跳超时被标记离线（阈值 {} 秒）",
+                        count, timeoutSeconds);
             }
         } catch (Exception e) {
             log.warn("离线巡检失败: {}", e.getMessage());
@@ -547,7 +568,10 @@ public class PlatformScheduler {
             return;
         }
         try {
-            int closed = streamService.reapIdleStreams();
+            // 宽限期从运行时配置实时读取（不传的话 StreamService 会读启动快照，
+            // 导致界面上改大后仍按旧值提前关流）
+            int closed = streamService.reapIdleStreams(
+                    config.getLong(ConfigKeys.STREAM_NONE_READER_DELAY_MS));
             if (closed > 0) {
                 log.info("空闲流巡检：已关闭 {} 路无观看者的流", closed);
             }

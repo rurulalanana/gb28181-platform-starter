@@ -1,7 +1,6 @@
 package io.github.rurulalanana.starter.service;
 
 import io.github.rurulalanana.gb28181.sip.Gb28181SipClient;
-import io.github.rurulalanana.starter.config.Gb28181Properties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,7 +32,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DeviceCollectService {
 
     private final Gb28181SipClientProvider clientProvider;
-    private final Gb28181Properties props;
+    /**
+     * 运行时配置（热更新）。
+     *
+     * <p><b>采集开关与节流间隔必须读它、而不是 {@code props.getStarter()}</b>：
+     * 那两项已纳入运行时配置（界面上可改、存库、重启后保留），
+     * 若这里仍读 yml 快照，界面上关掉「自动采集」后实际还在采集，
+     * 表现为「改了不生效」。
+     *
+     * <p>原先这里还注入着 {@link Gb28181Properties}，全字段改走运行时配置后
+     * 已无任何用途，故一并去掉（留着会让后来的人以为还有 yml 参数在此生效）。
+     */
+    private final RuntimeConfigService config;
 
     /**
      * 采集下发专用线程池。
@@ -65,12 +75,12 @@ public class DeviceCollectService {
         if (deviceId == null || deviceId.isBlank()) {
             return;
         }
-        if (!props.getStarter().isAutoCollect()) {
-            log.debug("已关闭自动采集（gb28181.starter.auto-collect=false），跳过 {}", deviceId);
+        if (!config.getBoolean(ConfigKeys.DEVICE_AUTO_COLLECT)) {
+            log.debug("已关闭自动采集（device.auto-collect=false），跳过 {}", deviceId);
             return;
         }
         long now = System.currentTimeMillis();
-        long intervalMs = props.getStarter().getCollectIntervalSeconds() * 1000L;
+        long intervalMs = config.getInt(ConfigKeys.DEVICE_COLLECT_INTERVAL_SECONDS) * 1000L;
         if (!force) {
             Long last = lastCollectAt.get(deviceId);
             if (last != null && now - last < intervalMs) {
@@ -101,12 +111,12 @@ public class DeviceCollectService {
             ok++;
         }
         // 2. 设备信息（厂商/型号/固件）
-        if (props.getStarter().isCollectDeviceInfo()
+        if (config.getBoolean(ConfigKeys.DEVICE_COLLECT_DEVICE_INFO)
                 && trySend("DeviceInfo", deviceId, () -> client.queryDeviceInfo(deviceId))) {
             ok++;
         }
         // 3. 设备状态（在线/离线、录像、告警等）
-        if (props.getStarter().isCollectDeviceStatus()
+        if (config.getBoolean(ConfigKeys.DEVICE_COLLECT_DEVICE_STATUS)
                 && trySend("DeviceStatus", deviceId, () -> client.queryDeviceStatus(deviceId))) {
             ok++;
         }

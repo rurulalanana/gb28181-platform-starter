@@ -215,20 +215,46 @@
                   <HelpTip :text="row.description" />
                 </span>
                 <span class="cfg-meta">
-                  <span class="cfg-range" :class="{ 'is-bad': isInvalid(row) }">
-                    范围 {{ fmtNum(row.min) }} ~ {{ fmtNum(row.max) }} {{ cfgUnit(row.key) }}
+                  <!--
+                    范围只对数值项有意义；布尔/字符串显示「范围 0 ~ 0」纯属噪音。
+                  -->
+                  <template v-if="row.type === 'INT' || row.type === 'LONG'">
+                    <span class="cfg-range" :class="{ 'is-bad': isInvalid(row) }">
+                      范围 {{ fmtNum(row.min) }} ~ {{ fmtNum(row.max) }} {{ cfgUnit(row.key) }}
+                    </span>
+                    <span class="cfg-sep">·</span>
+                  </template>
+                  <span class="cfg-default mono">
+                    默认 {{ defaultText(row) }}
                   </span>
-                  <span class="cfg-sep">·</span>
-                  <span class="cfg-default mono">默认 {{ row.defaultValue }}</span>
                 </span>
               </div>
 
               <div class="cfg-field">
+                <!--
+                  按类型分流渲染：
+                  - BOOLEAN → 开关（让人填 "true" 字符串是荒谬的）
+                  - 密码项 → 掩码输入
+                  - 其余 → 数字/文本输入
+                -->
+                <el-switch
+                  v-if="row.type === 'BOOLEAN'"
+                  :model-value="isOn(row)"
+                  class="cfg-switch"
+                  :loading="cfgSaving === row.key"
+                  active-text="开启"
+                  inactive-text="关闭"
+                  inline-prompt
+                  @change="(v) => toggleBool(row, v)"
+                />
                 <el-input
+                  v-else
                   v-model="cfgDraft[row.key]"
                   class="cfg-input"
                   :class="{ 'is-invalid': isInvalid(row) }"
-                  :placeholder="row.defaultValue"
+                  :type="isSecret(row.key) ? 'password' : 'text'"
+                  :show-password="isSecret(row.key)"
+                  :placeholder="row.defaultValue || '留空表示不启用'"
                   @keyup.enter="saveConfig(row)"
                 >
                   <template v-if="cfgUnit(row.key)" #append>{{ cfgUnit(row.key) }}</template>
@@ -568,9 +594,10 @@ const cfgDraft = reactive({})
  * 不然后端加一个配置项就会让分组顺序跳变。
  */
 const CFG_GROUPS = [
+  { key: 'sip', label: '信令接入' },
+  { key: 'device', label: '设备接入与采集' },
   { key: 'record', label: '录像与磁盘' },
   { key: 'stream', label: '流与点播' },
-  { key: 'device', label: '设备' },
   { key: 'log', label: '日志清理' }
 ]
 
@@ -598,6 +625,13 @@ function cfgRowsOf(group) {
  * 而「录像保留天数」这种标题应该稳定，便于运维快速定位。
  */
 const CFG_LABELS = {
+  'sip.password': '设备统一接入密码',
+  'device.offline-seconds': '设备离线判定阈值',
+  'device.offline-scan-interval-ms': '离线巡检间隔',
+  'device.auto-collect': '上线自动采集',
+  'device.collect-interval-seconds': '采集节流间隔',
+  'device.collect-device-info': '采集设备信息',
+  'device.collect-device-status': '采集设备状态',
   'record.retain-days': '录像保留天数',
   'record.disk-max-used-percent': '磁盘使用率上限',
   'record.keep-min-days': '磁盘告急时最少保留',
@@ -608,8 +642,7 @@ const CFG_LABELS = {
   'log.oplog-retain-days': '操作日志保留天数',
   'log.status-retain-days': '状态日志保留天数',
   'stream.idle-reap-interval-ms': '空闲流回收间隔',
-  'stream.none-reader-delay-ms': '无人观看关流等待',
-  'device.offline-seconds': '设备离线判定阈值'
+  'stream.none-reader-delay-ms': '无人观看关流等待'
 }
 
 function cfgLabel(key) {
@@ -639,6 +672,39 @@ function isDirty(row) {
 }
 
 /**
+ * 布尔项当前是否为「开」。
+ *
+ * <p>后端把 BOOLEAN 归一化成 {@code "true"} / {@code "false"}，
+ * 但历史数据或手工写库可能是 {@code 1/0/on/off}，统一在这里兜住。
+ *
+ * @param {object} row 配置项
+ * @returns {boolean}
+ */
+function isOn(row) {
+  const v = String(row.value ?? '').trim().toLowerCase()
+  return v === 'true' || v === '1' || v === 'on'
+}
+
+/** 是否为需要掩码显示的敏感项。 */
+function isSecret(key) {
+  return key === 'sip.password'
+}
+
+/**
+ * 切换布尔项并立即保存。
+ *
+ * <p>开关型配置没有「改完再点保存」的必要 —— 拨动就是意图。
+ * 立即提交能让「设备统一接入密码」这类项的行为更符合直觉。
+ *
+ * @param {object} row 配置项
+ * @param {boolean} on  新状态
+ */
+async function toggleBool(row, on) {
+  cfgDraft[row.key] = on ? 'true' : 'false'
+  await saveConfig(row)
+}
+
+/**
  * 数值是否越界。
  *
  * <p><b>为什么前端也要校验</b>：后端 `ConfigKeys.Def#validate` 会拒绝越界值
@@ -651,13 +717,15 @@ function isDirty(row) {
  * @returns {boolean} 越界或非数字时返回 true
  */
 function isInvalid(row) {
+  // 只有数值类型才谈得上越界；STRING（密码）和 BOOLEAN 不参与校验，
+  // 否则密码 "abc123" 会被 Number() 判成 NaN 而误标红
+  if (row.type !== 'INT' && row.type !== 'LONG') return false
   const raw = String(cfgDraft[row.key] ?? '').trim()
   // 空值不算「越界」，由保存时的「不能为空」提示处理
   if (!raw) return false
   const n = Number(raw)
   if (!Number.isFinite(n)) return true
-  // 整数类型不接受小数
-  if ((row.type === 'INT' || row.type === 'LONG') && !Number.isInteger(n)) return true
+  if (!Number.isInteger(n)) return true
   if (row.min != null && n < row.min) return true
   if (row.max != null && n > row.max) return true
   return false
@@ -703,6 +771,23 @@ function fmtNum(v) {
   return n.toLocaleString('en-US')
 }
 
+/**
+ * 默认值的展示文案。
+ *
+ * <p>数值要走 {@link fmtNum}：范围那一行是「范围 10,000 ~ 600,000」，
+ * 默认值却是「默认 60000」，同一行里两种写法看着像两种口径 ——
+ * 而且裸的 600000 正是最容易被读错一位的那种数字。
+ * 字符串项的空值写「空」，比一个看不见的空白更明确。
+ *
+ * @param {object} row 配置项
+ * @returns {string}
+ */
+function defaultText(row) {
+  if (row.type === 'STRING') return row.defaultValue || '空'
+  if (row.type === 'BOOLEAN') return row.defaultValue
+  return fmtNum(row.defaultValue)
+}
+
 async function loadConfig() {
   cfgLoading.value = true
   try {
@@ -726,7 +811,13 @@ async function loadConfig() {
  */
 async function saveConfig(row) {
   const value = String(cfgDraft[row.key] ?? '').trim()
-  if (!value) {
+  /*
+   * 空值是否允许，按类型区分：
+   * - STRING（如设备统一接入密码）允许留空 —— 留空本身就是有意义的操作
+   *   （关闭鉴权）。一刀切拦掉的话，用户就没法关掉密码。
+   * - 数值类型不允许空，否则清理/保活任务会拿到无意义的值。
+   */
+  if (!value && row.type !== 'STRING') {
     ElMessage.warning('配置值不能为空')
     return
   }
@@ -1303,6 +1394,12 @@ onMounted(() => {
 
 .cfg-input {
   width: 100%;
+}
+
+/* 开关在网格里默认会被拉满宽度，收回到自然宽度并左对齐 */
+.cfg-switch {
+  height: 32px;
+  align-self: flex-start;
 }
 
 /* 输入值用等宽 + 600：数字是最需要「一眼读准」的内容。

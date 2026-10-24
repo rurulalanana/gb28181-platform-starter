@@ -661,18 +661,27 @@ public class StreamService {
      * 所以「只开录像没人看」的通道不会被误关；而正在被播放的流读者数必然大于 0。
      *
      * <p><b>宽限期</b>：刚建立的会话读者数天然是 0（还没人来得及播放），
-     * 故只处理「已 ONLINE 超过宽限期」的会话。宽限期取 ZLM 的
-     * {@code streamNoneReaderDelayMS}，与回调语义保持一致。
+     * 故只处理「已 ONLINE 超过宽限期」的会话。
      *
+     * <p><b>宽限期必须用「运行时配置的当前值」</b>：该时长可在界面上热更新
+     * （存库 + 推给 ZLM）。若这里读 {@code mediaServer.noneReaderDelayMs()}，
+     * 拿到的是<b>启动时的 yml 快照</b> —— 用户把时长调到 120 秒后，
+     * ZLM 确实晚关了，但平台巡检仍按旧的 45 秒提前关，
+     * 界面看起来「改了没生效」。故由调用方传入（{@link PlatformScheduler}
+     * 从 {@link RuntimeConfigService} 实时读取）。
+     *
+     * @param graceMs 宽限期（毫秒）；{@code <= 0} 时回落到启动配置值
      * @return 关闭的会话数
      */
-    public int reapIdleStreams() {
+    public int reapIdleStreams(long graceMs) {
         ZlmMediaServer mediaServer = platform.mediaServer();
         RtpSessionManager sessions = platform.sessionManager();
         if (mediaServer == null || sessions == null) {
             return 0;
         }
-        long graceMs = Math.max(20000L, mediaServer.noneReaderDelayMs());
+        // 20 秒下限：浏览器从点播到真正建立拉流要 1~3 秒，再快就会误杀刚打开的页面
+        long grace = graceMs > 0 ? graceMs : mediaServer.noneReaderDelayMs();
+        grace = Math.max(20000L, grace);
         long now = System.currentTimeMillis();
         // 一次性取出「要求常开推流」的通道，避免在循环里逐个查库。
         // 每 20 秒跑一次 × 通道数 次查询是纯浪费，一次全量反而更划算。
@@ -688,7 +697,7 @@ public class StreamService {
                 if (!RtpSession.ONLINE.equals(session.getState())) {
                     continue;
                 }
-                if (now - session.getCreatedAt() < graceMs) {
+                if (now - session.getCreatedAt() < grace) {
                     continue;
                 }
                 // 【必须尊重通道的「常开」设置，否则按需/常开开关形同虚设】
@@ -702,7 +711,7 @@ public class StreamService {
                 if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
                     continue;
                 }
-                log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", graceMs / 1000, session.getSessionKey());
+                log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", grace / 1000, session.getSessionKey());
                 // 先记冷却再关流：设备不认 BYE 时它会继续推，
                 // 不记冷却就会被孤儿流巡检立刻认领回来，形成无限循环。
                 // 按会话键记（不是 SSRC —— 会话的 ssrc 是 SDP 通告值，

@@ -68,6 +68,28 @@ public class RuntimeConfigService {
     private volatile boolean loaded;
 
     /**
+     * 启动期先只把「yml 基线」灌进去，不等数据源。
+     *
+     * <p><b>为什么不能只靠 {@link #reload()}</b>：reload 要查库，
+     * 而它是在 {@code StreamEventBridge#attach} 里触发的 —— 那时平台 bean
+     * 已经构造完（信令栈已经起来了）。在此期间如果有人读配置（典型是
+     * SIP 注册鉴权要读 {@code sip.password}），
+     * {@link #raw} 会一路回落到 {@code def.def()}，也就是注册表里写死的
+     * 空串 —— <b>等于启动瞬间把鉴权关了</b>。设备恰好在这几秒内注册就会
+     * 绕过密码校验。
+     *
+     * <p>这里只读 {@link Environment}（无 IO），把 yml 值先就位，
+     * 库里的覆盖稍后由 reload 补上。
+     */
+    @jakarta.annotation.PostConstruct
+    void initDefaultsFromEnv() {
+        for (ConfigKeys.Def d : ConfigKeys.ALL) {
+            defaults.put(d.key(), resolveFromEnv(d));
+        }
+        cache.putAll(defaults);
+    }
+
+    /**
      * 启动时加载：yml 基线 + 数据库覆盖。
      *
      * <p>由 {@code @PostConstruct} 之外的地方调用（`StreamEventBridge#attach`），
@@ -101,7 +123,13 @@ public class RuntimeConfigService {
                 }
                 try {
                     merged.put(def.key(), def.validate(row.getConfigValue()));
-                    overridden++;
+                    // 只统计「真正改变了生效值」的行：库里可能残留与默认值相同的记录
+                    // （旧版本写入、或从外部手工导入），把它们算进「已覆盖」
+                    // 会和界面上的 overridden 判定（按值比较）对不上。
+                    if (!java.util.Objects.equals(row.getConfigValue(),
+                            base.get(def.key()))) {
+                        overridden++;
+                    }
                 } catch (IllegalArgumentException e) {
                     // 库里的值非法（被手工改成脏数据）：回落到 yml，不能让它阻断启动
                     log.warn("配置项 {} 的值非法，已回落到默认值 {}：{}",
@@ -156,6 +184,26 @@ public class RuntimeConfigService {
         return switch (key) {
             case ConfigKeys.DEVICE_OFFLINE_SECONDS ->
                     "gb28181.starter.device-offline-seconds";
+            /*
+             * device.* 组里其余项的 yml 名字**不带 device- 前缀**
+             * （yml 里是 starter.auto-collect / starter.collect-interval-seconds …）。
+             * 走下面的默认分支会拼成 gb28181.starter.device-auto-collect ——
+             * 那个属性根本不存在，于是 yml 里改了也不生效，只能靠库里覆盖，
+             * 表现就是「配置文件里写着 false，界面显示 true」。
+             */
+            case ConfigKeys.DEVICE_OFFLINE_SCAN_INTERVAL_MS ->
+                    "gb28181.starter.offline-scan-interval-ms";
+            case ConfigKeys.DEVICE_AUTO_COLLECT ->
+                    "gb28181.starter.auto-collect";
+            case ConfigKeys.DEVICE_COLLECT_INTERVAL_SECONDS ->
+                    "gb28181.starter.collect-interval-seconds";
+            case ConfigKeys.DEVICE_COLLECT_DEVICE_INFO ->
+                    "gb28181.starter.collect-device-info";
+            case ConfigKeys.DEVICE_COLLECT_DEVICE_STATUS ->
+                    "gb28181.starter.collect-device-status";
+            // sip.password → gb28181.sip-password（不在 starter 下）
+            case ConfigKeys.SIP_PASSWORD ->
+                    "gb28181.sip-password";
             case ConfigKeys.STREAM_NONE_READER_DELAY_MS ->
                     "gb28181.stream-none-reader-delay-ms";
             case ConfigKeys.STREAM_IDLE_REAP_INTERVAL_MS ->
@@ -243,8 +291,24 @@ public class RuntimeConfigService {
             throw new IllegalArgumentException("不支持的配置项：" + key);
         }
         String normalized = def.validate(value);
+        // 「把值改成和默认一样」在语义上就是「恢复默认」：
+        // 若还留一行与默认值相同的记录，gb_config 会积累一堆看不出作用的冗余行，
+        // 而 list() 又要按「值是否等于默认」判定 overridden，于是库里有行、
+        // 界面却显示「未修改」，两个口径打架。直接删行，让两者永远一致。
+        String fallback = defaults.getOrDefault(def.key(), def.def());
+        boolean sameAsDefault = normalized.equals(fallback);
         GbConfig existing = configMapper.selectOne(Wrappers.<GbConfig>lambdaQuery()
                 .eq(GbConfig::getConfigKey, def.key()).last("limit 1"));
+        if (sameAsDefault) {
+            if (existing != null) {
+                configMapper.delete(Wrappers.<GbConfig>lambdaQuery()
+                        .eq(GbConfig::getConfigKey, def.key()));
+            }
+            cache.put(def.key(), normalized);
+            log.info("运行时配置已更新: {} = {}（与默认值一致，已移除数据库覆盖）",
+                    def.key(), normalized);
+            return normalized;
+        }
         if (existing == null) {
             GbConfig row = new GbConfig();
             row.setConfigKey(def.key());
@@ -280,6 +344,47 @@ public class RuntimeConfigService {
         cache.put(def.key(), fallback);
         log.info("运行时配置已重置: {} = {}（回落到 application.yml）", def.key(), fallback);
         return fallback;
+    }
+
+    /**
+     * 批量保存多项配置（一次请求提交整页改动）。
+     *
+     * <p><b>为什么要批量</b>：界面上是「改好几项、最后点一次保存」——
+     * 这是配置页的常规心智（参考 LiveGBS 等同类产品）。
+     * 让前端循环发 N 个单项请求有两个问题：中途某项失败时前面的已经生效，
+     * 界面却提示「保存失败」，用户不知道到底存了哪些；而且 N 次网络往返
+     * 在弱网下会明显拖慢。
+     *
+     * <p><b>先整体校验、再逐项落库</b>：任何一项不合法就整体拒绝，
+     * 不做「部分成功」—— 半套配置生效比全都不生效更难排查。
+     * 落库阶段若某项写库异常，前面已写的保留（无法回滚跨行事务的语义），
+     * 但会在返回值里带上失败的 key，前端据此提示重试。
+     *
+     * @param changes key → 期望值
+     * @return 实际生效的 key → 值（规范化后的）
+     * @throws IllegalArgumentException 任一项的值非法
+     */
+    public java.util.Map<String, String> setBatch(java.util.Map<String, String> changes) {
+        if (changes == null || changes.isEmpty()) {
+            return java.util.Map.of();
+        }
+        // 第一轮：全部校验。任一非法直接抛出，不做任何写入。
+        java.util.Map<String, String> normalized = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, String> e : changes.entrySet()) {
+            ConfigKeys.Def def = ConfigKeys.find(e.getKey());
+            if (def == null) {
+                throw new IllegalArgumentException("不支持的配置项：" + e.getKey());
+            }
+            normalized.put(def.key(), def.validate(e.getValue()));
+        }
+        // 第二轮：落库 + 更新内存。
+        java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, String> e : normalized.entrySet()) {
+            String key = e.getKey();
+            applied.put(key, set(key, e.getValue()));
+        }
+        log.info("运行时配置批量更新：{} 项（{}）", applied.size(), applied.keySet());
+        return applied;
     }
 
     // ==================== 查询（界面用） ====================

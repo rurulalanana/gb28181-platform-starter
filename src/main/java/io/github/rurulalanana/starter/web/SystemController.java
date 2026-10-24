@@ -16,6 +16,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,9 +25,14 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.lang.management.ManagementFactory;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Enumeration;
 
 /**
  * 系统接口。
@@ -165,7 +171,7 @@ public class SystemController {
         vo.setPreferStreamFmt("webrtc");
         vo.setVersionType("open-source");
         vo.setCopyrightText("gb28181-platform-starter");
-        vo.setSip(props.getSipHost() + ":" + props.getSipPort());
+        vo.setSip(advertisedSipAddress() + ":" + props.getSipPort());
         if (platform.mediaServer() != null) {
             vo.setMediaHttp(platform.mediaServer().getHttpPort());
             vo.setMediaRtsp(platform.mediaServer().getRtspPort());
@@ -174,6 +180,56 @@ public class SystemController {
         }
         vo.setHardware(hardwareInfo());
         return ApiResponse.ok(vo);
+    }
+
+    /**
+     * 设备可达的 SIP 地址（界面展示用）。
+     *
+     * <p><b>不能直接展示 {@code gb28181.sip-host}</b>：它的默认值是
+     * {@code 0.0.0.0} —— 那是「监听所有网卡」的绑定地址，不是一个可拨号的地址。
+     * 设备实际收到的 From / Contact / Via 里填的是「通告地址」。
+     * 把 {@code 0.0.0.0} 摆在「信令地址」这一栏，运维照抄进设备配置必然注册失败，
+     * 而平台侧只会看到「设备从未注册」，排查方向直接跑偏。
+     *
+     * <p>解析顺序与信令库的通告地址推断保持一致：
+     * 显式 {@code sip-advertised-ip} → 显式 {@code sip-host}（非通配地址时）→ 自动探测本机 IPv4。
+     */
+    private String advertisedSipAddress() {
+        String advertised = props.getSipAdvertisedIp();
+        if (StringUtils.hasText(advertised)) {
+            return advertised.trim();
+        }
+        String host = props.getSipHost();
+        if (StringUtils.hasText(host) && !isWildcardHost(host.trim())) {
+            return host.trim();
+        }
+        try {
+            // 不写死网卡名：找一个非回环、非通配的 IPv4 即可
+            Enumeration<NetworkInterface> nics = NetworkInterface.getNetworkInterfaces();
+            while (nics != null && nics.hasMoreElements()) {
+                NetworkInterface nic = nics.nextElement();
+                if (!nic.isUp() || nic.isLoopback()) {
+                    continue;
+                }
+                Enumeration<InetAddress> addrs = nic.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress addr = addrs.nextElement();
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()
+                            && !addr.isLinkLocalAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (SocketException e) {
+            log.debug("自动探测本机 IPv4 失败：{}", e.getMessage());
+        }
+        return host == null ? "" : host.trim();
+    }
+
+    /** 是否是「监听所有网卡」类的通配地址。 */
+    private static boolean isWildcardHost(String host) {
+        return "0.0.0.0".equals(host) || "::".equals(host)
+                || "[::]".equals(host) || "*".equals(host);
     }
 
     /**

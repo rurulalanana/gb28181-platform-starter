@@ -79,6 +79,35 @@ public final class ConfigKeys {
     /** 设备离线判定阈值（秒）：超过该时长未收到心跳即标记离线。 */
     public static final String DEVICE_OFFLINE_SECONDS = "device.offline-seconds";
 
+    /** 离线巡检间隔（毫秒）：多久扫一次「心跳超时」的设备。 */
+    public static final String DEVICE_OFFLINE_SCAN_INTERVAL_MS = "device.offline-scan-interval-ms";
+
+    /** 设备上线后是否自动下发目录/信息/状态查询。 */
+    public static final String DEVICE_AUTO_COLLECT = "device.auto-collect";
+
+    /** 同一设备两次自动采集的最小间隔（秒），防止设备频繁重启被打爆。 */
+    public static final String DEVICE_COLLECT_INTERVAL_SECONDS = "device.collect-interval-seconds";
+
+    /** 采集时是否下发「设备信息」查询（厂商/型号/固件）。 */
+    public static final String DEVICE_COLLECT_DEVICE_INFO = "device.collect-device-info";
+
+    /** 采集时是否下发「设备状态」查询。 */
+    public static final String DEVICE_COLLECT_DEVICE_STATUS = "device.collect-device-status";
+
+    // ==================== 信令接入 ====================
+
+    /**
+     * 设备统一接入密码（SIP 注册鉴权）。
+     *
+     * <p>留空 = 不鉴权（任何设备都能注册）。设置后所有设备的 REGISTER
+     * 都要通过 Digest 校验，密码错误返回 401。
+     *
+     * <p><b>只校验密码、不校验用户名</b>：各厂商在 Authorization 里填的
+     * username 五花八门（SIP 域 / 平台编码 / 设备编号），强制校验会让
+     * 大量正常设备注册失败。
+     */
+    public static final String SIP_PASSWORD = "sip.password";
+
     // ==================== 注册表 ====================
 
     /**
@@ -91,23 +120,31 @@ public final class ConfigKeys {
                     "云端录像保留天数。超过则被清理任务删除（跳过「重要」标记的录像）。"
                             + "填 0 表示不按天数删，只受磁盘水位约束 —— "
                             + "磁盘满时仍会被清理，不要误以为 0 等于永久保留。"),
-            intDef(RECORD_DISK_MAX_USED_PERCENT, "85", "record", 50, 99,
+            intDef(RECORD_DISK_MAX_USED_PERCENT, "85", "record", 50, 95,
                     "磁盘使用率上限（%）。超过就删最老的录像直到降回阈值以下。"
-                            + "不要设到 95 以上：必须给数据库、日志、转码临时文件留余量，"
-                            + "同盘写满会让整个平台不可用。"),
-            intDef(RECORD_KEEP_MIN_DAYS, "1", "record", 1, 365,
-                    "磁盘告急时也必须保留的最近天数。防止阈值配置失误把录像清空。"),
+                            + "上限只到 95：数据库、日志、转码临时文件与录像通常同盘，"
+                            + "写满会让整台机器上的服务一起瘫痪，必须留出缓冲。"),
+            intDef(RECORD_KEEP_MIN_DAYS, "1", "record", 1, 90,
+                    "磁盘告急时也必须保留的最近天数（防止阈值配错把录像清空）。"
+                            + "上限只到 90：这个值越大，「盘满时能删的东西」越少；"
+                            + "设成远超磁盘容量的天数时，水位清理将无文件可删，"
+                            + "磁盘会一直满着 —— 那是最坏的情况。"),
             intDef(RECORD_MAX_SECOND, "1800", "record", 60, 3600,
                     "单个录像文件的时长（秒），到点由 ZLM 自动切片。"
                             + "这同时也是「进程异常崩溃时最多丢失多久录像」的上限。"
                             + "注意：改此值不影响正在录制的文件，下一次开始录像才生效。"),
-            longDef(RECORD_PURGE_INTERVAL_MS, "600000", "record", 60_000, 86_400_000,
-                    "录像清理任务间隔（毫秒，默认 10 分钟）。"),
-            longDef(RECORD_KEEPALIVE_INTERVAL_MS, "30000", "record", 10_000, 600_000,
+            longDef(RECORD_PURGE_INTERVAL_MS, "600000", "record", 60_000, 3_600_000,
+                    "录像清理任务间隔（毫秒，默认 10 分钟）。"
+                            + "上限只到 1 小时：清理与磁盘水位判定在同一个任务里，"
+                            + "间隔过大会让磁盘在两次检查之间被写满。"),
+            longDef(RECORD_KEEPALIVE_INTERVAL_MS, "30000", "record", 10_000, 120_000,
                     "云端录像保活间隔（毫秒）。确保开了录像开关的通道持续有流，"
-                            + "设备掉线恢复后靠它自动重新拉流。"),
+                            + "设备掉线恢复后靠它自动重新拉流。"
+                            + "这个间隔等于「流意外中断后，录像最多缺多久」，"
+                            + "所以上限只到 2 分钟 —— 再大会在云端录像里留下一段段空洞。"),
             longDef(RECORD_RECONCILE_INTERVAL_MS, "60000", "record", 10_000, 1_800_000,
-                    "录像对账间隔（毫秒）。把磁盘上已存在但库里缺记录的录像补登记回来。"),
+                    "录像对账间隔（毫秒）。把磁盘上已存在但库里缺记录的录像补登记回来。"
+                            + "只影响「列表里多久能看到」，不影响录像本身，故范围可宽一些。"),
 
             intDef(LOG_OPLOG_RETAIN_DAYS, "7", "log", 1, 3650,
                     "操作日志保留天数（谁在什么时候做了什么）。"),
@@ -116,15 +153,45 @@ public final class ConfigKeys {
                             + "建议比操作日志留得更久。"),
 
             longDef(STREAM_IDLE_REAP_INTERVAL_MS, "20000", "stream", 5_000, 600_000,
-                    "空闲流回收巡检间隔（毫秒）。无观看者且无录像的流会被关闭以释放设备带宽。"),
-            longDef(STREAM_NONE_READER_DELAY_MS, "45000", "stream", 5_000, 600_000,
+                    "空闲流回收巡检间隔（毫秒）。无观看者且无录像的流会被关闭以释放设备带宽。"
+                            + "巡检本身很轻（只查 ZLM 的读者数），间隔不宜太大。"),
+            longDef(STREAM_NONE_READER_DELAY_MS, "45000", "stream", 20_000, 600_000,
                     "「无人观看」自动关流的等待时长（毫秒）。"
-                            + "太短会在前端播放器还没加载完就把流关掉（表现为点播很慢），"
-                            + "太长会让关掉的页面继续占用设备带宽。"),
+                            + "下限 20 秒：浏览器从点播到真正建立拉流要 1~3 秒"
+                            + "（加载播放器 + 等首个关键帧），平台自身的空闲流巡检"
+                            + "也有 20 秒下限，填更小没有意义，只会让刚打开的页面被误关。"
+                            + "太大会让已关闭的页面继续占用设备带宽。"),
 
-            intDef(DEVICE_OFFLINE_SECONDS, "180", "device", 30, 3600,
+            intDef(DEVICE_OFFLINE_SECONDS, "180", "device", 120, 3600,
                     "设备离线判定阈值（秒）：超过该时长未收到心跳即标记离线。"
-                            + "应大于设备心跳周期的 2~3 倍（心跳通常 60 秒）。")
+                            + "GB/T 28181 规定心跳周期 60 秒，下限因此定为 120 秒（2 倍）—— "
+                            + "设得更小的话，设备在两次心跳之间就会被判离线，"
+                            + "界面上会看到设备反复上下线，云端录像也跟着被反复中断。"
+                            + "推荐 180~300 秒。"),
+            longDef(DEVICE_OFFLINE_SCAN_INTERVAL_MS, "60000", "device", 10_000, 600_000,
+                    "离线巡检间隔（毫秒）：多久扫一次「超过阈值没心跳」的设备。"
+                            + "它决定的是「设备真的掉线后，界面多久变灰」，"
+                            + "与判定阈值相加才是实际感知延迟。"),
+            boolDef(DEVICE_AUTO_COLLECT, "true", "device",
+                    "设备注册上线后，是否自动下发目录/信息/状态查询。"
+                            + "关掉后只能手动点「采集」——内网设备很多时可以关掉减少信令量，"
+                            + "但通道列表也会停止自动刷新。"),
+            intDef(DEVICE_COLLECT_INTERVAL_SECONDS, "300", "device", 30, 86400,
+                    "同一设备两次自动采集的最小间隔（秒）。"
+                            + "设备频繁重启会反复注册，靠这个节流避免把它打爆。"
+                            + "下限 30 秒：再短会在设备重连风暴时产生大量查询信令。"),
+            boolDef(DEVICE_COLLECT_DEVICE_INFO, "true", "device",
+                    "采集时是否下发「设备信息」查询（厂商/型号/固件版本）。"
+                            + "设备不实现该命令时会返回错误，可关掉以减少无效信令。"),
+            boolDef(DEVICE_COLLECT_DEVICE_STATUS, "true", "device",
+                    "采集时是否下发「设备状态」查询（在线/录像/告警等）。"),
+            strDef(SIP_PASSWORD, "", "sip",
+                    "设备统一接入密码（SIP 注册鉴权）。留空表示不鉴权，任何设备都能注册；"
+                            + "填写后所有设备的 REGISTER 都要通过 Digest 校验，密码错误返回 401。"
+                            + "只校验密码、不校验用户名 —— 各厂商在 Authorization 里填的 username "
+                            + "五花八门，强制校验会让大量正常设备注册失败。"
+                            + "修改后立即生效，但已注册的设备不受影响，"
+                            + "要等到下次注册/重连才会用新密码校验。")
     );
 
     /** 按 key 查定义；不存在返回 {@code null}。 */
@@ -150,6 +217,25 @@ public final class ConfigKeys {
     }
 
     /**
+     * 布尔项。
+     *
+     * <p>min/max 传 0：{@code Def#validate} 对 BOOLEAN 走的是
+     * true/false、1/0、on/off 归一化，不看范围。
+     */
+    private static Def boolDef(String key, String def, String group, String desc) {
+        return new Def(key, def, group, "BOOLEAN", 0, 0, desc);
+    }
+
+    /**
+     * 字符串项（如密码）。
+     *
+     * <p>min/max 传 0：不参与数值校验。
+     */
+    private static Def strDef(String key, String def, String group, String desc) {
+        return new Def(key, def, group, "STRING", 0, 0, desc);
+    }
+
+    /**
      * 一项配置的定义。
      *
      * @param key     配置键
@@ -169,7 +255,11 @@ public final class ConfigKeys {
                 throw new IllegalArgumentException("配置值不能为空：" + key);
             }
             String v = raw.trim();
-            if (v.isEmpty()) {
+            // STRING 允许空串：空是该类型的一个合法取值，不是「没填」。
+            // 例如 sip.password 的语义就是「留空 = 关闭注册鉴权」——
+            // 若在这里一并拒绝，鉴权开关会变成单向门（能开不能关），
+            // 运维只能去库里手改，极其危险。
+            if (v.isEmpty() && !"STRING".equals(type)) {
                 throw new IllegalArgumentException("配置值不能为空：" + key);
             }
             switch (type) {
