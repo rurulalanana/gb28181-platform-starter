@@ -1216,6 +1216,24 @@ body {
   box-shadow: var(--sh-md);
 }
 
+/*
+  说明型 tooltip（HelpTip 组件）。
+
+  必须写在全局样式里：tooltip 被 teleport 到 <body> 下，
+  组件内的 scoped 规则（.xxx[data-v-...]）匹配不到它。
+
+  限制宽度是关键 —— 默认 tooltip 是 nowrap 单行，
+  一句四十字的说明会拉成横跨整屏的一条，既难读也会超出视口。
+*/
+.el-popper.help-tip-popper {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.7;
+  /* 覆盖 Element 的 nowrap，让长句按 max-width 换行 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .el-message-box {
   border-radius: var(--r-xl);
   border: 1px solid var(--line);
