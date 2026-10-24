@@ -214,25 +214,36 @@
                   {{ cfgLabel(row.key) }}
                   <HelpTip :text="row.description" />
                 </span>
-                <span class="cfg-default mono">默认 {{ row.defaultValue }}</span>
+                <span class="cfg-meta">
+                  <span class="cfg-range" :class="{ 'is-bad': isInvalid(row) }">
+                    范围 {{ fmtNum(row.min) }} ~ {{ fmtNum(row.max) }} {{ cfgUnit(row.key) }}
+                  </span>
+                  <span class="cfg-sep">·</span>
+                  <span class="cfg-default mono">默认 {{ row.defaultValue }}</span>
+                </span>
               </div>
 
-              <el-input
-                v-model="cfgDraft[row.key]"
-                size="small"
-                class="cfg-input"
-                :placeholder="row.defaultValue"
-                @keyup.enter="saveConfig(row)"
-              >
-                <template v-if="cfgUnit(row.key)" #append>{{ cfgUnit(row.key) }}</template>
-              </el-input>
+              <div class="cfg-field">
+                <el-input
+                  v-model="cfgDraft[row.key]"
+                  class="cfg-input"
+                  :class="{ 'is-invalid': isInvalid(row) }"
+                  :placeholder="row.defaultValue"
+                  @keyup.enter="saveConfig(row)"
+                >
+                  <template v-if="cfgUnit(row.key)" #append>{{ cfgUnit(row.key) }}</template>
+                </el-input>
+                <!-- 越界时直接在输入框下方说明，不依赖弹消息 -->
+                <div v-if="isInvalid(row)" class="cfg-error">
+                  {{ outOfRangeMsg(row) }}
+                </div>
+              </div>
 
               <div class="cfg-ops">
                 <el-button
                   type="primary"
-                  plain
                   size="small"
-                  :disabled="!isDirty(row)"
+                  :disabled="!isDirty(row) || isInvalid(row)"
                   :loading="cfgSaving === row.key"
                   @click="saveConfig(row)"
                 >
@@ -627,6 +638,71 @@ function isDirty(row) {
   return String(cfgDraft[row.key] ?? '').trim() !== String(row.value ?? '').trim()
 }
 
+/**
+ * 数值是否越界。
+ *
+ * <p><b>为什么前端也要校验</b>：后端 `ConfigKeys.Def#validate` 会拒绝越界值
+ * 并返回 400，但那意味着「点了保存、等一个来回、才看到报错」。
+ * 输入时就能标红，用户不必试错；后端校验仍保留（前端只是体验层，不是安全边界）。
+ *
+ * <p>判据取自后端下发的 `min` / `max`，不在这里写死 —— 后端调范围时界面自动跟上。
+ *
+ * @param {object} row 配置项
+ * @returns {boolean} 越界或非数字时返回 true
+ */
+function isInvalid(row) {
+  const raw = String(cfgDraft[row.key] ?? '').trim()
+  // 空值不算「越界」，由保存时的「不能为空」提示处理
+  if (!raw) return false
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return true
+  // 整数类型不接受小数
+  if ((row.type === 'INT' || row.type === 'LONG') && !Number.isInteger(n)) return true
+  if (row.min != null && n < row.min) return true
+  if (row.max != null && n > row.max) return true
+  return false
+}
+
+/**
+ * 越界原因的提示文案。
+ *
+ * @param {object} row 配置项
+ * @returns {string}
+ */
+function outOfRangeMsg(row) {
+  const raw = String(cfgDraft[row.key] ?? '').trim()
+  const n = Number(raw)
+  const unit = cfgUnit(row.key)
+  if (!Number.isFinite(n)) {
+    return '请填数字'
+  }
+  if ((row.type === 'INT' || row.type === 'LONG') && !Number.isInteger(n)) {
+    return '不支持小数'
+  }
+  if (row.min != null && n < row.min) {
+    return `不能小于 ${fmtNum(row.min)} ${unit}`
+  }
+  if (row.max != null && n > row.max) {
+    return `不能大于 ${fmtNum(row.max)} ${unit}`
+  }
+  return ''
+}
+
+/**
+ * 大数字加千分位。
+ *
+ * <p>毫秒类配置动辄 60000 / 86400000，裸数字数零很容易看错一位，
+ * 而「少一个零」在这个页面意味着磁盘被填满或录像被秒删。
+ *
+ * @param {number|string} v
+ * @returns {string}
+ */
+function fmtNum(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return String(v ?? '')
+  return n.toLocaleString('en-US')
+}
+
 async function loadConfig() {
   cfgLoading.value = true
   try {
@@ -652,6 +728,11 @@ async function saveConfig(row) {
   const value = String(cfgDraft[row.key] ?? '').trim()
   if (!value) {
     ElMessage.warning('配置值不能为空')
+    return
+  }
+  // 双保险：按钮已置灰，但回车也会触发保存
+  if (isInvalid(row)) {
+    ElMessage.warning(outOfRangeMsg(row))
     return
   }
   cfgSaving.value = row.key
@@ -817,10 +898,10 @@ onMounted(() => {
 }
 
 .side-sub {
-  margin-top: 2px;
+  margin-top: 3px;
   font-size: var(--fs-xs);
   letter-spacing: -0.2px;
-  color: var(--text-tertiary);
+  color: var(--ink-500);
 }
 
 .side-nav {
@@ -841,7 +922,8 @@ onMounted(() => {
   border: none;
   border-radius: var(--r-md);
   background: transparent;
-  color: var(--text-secondary);
+  /* ink-600 而非 text-secondary(ink-500)：左侧导航是主要入口，不能发灰 */
+  color: var(--ink-600);
   font-family: inherit;
   font-size: var(--fs-sm);
   text-align: left;
@@ -896,7 +978,7 @@ onMounted(() => {
   background: var(--warning-500);
   color: #fff;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
 
@@ -904,7 +986,23 @@ onMounted(() => {
   padding: var(--sp-2) var(--sp-3) 0;
   border-top: 1px solid var(--line-soft);
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-500);
+}
+
+/* ==================== KPI 读数：只调字重与颜色 ==================== */
+
+/*
+ * 字号沿用全局 --fs-xs，不放大。
+ * 读数本身已经很大（.kpi-value 27px），标签再放大反而抢主次；
+ * 让它「明显」的办法是字重 500 + ink-600，而不是字号。
+ */
+.kpi-label {
+  font-weight: 500;
+  color: var(--ink-600);
+}
+
+.kpi-foot {
+  color: var(--ink-500);
 }
 
 /* ==================== 右侧内容 ==================== */
@@ -933,16 +1031,21 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   margin: 0;
-  font-size: 19px;
+  /*
+   * 与其他页面标题同一档（--fs-lg）。
+   * 全站只保留 --fs-xs/sm/md/lg/xl 五档字号，这边不能自成一套 19/22px，
+   * 否则切页时标题大小会跳一下。
+   */
+  font-size: var(--fs-lg);
   font-weight: 600;
-  letter-spacing: -0.3px;
+  letter-spacing: -0.2px;
   color: var(--text-primary);
 }
 
 .sec-sub {
   margin: 4px 0 0;
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-500);
 }
 
 .sec-actions {
@@ -973,6 +1076,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  /* 与全局 .el-card__header 同高：两类容器在页面上是同一层级 */
   height: 42px;
   padding: 0 var(--sp-4);
   border-bottom: 1px solid var(--line-soft);
@@ -985,6 +1089,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* 与全局 .card-title 一致：--fs-sm + 600 */
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
@@ -993,14 +1098,14 @@ onMounted(() => {
 /* ==================== 键值行 ==================== */
 
 /*
- * 文本型读数（如「18 小时 47 分」）。
+ * 文本型读数（如「0 天 0 小时 24 分」）。
  *
- * <p>全局 .kpi-value 是给数字用的 27px 等宽字体 —— 直接放中文时段会被撑得很宽，
- * 也和旁边的纯数字读数视觉重量不一致，这里缩到与正文接近的大小。
+ * <p>全局 .kpi-value 是给纯数字用的 27px 等宽字体 —— 中文时段放进去会被撑得很宽；
+ * 这里降到 --fs-lg（与页面标题同号），保持同一行的三个读数视觉重量一致。
  */
 .kpi-value--text {
   font-family: var(--sans);
-  font-size: 19px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.2px;
 }
@@ -1038,7 +1143,7 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  min-height: 44px;
+  min-height: 48px;
   padding: var(--sp-2) var(--sp-4);
   border-bottom: 1px solid var(--line-soft);
 }
@@ -1047,21 +1152,26 @@ onMounted(() => {
   border-bottom: none;
 }
 
+/* 标签用 ink-600 + 500：和全局表单标签（.el-form-item__label）同档，
+   比 --text-secondary(ink-500) 深一档，一排字段不再糊成一片灰字 */
 .info-label {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 4px;
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  font-weight: 500;
+  color: var(--ink-600);
 }
 
+/* 值：13px 但字重 600 + 主色，与标签拉开层次（同号不同重） */
 .info-value {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
   font-size: var(--fs-sm);
+  font-weight: 600;
   color: var(--text-primary);
   text-align: right;
   overflow-wrap: anywhere;
@@ -1102,18 +1212,20 @@ onMounted(() => {
 }
 
 /*
- * 三栏网格：名称（含默认值副行） / 输入框 / 操作。
+ * 三栏网格：名称（含范围/默认值） / 输入框 / 操作。
  *
  * <p>用 grid 而不是 flex：三栏要竖向对齐成一列，
  * flex 会被最长的那一项撑开，导致每行输入框的起始位置都不一样。
+ *
+ * <p>行高给到 72px：配置项是这一页的主要操作对象，挤在一起会让
+ * 「改哪个、范围是多少」全都得逐个看，反而更慢。
  */
 .cfg-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 200px auto;
-  align-items: center;
-  gap: var(--sp-4);
-  min-height: 58px;
-  padding: var(--sp-2) var(--sp-4);
+  grid-template-columns: minmax(200px, 1fr) 240px auto;
+  align-items: start;
+  gap: var(--sp-2) var(--sp-5);
+  padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--line-soft);
   transition: background 0.15s;
 }
@@ -1128,56 +1240,132 @@ onMounted(() => {
 
 /* 已覆盖 application.yml 的项：左侧一道提示色竖线 */
 .cfg-row.is-overridden {
-  box-shadow: inset 2px 0 0 var(--warning-500);
+  box-shadow: inset 3px 0 0 var(--warning-500);
 }
 
 .cfg-name {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
 }
 
+/*
+ * 配置项名称：--fs-sm + 600。
+ * 字号与表格正文一致，但字重更重、颜色更深，在一屏十几个条目里能立住；
+ * 之前是 --fs-sm 常规字重，和旁边说明文字分不开。
+ */
 .cfg-label {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.4;
   color: var(--text-primary);
 }
 
+/* 范围与默认值：--fs-xs，但用 ink-600（而非 tertiary 的 ink-400）——
+   它们是「要不要改」的判断依据，不该淡到看不见 */
+.cfg-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--ink-600);
+}
+
+.cfg-range {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 当前值越界时，范围提示同步变红（和输入框形成呼应） */
+.cfg-range.is-bad {
+  color: var(--danger-500);
+  font-weight: 600;
+}
+
+.cfg-sep {
+  color: var(--ink-300);
+}
+
 .cfg-default {
-  font-size: 11px;
-  color: var(--text-tertiary);
+  color: var(--ink-500);
+}
+
+.cfg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
 .cfg-input {
   width: 100%;
 }
 
+/* 输入值用等宽 + 600：数字是最需要「一眼读准」的内容。
+   字号不写死，继承全局 --el-font-size-base(14px)，与其他页输入框一致 */
+.cfg-input :deep(.el-input__inner) {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 单位后缀：加深、加粗，避免被当成输入内容的一部分 */
+.cfg-input :deep(.el-input-group__append) {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-600);
+}
+
+/* 越界：红框 + 红字 */
+.cfg-input.is-invalid :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px var(--danger-500) inset;
+}
+
+.cfg-error {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--danger-500);
+}
+
 .cfg-ops {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  padding-top: 2px;
 }
 
 .empty-hint {
   padding: var(--sp-6);
   text-align: center;
   font-size: var(--fs-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 /* ==================== 其它 ==================== */
 
 /* 有 hover 说明的文本：虚线下划线，暗示可悬停 */
 .dotted {
-  border-bottom: 1px dashed var(--text-tertiary);
+  border-bottom: 1px dashed var(--ink-400);
+  color: var(--ink-700);
   cursor: help;
 }
 
 .oss-table {
   width: 100%;
+}
+
+/*
+ * OSS 配置项沿用 info-row 但键是技术串（gb28181.oss.enabled），
+ * 用小一号等宽；说明文字保持正常正文大小 —— 这些是唯一的解释来源。
+ */
+.info-label.mono {
+  font-family: var(--mono);
+  font-weight: 500;
 }
 
 .pwd-form {
@@ -1187,7 +1375,7 @@ onMounted(() => {
 .form-hint {
   margin-left: var(--sp-3);
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-500);
 }
 
 /* ==================== 窄屏 ==================== */
@@ -1226,10 +1414,14 @@ onMounted(() => {
   .side-item.is-active::before {
     display: none;
   }
-}
 
-@media (max-width: 760px) {
-  /* 配置行：名称一行，输入框与操作另起一行 */
+  /*
+   * 配置行在 ≤900px 时也变单列。
+   *
+   * <p>断点与上面侧栏一致，而不是更窄的 760px：实测 794px 时
+   * 三栏（200 + 240 + 按钮约 150 + 间距）已超出可用宽度，
+   * 「恢复默认」按钮被挤出可视区 —— 看不见的按钮等于没有。
+   */
   .cfg-row {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--sp-2);

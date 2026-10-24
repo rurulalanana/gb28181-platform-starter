@@ -42,8 +42,9 @@ defineProps({
  * styles/main.css 里统一写，不在这里。
  */
 .help-tip {
-  font-size: 13px;
-  color: var(--text-tertiary);
+  font-size: var(--fs-md);
+  /* ink-400 太小会像灰尘；用 ink-500 保住存在感（与全局 .card-title .el-icon 同色） */
+  color: var(--ink-500);
   cursor: help;
   transition: color 0.15s;
 }

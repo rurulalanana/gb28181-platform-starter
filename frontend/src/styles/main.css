@@ -1227,8 +1227,9 @@ body {
 */
 .el-popper.help-tip-popper {
   max-width: 320px;
-  font-size: 12px;
-  line-height: 1.7;
+  /* 用全局 --fs-sm：与正文同号，这是唯一的解释来源，不能再小一档 */
+  font-size: var(--fs-sm);
+  line-height: 1.75;
   /* 覆盖 Element 的 nowrap，让长句按 max-width 换行 */
   white-space: normal;
   overflow-wrap: anywhere;
