@@ -1,13 +1,10 @@
 package io.github.rurulalanana.starter.service;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaType;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.TimeFormats;
-import io.github.rurulalanana.starter.entity.GbRecord;
-import io.github.rurulalanana.starter.mapper.GbRecordMapper;
 import io.github.rurulalanana.starter.vo.SystemMetricsVo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,8 +34,10 @@ import java.util.Set;
  *   <li>网络速率：Linux 读 {@code /proc/net/dev} 求和后差分（请求驱动采样，
  *       两次调用之间计算平均速率；首次调用建立基线返回 null）；</li>
  *   <li>负载计数：按会话类型拆分 —— 直播 = {@code REALTIME} 会话数，
- *       播放 = {@code PLAYBACK} 会话数（含下载中的 {@code DOWNLOAD}），
- *       录像 = {@code gb_record} 中 {@code end_time IS NULL}（录制中）的条数。</li>
+ *       播放 = PLAYBACK 会话数（含下载中的 {@code DOWNLOAD}），
+ *       录像 = ZLM 内存索引中「会话仍在录」的通道数
+ *       （用 {@code isRecording()} 判断，不能用 {@code endTime<=0}，
+ *       原因见 {@link #countRecording()}）。</li>
  * </ul>
  *
  * <p>全部采集都做了兜底：单项失败只导致对应字段为 null，不影响其他指标。
@@ -72,7 +71,6 @@ public class SystemMetricsService {
     private static final long SAMPLE_INTERVAL_MS = 3000;
 
     private final StreamService streamService;
-    private final GbRecordMapper recordMapper;
     private final Gb28181MediaPlatform platform;
 
     /** 网络采样基线（-1 表示尚未采样）。 */
@@ -204,7 +202,8 @@ public class SystemMetricsService {
      *       会累加，所以这个数字是「多少路正在被看」而非「多少路流有观众」。
      *       不能用会话数代替：录像点播走 MP4 解复用源，压根不建 RtpSession，
      *       只遍历会话表永远是 0；</li>
-     *   <li><b>录像</b>：{@code gb_record} 中 {@code end_time IS NULL} 的条数。</li>
+     *   <li><b>录像</b>：ZLM 内存索引里「会话仍在录」的通道数 —— 见
+     *       {@link #countRecording()}（注意不能用 {@code endTime<=0} 判断）。</li>
      * </ul>
      *
      * <p><b>为什么不直接用 {@code sessionCount()}</b>：那返回全部会话数，
@@ -400,16 +399,36 @@ public class SystemMetricsService {
      * <p><b>为什么读 ZLM 内存索引而不是库表</b>：自动录像的归档挂在
      * 「流下线」事件上 —— 录制中的条目<b>还没落库</b>（没有 recordId 入库），
      * 查库恒为 0，用户会以为「我明明开了录像怎么计数是 0」。
-     * ZLM 的内存索引才是录制状态的真源：正在录的条目 endTime=0。
+     * ZLM 的内存索引才是录制状态的真源。
+     *
+     * <p><b>为什么不能用 {@code endTime <= 0} 判断「录制中」（踩过的坑）</b>：
+     * {@code Recording#bindSegment} 每次分片落盘都会把 {@code endTime} 设成
+     * 「<b>该分片的结束时刻</b>」—— 因为条目语义是「最近完成的一个分片」，
+     * 不是「整个录制会话」。而 ZLM 每 {@code record-max-second}（默认 1800 秒）
+     * 就切一段，于是从第一段落盘起 {@code endTime} 就一直 &gt; 0，
+     * 用 {@code endTime <= 0} 过滤<b>恒为空</b>。
+     *
+     * <p>实测：录像计划从 08:00 连续录到 12:30（9 个 176MB 文件，当前段还在写），
+     * 而总览的「录像」一直是 0 —— 用户看到的正是「录像计划没被统计到」。
+     *
+     * <p>{@code isRecording()} 查的是 {@code activeByChannel}，
+     * 那才是「会话还在录」的真源。再按通道去重，避免同一通道的历史分片
+     * 被重复计数。
      */
     private long countRecording() {
         try {
-            if (platform.recordingService() == null) {
+            var rs = platform.recordingService();
+            if (rs == null) {
                 return 0L;
             }
-            return platform.recordingService().all().stream()
-                    .filter(r -> r.getEndTime() <= 0)
-                    .count();
+            Set<String> active = new java.util.HashSet<>();
+            for (var r : rs.all()) {
+                String channelId = r.getChannelId();
+                if (channelId != null && rs.isRecording(channelId)) {
+                    active.add(channelId);
+                }
+            }
+            return active.size();
         } catch (Exception e) {
             return 0L;
         }
