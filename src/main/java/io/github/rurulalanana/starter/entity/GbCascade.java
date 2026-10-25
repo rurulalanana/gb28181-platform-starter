@@ -75,6 +75,18 @@ public class GbCascade implements Serializable {
 
     private String remark;
 
+    /**
+     * 级联上行推流的传输方式。
+     *
+     * <p>{@code auto}（默认）：跟随上级 INVITE 的 SDP —— 它说 TCP 就用 TCP，
+     * 说 UDP 就用 UDP。
+     *
+     * <p>{@code tcp} / {@code udp}：强制指定。用于上级 SDP 声明与实际可达性
+     * 不一致的情况（常见：上级 INVITE 写 UDP，但它那侧 UDP 入站被防火墙拦了，
+     * 只有 TCP 能通）。
+     */
+    private String mediaTransport;
+
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

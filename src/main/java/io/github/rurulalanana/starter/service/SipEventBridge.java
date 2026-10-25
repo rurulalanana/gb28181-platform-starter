@@ -421,7 +421,8 @@ public class SipEventBridge implements SipCallback {
         }
         asyncExecutor.run("级联上行推流", () -> {
             boolean ok = cascadeLinkService.pushToUplink(
-                    event.getChannelId(), event.getDstIp(), event.getDstPort(),
+                    event.getPlatformId(), event.getChannelId(),
+                    event.getDstIp(), event.getDstPort(),
                     event.getSsrc(), event.isTcp());
             if (!ok) {
                 log.warn("级联上行推流未完成: 上级={} 通道={} 目标={}:{} 传输={}",

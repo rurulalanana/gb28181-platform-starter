@@ -253,18 +253,18 @@ public class CascadeLinkService {
      * @return 是否成功发起推流
      */
     public boolean pushToUplink(String channelId, String dstIp, int dstPort, String ssrc) {
-        return pushToUplink(channelId, dstIp, dstPort, ssrc, false);
+        return pushToUplink(null, channelId, dstIp, dstPort, ssrc, false);
     }
 
     /**
-     * 同上，但可指定传输方式。
+     * 同上，但带上上级编码与 SDP 声明的传输方式。
      *
-     * @param tcp {@code true} 用 TCP 主动推流（上级 SDP 声明 {@code TCP/RTP/AVP}
-     *            且未要求 {@code a=setup:active} 时）。公网级联里上级常常只能收
-     *            TCP，固定 UDP 会导致上级超时报「none rtp data receive」。
+     * @param platformId 上级平台编码；为空则不做配置查询
+     * @param sdpTcp     上级 INVITE 的 SDP 是否要求 TCP
      */
-    public boolean pushToUplink(String channelId, String dstIp, int dstPort,
-                                String ssrc, boolean tcp) {
+    public boolean pushToUplink(String platformId, String channelId, String dstIp,
+                                int dstPort, String ssrc, boolean sdpTcp) {
+        boolean tcp = decideTcp(platformId, sdpTcp);
         GbChannel channel = deviceService.findChannel(channelId);
         if (channel == null) {
             log.warn("级联上行推流失败：通道不存在 {}", channelId);
@@ -299,6 +299,45 @@ public class CascadeLinkService {
                     channelId, dstIp, dstPort);
         }
         return ok;
+    }
+
+    /**
+     * 决定本次推流用 TCP 还是 UDP。
+     *
+     * <p>优先级：<b>级联配置 {@code mediaTransport}</b> &gt; 上级 SDP 的声明。
+     *
+     * <p>为什么配置能覆盖 SDP：实测遇到上级 INVITE 里写 {@code RTP/AVP}（UDP），
+     * 但它那侧 UDP 入站端口没放通 —— 包全部发出去了、RTP/PS 格式完全正确，
+     * 对方 {@code InBytes} 恒为 0，只能报「none rtp data receive」。
+     * 同一上级加 {@code transport=tcp} 点播后 TCP 一次就通。
+     * 这种「上级自己声明错了」的场景，只能让我们这侧强制覆盖。
+     */
+    private boolean decideTcp(String platformId, boolean sdpTcp) {
+        if (platformId == null || platformId.trim().isEmpty()) {
+            return sdpTcp;
+        }
+        try {
+            GbCascade cascade = cascadeService.findByParentId(platformId.trim());
+            if (cascade == null || cascade.getMediaTransport() == null) {
+                return sdpTcp;
+            }
+            String mode = cascade.getMediaTransport().trim().toLowerCase();
+            if ("tcp".equals(mode)) {
+                if (!sdpTcp) {
+                    log.info("级联推流强制 TCP（覆盖上级 SDP 的 UDP 声明）: 上级={}", platformId);
+                }
+                return true;
+            }
+            if ("udp".equals(mode)) {
+                if (sdpTcp) {
+                    log.info("级联推流强制 UDP（覆盖上级 SDP 的 TCP 声明）: 上级={}", platformId);
+                }
+                return false;
+            }
+        } catch (Exception e) {
+            log.debug("查询级联传输配置失败，回退到 SDP 声明: {}", e.getMessage());
+        }
+        return sdpTcp;
     }
 
     /** 停止某通道的级联上行推流（上级 BYE 时调用）。 */

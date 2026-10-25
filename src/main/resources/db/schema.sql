@@ -464,9 +464,13 @@ ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS params VARCHAR(1024);
 -- CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，缺这列时 MyBatis 查询会直接报
 -- "column media_transport_mode does not exist"，整个设备列表都查不出来。
 ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS media_transport_mode VARCHAR(8) DEFAULT 'passive';
-
 -- 老库升级：补充码流索引列（点播时选择主/子码流）
 ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS stream_index VARCHAR(32) DEFAULT 'auto';
+
+-- 老库升级：级联上行推流的传输方式（auto 跟随上级 SDP / tcp / udp）
+-- 上级 INVITE 声明 UDP 但它那侧 UDP 入站被防火墙拦时，改成 tcp 即可，
+-- 否则表现是「本端日志一切正常、上级一直报 none rtp data receive」。
+ALTER TABLE gb_cascade ADD COLUMN IF NOT EXISTS media_transport VARCHAR(8) DEFAULT 'auto';
 
 -- 老库升级：补充通道的码流编号列表（设备上报该通道支持哪几路码流）
 ALTER TABLE gb_channel ADD COLUMN IF NOT EXISTS stream_number_list VARCHAR(64);

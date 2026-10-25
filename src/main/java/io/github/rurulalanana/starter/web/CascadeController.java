@@ -137,6 +137,8 @@ public class CascadeController {
         private Boolean BindLocalIP;
         @JsonAlias({"controlPriority"})
         private Integer ControlPriority;
+        @JsonAlias({"mediaTransport"})
+        private String MediaTransport;
     }
 
     /** 级联配置列表。 */
@@ -298,6 +300,7 @@ public class CascadeController {
         cascade.setShareAllChannel(req.getShareAllChannel());
         cascade.setStreamKeepalive(req.getStreamKeepalive());
         cascade.setControlPriority(req.getControlPriority());
+        cascade.setMediaTransport(normalizeTransport(req.getMediaTransport()));
         cascade.setEnabled(req.getEnable());
         String cascadeId = cascadeService.save(cascade);
         /*
@@ -430,8 +433,24 @@ public class CascadeController {
 
     // ==================== 内部 ====================
 
-    private CascadeVo cascadeView(GbCascade c) {
-        CascadeVo vo = new CascadeVo();
+    /**
+     * 归一化「上行推流传输方式」入参。
+     *
+     * <p>非法值一律落到 {@code auto}（跟随上级 SDP），避免因为前端传了个
+     * 不认识的字符串就把推流卡死。
+     */
+    private static String normalizeTransport(String v) {
+        if (v == null) {
+            return "auto";
+        }
+        String s = v.trim().toLowerCase();
+        if ("tcp".equals(s) || "udp".equals(s) || "auto".equals(s)) {
+            return s;
+        }
+        return "auto";
+    }
+
+    private CascadeVo cascadeView(GbCascade c) {        CascadeVo vo = new CascadeVo();
         vo.setId(c.getCascadeId());
         vo.setName(c.getName());
         vo.setSerial(c.getParentId());
@@ -458,6 +477,7 @@ public class CascadeController {
         vo.setStreamKeepalive(c.getStreamKeepalive());
         vo.setEnable(c.getEnabled());
         vo.setRemark(c.getRemark());
+        vo.setMediaTransport(c.getMediaTransport());
         vo.setCreatedAt(TimeFormats.toDisplay(c.getCreateTime()));
         vo.setUpdatedAt(TimeFormats.toDisplay(c.getUpdateTime()));
         return vo;

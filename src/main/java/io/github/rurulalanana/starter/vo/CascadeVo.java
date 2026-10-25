@@ -50,6 +50,13 @@ public class CascadeVo {
     private Boolean enable;
 
     private String remark;
+
+    /**
+     * 上行推流传输方式：{@code auto}（跟随上级 SDP）/ {@code tcp} / {@code udp}。
+     *
+     * <p>遇到「上级说 UDP 但收不到流」时改成 {@code tcp}。
+     */
+    private String mediaTransport;
     private String createdAt;
     private String updatedAt;
 }

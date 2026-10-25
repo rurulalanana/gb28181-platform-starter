@@ -155,6 +155,16 @@
               <el-option label="TCP" value="TCP" />
             </el-select>
           </el-form-item>
+          <el-form-item label="推流传输">
+            <el-select v-model="form.mediaTransport" class="full-width">
+              <el-option label="自动（跟随上级 SDP）" value="auto" />
+              <el-option label="强制 TCP 主动" value="tcp" />
+              <el-option label="强制 UDP 主动" value="udp" />
+            </el-select>
+            <span class="form-item-hint">
+              上级点播看不到画面（提示 none rtp data receive）时改选 TCP 主动
+            </span>
+          </el-form-item>
         </div>
 
         <!-- 鉴权（可选） -->
@@ -300,6 +310,7 @@ const emptyForm = () => ({
   Username: '',
   Password: '',
   CommandTransport: 'UDP',
+  mediaTransport: 'auto',
   Enable: true,
   ShareAllChannel: false,
   AllowControl: true
@@ -342,6 +353,7 @@ function openEdit(row) {
       LocalPort: row.localPort,
       Username: row.username,
       CommandTransport: row.commandTransport || 'UDP',
+      mediaTransport: row.mediaTransport || 'auto',
       Enable: !!row.enable,
       ShareAllChannel: !!row.shareAllChannel,
       AllowControl: row.allowControl !== false
