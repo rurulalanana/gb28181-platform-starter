@@ -60,6 +60,12 @@ public final class ConfigKeys {
     /** 录像对账间隔（毫秒）：补归档丢失下线事件的录像。 */
     public static final String RECORD_RECONCILE_INTERVAL_MS = "record.reconcile-interval-ms";
 
+    /** 录像下载/播放地址是否要求签名。关闭后知道路径即可下载。 */
+    public static final String RECORD_URL_SIGN_ENABLED = "record.url-sign-enabled";
+
+    /** 录像地址签名有效期（秒）。 */
+    public static final String RECORD_URL_SIGN_TTL_SECONDS = "record.url-sign-ttl-seconds";
+
     // ==================== 日志 ====================
 
     /** 操作日志保留天数。 */
@@ -145,6 +151,15 @@ public final class ConfigKeys {
             longDef(RECORD_RECONCILE_INTERVAL_MS, "60000", "record", 10_000, 1_800_000,
                     "录像对账间隔（毫秒）。把磁盘上已存在但库里缺记录的录像补登记回来。"
                             + "只影响「列表里多久能看到」，不影响录像本身，故范围可宽一些。"),
+            boolDef(RECORD_URL_SIGN_ENABLED, "true", "record",
+                    "录像播放/下载地址是否必须带签名。开启后地址形如 /record/xx.mp4?e=过期时间&t=签名，"
+                            + "签名由服务端按「路径 + 过期时间」现算，过期即失效，无法跨用户转发。"
+                            + "关闭后只要知道路径就能下载，仅建议在纯内网、无外网入口的部署里关闭。"
+                            + "注意：本项只影响服务端是否校验，nginx 侧一律走鉴权子请求，改这项不需要重启或改 nginx。"),
+            intDef(RECORD_URL_SIGN_TTL_SECONDS, "43200", "record", 300, 604_800,
+                    "录像地址签名有效期（秒，默认 12 小时）。"
+                            + "它同时是「播放页签最长能连续播多久」和「复制出去的链接多久失效」。"
+                            + "下限 5 分钟：太小会导致长片播到一半续传被拒（每次 Range 都要重新校验）。"),
 
             intDef(LOG_OPLOG_RETAIN_DAYS, "7", "log", 1, 3650,
                     "操作日志保留天数（谁在什么时候做了什么）。"),

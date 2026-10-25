@@ -1,7 +1,12 @@
 package io.github.rurulalanana.starter.config;
 
+import io.github.rurulalanana.starter.service.RecordUrlSigner;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.CacheControl;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -33,8 +38,38 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
 
     private final Gb28181Properties props;
 
-    public SpaWebConfiguration(Gb28181Properties props) {
+    /** 录像地址签名器：本地静态映射（{@code record-static-enabled}）也要校验。 */
+    private final RecordUrlSigner recordUrlSigner;
+
+    public SpaWebConfiguration(Gb28181Properties props, RecordUrlSigner recordUrlSigner) {
         this.props = props;
+        this.recordUrlSigner = recordUrlSigner;
+    }
+
+    /**
+     * 本地静态映射下的录像鉴权。
+     *
+     * <p>标准部署由 nginx 读磁盘，鉴权走 {@code auth_request} 子请求；
+     * 但开了 {@code gb28181.record-static-enabled}（无 nginx 的单机试跑）时，
+     * {@code /record/**} 改由本进程的资源处理器发出，<b>那条链路不经过
+     * nginx、也不经过 Sa-Token（它只拦 {@code /api/v1/**}）</b> ——
+     * 不同时在这里拦一道，就变成「换个部署形态，鉴权就没了」的隐形漏洞。
+     */
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(new HandlerInterceptor() {
+            @Override
+            public boolean preHandle(HttpServletRequest request, HttpServletResponse response,
+                                     Object handler) {
+                String query = request.getQueryString();
+                String uri = request.getRequestURI() + (query == null ? "" : "?" + query);
+                if (recordUrlSigner.allow(uri)) {
+                    return true;
+                }
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                return false;
+            }
+        }).addPathPatterns("/record/**");
     }
 
     @Override
@@ -131,6 +166,11 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
      * 所以这里不做开关判断 —— 地址总要给前端；拿不到数据属于部署配置问题，
      * 不该表现为「前端根本拿不到播放地址」。
      *
+     * <p><b>返回值带签名</b>：{@code /record/**} 由 nginx 绕过 Spring 直接发文件，
+     * Sa-Token 拦不到，不带签名就等于「知道路径就能下载」。
+     * 这里是全平台产出录像地址的唯一出口，在此签名能保证
+     * 列表、详情、分享页等所有场景都不遗漏；参见 {@link RecordUrlSigner}。
+     *
      * @param filePath 录像文件绝对路径
      * @return 静态 URL；文件不在录像根目录下返回 {@code null}
      */
@@ -144,7 +184,7 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
             if (rel.startsWith("..")) {
                 return null;
             }
-            return "/record/" + rel.toString().replace('\\', '/');
+            return recordUrlSigner.sign("/record/" + rel.toString().replace('\\', '/'));
         } catch (RuntimeException e) {
             return null;
         }

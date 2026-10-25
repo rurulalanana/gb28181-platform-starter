@@ -47,7 +47,11 @@ public class OperationLogInterceptor implements HandlerInterceptor {
     private static final Set<String> EXCLUDED_PATHS = Set.of(
             "/api/v1/device/onlinestats",
             "/api/v1/system/metrics",
-            "/api/v1/stream/info"
+            "/api/v1/stream/info",
+            // nginx 的 auth_request 子请求：播放一段录像要按 GOP 发几十次 Range，
+            // 每次都记一条操作日志会把日志表刷满，且这些行没有任何审计价值
+            // （用户真正看的操作是「播放/下载」，不是「第 37 个分段请求」）。
+            "/api/v1/record/auth"
     );
 
     private final OperationLogService operationLogService;

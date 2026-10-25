@@ -639,6 +639,8 @@ const CFG_LABELS = {
   'record.purge-interval-ms': '录像清理间隔',
   'record.keepalive-interval-ms': '云端录像保活间隔',
   'record.reconcile-interval-ms': '录像对账间隔',
+  'record.url-sign-enabled': '录像地址签名校验',
+  'record.url-sign-ttl-seconds': '录像地址有效期',
   'log.oplog-retain-days': '操作日志保留天数',
   'log.status-retain-days': '状态日志保留天数',
   'stream.idle-reap-interval-ms': '空闲流回收间隔',
