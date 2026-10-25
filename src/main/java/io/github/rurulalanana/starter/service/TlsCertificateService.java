@@ -475,6 +475,8 @@ public class TlsCertificateService {
         String key = dir.resolve(KEY_FILE).toString();
         int port = currentPort();
         int appPort = 48092;
+        // 媒体服务端口：从启动配置取（ZLM 端口改变需要重启，故不放进运行时配置）
+        int mediaPort = props.getHttpPort();
 
         return "# 本文件由 gb28181-platform-starter 自动生成，请勿手工编辑。\n"
                 + "# 重新上传证书会被覆盖。生成时间：" + Instant.now() + "\n"
@@ -533,6 +535,34 @@ public class TlsCertificateService {
                 + "        proxy_pass_request_body off;\n"
                 + "        proxy_set_header Content-Length \"\";\n"
                 + "        proxy_set_header X-Original-URI $request_uri;\n"
+                + "    }\n"
+                + "\n"
+                /*
+                 * 媒体流（ws-flv / http-flv / hls）必须在这里反代。
+                 *
+                 * ZLM 只监听 http/ws，不提供 TLS。HTTPS 页面若直连
+                 * ws://host:48089 会被浏览器判定为混合内容并阻止，
+                 * 表现为「实时预览一直转圈」——而登录、页面、录像都正常，
+                 * 极易误判成流服务坏了。
+                 *
+                 * 前端在 HTTPS 下已把媒体地址改成同源路径（见 resolvePlayUrls.js），
+                 * 由这里转到 ZLM，浏览器眼中就是同源 wss，没有混合内容问题。
+                 * 也不需要给媒体服务单独签证书或额外开放公网端口。
+                 */
+                + "    # 媒体流：ws-flv / http-flv / hls（ZLM 不支持 TLS，由这里终结）\n"
+                + "    location /rtp/ {\n"
+                + "        proxy_pass http://127.0.0.1:" + mediaPort + ";\n"
+                + "        proxy_http_version 1.1;\n"
+                + "        proxy_set_header Host       $host;\n"
+                + "        proxy_set_header X-Real-IP  $remote_addr;\n"
+                + "        # WebSocket 升级（ws-flv 走这条）\n"
+                + "        proxy_set_header Upgrade    $http_upgrade;\n"
+                + "        proxy_set_header Connection $connection_upgrade;\n"
+                + "        # 直播流不能缓冲：缓冲会把低延迟拖成几秒\n"
+                + "        proxy_buffering off;\n"
+                + "        # 长连接：一路预览可能持续数小时，默认 60s 会被掐断\n"
+                + "        proxy_read_timeout 3600s;\n"
+                + "        proxy_send_timeout 3600s;\n"
                 + "    }\n"
                 + "\n"
                 + "    location / {\n"
