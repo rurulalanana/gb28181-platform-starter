@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.config;
 import io.github.rurulalanana.gb28181.sip.security.CredentialProvider;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;
+import io.github.rurulalanana.starter.service.AccessControlService;
 import io.github.rurulalanana.starter.service.ConfigKeys;
 import io.github.rurulalanana.starter.service.RuntimeConfigService;
 import lombok.RequiredArgsConstructor;
@@ -24,7 +25,8 @@ public class Gb28181PlatformConfiguration {
 
     @Bean(destroyMethod = "stop")
     public Gb28181MediaPlatform gb28181MediaPlatform(Gb28181Properties props,
-                                                     ObjectProvider<RuntimeConfigService> configProvider) {
+                                                     ObjectProvider<RuntimeConfigService> configProvider,
+                                                     ObjectProvider<AccessControlService> aclProvider) {
         MediaServerProperties.MediaServerPropertiesBuilder builder = MediaServerProperties.builder()
                 .platformId(props.getPlatformId())
                 .sipHost(props.getSipHost())
@@ -40,6 +42,16 @@ public class Gb28181PlatformConfiguration {
                  * 直接注入 RuntimeConfigService 会连带提前初始化数据源。
                  */
                 .credentialProvider(runtimeSipPassword(configProvider, props))
+                /*
+                 * 接入控制（黑白名单）：同样是每次 REGISTER 现取。
+                 *
+                 * 用 ObjectProvider 而不是直接注入，理由和上面一样：
+                 * 本 bean 构造得很早，直接注入会连带提前初始化数据源。
+                 *
+                 * 拿不到就返回 null（不装配）—— 此时平台行为与加黑白名单之前
+                 * 完全一致，不会因为配置服务没就绪而把所有设备挡在外面。
+                 */
+                .accessControl(aclProvider.getIfAvailable())
                 .sipTransports(props.getSipTransports())
                 .httpPort(props.getHttpPort())
                 .rtmpPort(props.getRtmpPort())

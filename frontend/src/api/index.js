@@ -34,6 +34,21 @@ export const configApi = {
   reset: (key) => post('/config/reset', { key })
 }
 
+/**
+ * 接入控制（黑白名单）接口（`/api/v1/acl/*`）。
+ *
+ * <p>保存后立即生效：服务端维护一份不可变规则快照，增删后整体替换，
+ * SIP 信令线程读到的永远是一份完整规则，不需要重启。
+ *
+ * <p>判定顺序是**先黑后白**：命中黑名单直接拒绝（白名单不能给它开后门），
+ * 然后「有白名单但未命中」也拒绝。白名单为空 = 不限制来源。
+ */
+export const aclApi = {
+  list: (params) => get('/acl/list', params),
+  add: (params) => post('/acl/add', params),
+  remove: (id) => post('/acl/remove', { id })
+}
+
 /** 设备与通道接口（`/api/v1/device/*`）。 */
 export const deviceApi = {
   list: (params) => get('/device/list', params),

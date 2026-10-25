@@ -290,6 +290,126 @@
         <p v-if="!cfgGroups.length && !cfgLoading" class="empty-hint">暂无可调整的运行时配置</p>
       </section>
 
+      <!-- ---------- 接入控制（黑白名单） ---------- -->
+      <section v-show="active === 'acl'" class="sec">
+        <header class="sec-head">
+          <div>
+            <h2 class="sec-title">
+              接入控制
+              <HelpTip text="按来源决定谁可以注册。与「设备统一接入密码」是两道独立的闸门：密码回答「你是谁」，名单回答「这个来源许不许进」。检查发生在密码校验之前，所以黑名单里的设备即使密码正确也进不来 —— 这正是密码泄露后仍能拦住已知恶意来源的意义。保存后立即生效，无需重启；已注册的设备不受影响，要等下次注册才生效。" />
+            </h2>
+            <p class="sec-sub">按设备编码或 IP 限制注册来源</p>
+          </div>
+          <div class="acl-head-actions">
+            <el-button text :icon="Refresh" :loading="aclLoading" @click="loadAcl">刷新</el-button>
+            <el-button type="primary" :icon="Plus" @click="openAclDialog">添加规则</el-button>
+          </div>
+        </header>
+
+        <!--
+          判定顺序写出来而不是只放进 tooltip：
+          黑白名单的语义容易凭直觉猜错（尤其「白名单为空」这一条），
+          猜错的结果是所有设备掉线或全部放行，代价太大。
+        -->
+        <div class="acl-flow">
+          <span class="acl-step">
+            <span class="acl-step-no">1</span>
+            命中黑名单 → 拒绝
+          </span>
+          <span class="acl-arrow">→</span>
+          <span class="acl-step">
+            <span class="acl-step-no">2</span>
+            有白名单但未命中 → 拒绝
+          </span>
+          <span class="acl-arrow">→</span>
+          <span class="acl-step is-pass">
+            <span class="acl-step-no">3</span>
+            其余放行
+          </span>
+        </div>
+
+        <el-alert
+          v-if="aclBlackCount === 0 && aclWhiteCount === 0"
+          type="info"
+          :closable="false"
+          show-icon
+          class="acl-alert"
+          title="当前未设置任何规则，所有来源均可注册"
+          description="只靠「设备统一接入密码」把关。密码一旦泄露或被批量写入弱口令，任何人都能注册设备。"
+        />
+        <el-alert
+          v-else-if="aclWhiteCount === 0"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="acl-alert"
+          :title="`当前为黑名单模式：${aclBlackCount} 条规则，命中的来源被拒绝，其余全部放行`"
+          description="白名单为空即「未启用白名单」，不会拦截任何设备。想只允许指定来源注册，请添加白名单条目。"
+        />
+        <el-alert
+          v-else
+          type="success"
+          :closable="false"
+          show-icon
+          class="acl-alert"
+          :title="`当前为白名单模式：仅 ${aclWhiteCount} 条规则内的来源可以注册`"
+          :description="aclBlackCount > 0
+            ? `同时有 ${aclBlackCount} 条黑名单规则，黑名单优先：即使命中了白名单，只要也命中黑名单仍会被拒绝。`
+            : '未命中白名单的来源一律拒绝。级联上级平台如需注册，也要加进白名单。'"
+        />
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">规则列表</span>
+            <el-radio-group v-model="aclFilter" size="small" @change="loadAcl">
+              <el-radio-button value="">全部</el-radio-button>
+              <el-radio-button value="BLACK">黑名单 {{ aclBlackCount }}</el-radio-button>
+              <el-radio-button value="WHITE">白名单 {{ aclWhiteCount }}</el-radio-button>
+            </el-radio-group>
+          </div>
+
+          <el-table
+            v-loading="aclLoading"
+            :data="aclRows"
+            size="small"
+            empty-text="暂无规则"
+          >
+            <el-table-column label="类型" width="96">
+              <template #default="{ row }">
+                <el-tag
+                  size="small"
+                  effect="plain"
+                  :type="row.listType === 'WHITE' ? 'success' : 'danger'"
+                >
+                  {{ row.listType === 'WHITE' ? '白名单' : '黑名单' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="匹配方式" width="120">
+              <template #default="{ row }">{{ aclKindLabel(row.kind) }}</template>
+            </el-table-column>
+            <el-table-column label="匹配值" min-width="220">
+              <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="200">
+              <template #default="{ row }">
+                <span class="acl-remark">{{ row.remark || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="添加时间" width="170">
+              <template #default="{ row }">
+                <span class="mono acl-time">{{ row.createTime || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="80" align="right">
+              <template #default="{ row }">
+                <el-button link type="danger" size="small" @click="removeAcl(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </section>
+
       <!-- ---------- 对象存储 ---------- -->
       <section v-show="active === 'storage'" class="sec">
         <header class="sec-head">
@@ -384,6 +504,66 @@
         </div>
       </section>
     </div>
+
+    <!-- ---------- 添加接入控制规则 ---------- -->
+    <el-dialog
+      v-model="aclDialog"
+      title="添加接入控制规则"
+      width="520px"
+      append-to-body
+      @closed="resetAclForm"
+    >
+      <el-form label-position="top" class="acl-form">
+        <el-form-item label="名单类型">
+          <el-radio-group v-model="aclForm.listType">
+            <el-radio-button value="BLACK">黑名单（拒绝命中）</el-radio-button>
+            <el-radio-button value="WHITE">白名单（只放行命中）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="匹配方式">
+          <el-select v-model="aclForm.kind" style="width: 100%">
+            <el-option label="设备编码（精确 20 位）" value="DEVICE" />
+            <el-option label="设备编码前缀（批量）" value="PREFIX" />
+            <el-option label="IP 地址（精确）" value="IP" />
+            <el-option label="IP 网段（CIDR）" value="CIDR" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="匹配值">
+          <el-input
+            v-model="aclForm.value"
+            :placeholder="aclPlaceholder"
+            spellcheck="false"
+            @keyup.enter="submitAcl"
+          />
+          <div class="form-hint">{{ aclKindHint }}</div>
+        </el-form-item>
+
+        <el-form-item label="备注">
+          <el-input
+            v-model="aclForm.remark"
+            placeholder="建议写明原因，例如：设备已报废 / 客户要求屏蔽"
+            maxlength="200"
+            show-word-limit
+          />
+        </el-form-item>
+
+        <el-alert
+          v-if="aclForm.listType === 'WHITE' && aclWhiteCount === 0"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="这将是第一条白名单规则"
+          description="一旦存在白名单，未命中白名单的来源将全部被拒绝 —— 包括现在在线的设备。请确认已把需要接入的设备和级联上级平台都加进来。"
+        />
+      </el-form>
+
+      <template #footer>
+        <el-button @click="aclDialog = false">取消</el-button>
+        <el-button type="primary" :loading="aclSaving" @click="submitAcl">保存并生效</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -394,13 +574,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Cloudy,
   CopyDocument,
+  Filter,
   Lock,
   Monitor,
+  Plus,
   Refresh,
   RefreshRight,
   Setting
 } from '@element-plus/icons-vue'
-import { configApi, systemApi, webrtcApi } from '@/api'
+import { aclApi, configApi, systemApi, webrtcApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import HelpTip from '@/components/HelpTip.vue'
 
@@ -419,6 +601,7 @@ const SECTIONS = [
   { key: 'overview', label: '运行概览', icon: markRaw(Monitor) },
   { key: 'service', label: '服务运维', icon: markRaw(RefreshRight) },
   { key: 'config', label: '运行时配置', icon: markRaw(Setting) },
+  { key: 'acl', label: '接入控制', icon: markRaw(Filter) },
   { key: 'storage', label: '对象存储', icon: markRaw(Cloudy) },
   { key: 'security', label: '账号安全', icon: markRaw(Lock) }
 ]
@@ -945,9 +1128,143 @@ async function changePassword() {
   }
 }
 
+/* ==================== 接入控制（黑白名单） ==================== */
+
+const aclLoading = ref(false)
+/** 明细列表（按当前筛选）。 */
+const aclRows = ref([])
+/** 筛选：'' 全部 / 'BLACK' / 'WHITE'。 */
+const aclFilter = ref('')
+/*
+ * 两类名单的总条数单独维护，不能从 aclRows 里数：
+ * 列表是按筛选条件取的，「白名单 0 条」这个提示需要在任何筛选下都准确。
+ */
+const aclBlackCount = ref(0)
+const aclWhiteCount = ref(0)
+
+const aclDialog = ref(false)
+const aclSaving = ref(false)
+const aclForm = reactive({ listType: 'BLACK', kind: 'DEVICE', value: '', remark: '' })
+
+/** 匹配方式的界面名称。 */
+function aclKindLabel(kind) {
+  switch (kind) {
+    case 'PREFIX':
+      return '编码前缀'
+    case 'IP':
+      return 'IP 地址'
+    case 'CIDR':
+      return 'IP 网段'
+    default:
+      return '设备编码'
+  }
+}
+
+/** 匹配方式的输入提示，按当前方式变化（固定一句通用提示反而更容易填错）。 */
+const aclPlaceholder = computed(() => {
+  switch (aclForm.kind) {
+    case 'PREFIX':
+      return '如 3402000000132'
+    case 'IP':
+      return '如 112.74.161.73'
+    case 'CIDR':
+      return '如 192.168.1.0/24'
+    default:
+      return '20 位设备编码，如 34020000001320000001'
+  }
+})
+
+/** 匹配方式的说明。 */
+const aclKindHint = computed(() => {
+  switch (aclForm.kind) {
+    case 'PREFIX':
+      return '1~20 位数字，匹配以此开头的全部设备编码 —— 批量拉黑某厂商设备时用。'
+    case 'IP':
+      return '只匹配这一个 IPv4 地址。设备换网段后会失效。'
+    case 'CIDR':
+      return '匹配整个网段，如 /24 表示前 24 位相同。设备 IP 会变时优先用它。'
+    default:
+      return '20 位国标编码，精确匹配单台设备。级联场景填下级平台编码。'
+  }
+})
+
+async function loadAcl() {
+  aclLoading.value = true
+  try {
+    const data = await aclApi.list(aclFilter.value ? { list_type: aclFilter.value } : undefined)
+    aclRows.value = data?.aclList || []
+    aclBlackCount.value = Number(data?.blackCount || 0)
+    aclWhiteCount.value = Number(data?.whiteCount || 0)
+  } catch (e) {
+    ElMessage.error(e.message || '加载接入控制规则失败')
+  } finally {
+    aclLoading.value = false
+  }
+}
+
+function openAclDialog() {
+  // 默认黑名单：它只影响明文列出的来源，不会像白名单那样一开就把
+  // 未列出的设备全挡住 —— 误操作代价小得多。
+  aclForm.listType = 'BLACK'
+  aclForm.kind = 'DEVICE'
+  aclForm.value = ''
+  aclForm.remark = ''
+  aclDialog.value = true
+}
+
+function resetAclForm() {
+  aclForm.value = ''
+  aclForm.remark = ''
+}
+
+async function submitAcl() {
+  const value = String(aclForm.value || '').trim()
+  if (!value) {
+    ElMessage.warning('请填写匹配值')
+    return
+  }
+  aclSaving.value = true
+  try {
+    await aclApi.add({
+      list_type: aclForm.listType,
+      kind: aclForm.kind,
+      value,
+      remark: aclForm.remark
+    })
+    ElMessage.success('规则已生效（已注册的设备不受影响，下次注册时校验）')
+    aclDialog.value = false
+    await loadAcl()
+  } catch (e) {
+    // 后端会带出具体原因（编码位数不对 / 网段格式错 / 重复）
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    aclSaving.value = false
+  }
+}
+
+async function removeAcl(row) {
+  try {
+    await ElMessageBox.confirm(
+      `删除规则「${aclKindLabel(row.kind)} ${row.value}」？\n\n删除后该来源将立即恢复为可注册（或不再受此规则保护）。`,
+      '删除接入控制规则',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    await aclApi.remove(row.id)
+    ElMessage.success('规则已删除')
+    await loadAcl()
+  } catch (e) {
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
 onMounted(() => {
   loadServer()
   loadConfig()
+  loadAcl()
 })
 </script>
 
@@ -1475,6 +1792,107 @@ onMounted(() => {
   margin-left: var(--sp-3);
   font-size: var(--fs-xs);
   color: var(--ink-500);
+}
+
+/* ==================== 接入控制（黑白名单） ==================== */
+
+.acl-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/*
+ * 判定流程条。
+ *
+ * <p>把「先黑后白」和「白名单为空 = 不限制」这两条语义写在界面上，
+ * 而不是只藏进 tooltip：这两点最容易凭直觉猜错，猜错的后果是
+ * 所有设备掉线或全部放行 —— 一次误判的代价远高于多占一行版面。
+ */
+.acl-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+}
+
+.acl-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+
+.acl-step.is-pass {
+  color: var(--online-600, var(--online-500));
+  font-weight: 600;
+}
+
+.acl-step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink-200);
+  color: var(--ink-700);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-family: var(--mono);
+}
+
+.acl-step.is-pass .acl-step-no {
+  background: var(--online-500);
+  color: #fff;
+}
+
+.acl-arrow {
+  color: var(--ink-400);
+  font-size: var(--fs-sm);
+}
+
+/* 三个状态提示条之间留出间距，避免连成一片读不出层次 */
+.acl-alert {
+  margin-bottom: var(--sp-3);
+}
+
+/* 备注可能很长，限两行并省略；完整内容在编辑时可见，列表里不需要撑高行 */
+.acl-remark {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.acl-time {
+  font-size: var(--fs-xs);
+  color: var(--ink-500);
+}
+
+.acl-form :deep(.el-form-item) {
+  margin-bottom: var(--sp-4);
+}
+
+.acl-form :deep(.el-form-item__label) {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  padding-bottom: var(--sp-1);
+}
+
+/* 对话框里的匹配值输入用等宽：编码和网段逐位比对，等宽更好认 */
+.acl-form :deep(.el-input__inner) {
+  font-family: var(--mono);
 }
 
 /* ==================== 窄屏 ==================== */

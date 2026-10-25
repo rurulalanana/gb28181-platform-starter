@@ -829,6 +829,46 @@ COMMENT ON COLUMN gb_operation_log.duration_ms IS '用时（毫秒）';
 COMMENT ON COLUMN gb_operation_log.create_time IS '记录时间';
 
 
+-- -------------------- 接入控制（黑白名单） --------------------
+--
+-- 与 SIP 注册密码是两道**独立**的闸门：
+--   密码回答「你是谁」，本表回答「这个来源许不许进」。
+--   访问控制在摘要认证之前生效，所以黑名单里的设备即使密码正确也进不来 ——
+--   这正是「密码泄露后仍能拦住已知恶意来源」的全部意义。
+--
+-- kind 取值：
+--   DEVICE   设备编码精确匹配（20 位国标编码；级联场景是下级平台编码）
+--   PREFIX   设备编码前缀匹配，如 3402000000132（某厂商的一批设备）
+--   IP       IPv4 精确匹配
+--   CIDR     网段匹配，如 192.168.1.0/24
+--
+-- list_type：BLACK 命中即拒绝 / WHITE 只放行命中的
+--
+-- 两种名单可同时存在，判定顺序「先黑后白」：
+--   1. 命中黑名单 → 拒绝（黑名单优先级最高，白名单不能给它开后门）
+--   2. 存在任何白名单且未命中 → 拒绝
+--   3. 其余放行
+-- 这个顺序保证「临时拉黑某台设备」不会因为它在白名单里而失效。
+CREATE TABLE IF NOT EXISTS gb_acl (
+    id          BIGSERIAL PRIMARY KEY,
+    list_type   VARCHAR(8)   NOT NULL DEFAULT 'BLACK',
+    kind        VARCHAR(8)   NOT NULL DEFAULT 'DEVICE',
+    -- 匹配值：设备编码 / 编码前缀 / IPv4 / 网段
+    value       VARCHAR(64)  NOT NULL,
+    -- 备注（写明为什么加这条，半年后只有它还能解释清楚）
+    remark      VARCHAR(200),
+    create_time TIMESTAMP    DEFAULT NOW(),
+    UNIQUE (list_type, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_gb_acl_type ON gb_acl (list_type, kind);
+
+COMMENT ON TABLE  gb_acl IS '接入控制：SIP 注册的黑白名单';
+COMMENT ON COLUMN gb_acl.list_type IS 'BLACK 命中即拒 / WHITE 只放行命中';
+COMMENT ON COLUMN gb_acl.kind      IS 'DEVICE 编码 / PREFIX 编码前缀 / IP / CIDR 网段';
+COMMENT ON COLUMN gb_acl.value     IS '匹配值';
+COMMENT ON COLUMN gb_acl.remark    IS '备注：为什么加这条';
+
+
 -- ============================================================
 --  第 3 段：初始化数据
 -- ============================================================
