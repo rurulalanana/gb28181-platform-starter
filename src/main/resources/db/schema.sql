@@ -323,14 +323,55 @@ CREATE TABLE IF NOT EXISTS gb_cascade_channel (
     id          BIGSERIAL PRIMARY KEY,
     cascade_id  VARCHAR(64)  NOT NULL,
     parent_id   VARCHAR(20)  NOT NULL,
+    device_id   VARCHAR(20),
     channel_id  VARCHAR(20)  NOT NULL,
     shared      BOOLEAN      DEFAULT FALSE,
     pushed      BOOLEAN      DEFAULT FALSE,
     push_time   TIMESTAMP,
     create_time TIMESTAMP    DEFAULT NOW(),
-    UNIQUE (cascade_id, channel_id)
+    UNIQUE (cascade_id, device_id, channel_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gb_cascade_channel_p ON gb_cascade_channel (parent_id);
+
+-- 老库升级：补 device_id 列。
+-- 唯一约束从 (cascade_id, channel_id) 改成 (cascade_id, device_id, channel_id)：
+-- 通道编码只在单设备内唯一，多设备共存时同一个编码会出现在十几台设备上，
+-- 老约束让「共享 A 设备的通道」与「共享 B 设备的同号通道」互相覆盖。
+ALTER TABLE gb_cascade_channel ADD COLUMN IF NOT EXISTS device_id VARCHAR(20);
+
+-- 老库升级：替换唯一约束（带存在性判断，重复执行安全）。
+-- 若不替换，第二台设备的同号通道根本插不进 gb_cascade_channel，
+-- 表现为「勾了这一路，另一台设备的同号通道却变成未共享」。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'gb_cascade_channel_cascade_id_channel_id_key'
+          AND conrelid = 'gb_cascade_channel'::regclass
+    ) THEN
+        ALTER TABLE gb_cascade_channel
+            DROP CONSTRAINT gb_cascade_channel_cascade_id_channel_id_key;
+    END IF;
+
+    -- 老数据 device_id 为空：按 gb_channel 反查补上。
+    -- 补不上的（通道已删）保留 NULL —— 唯一约束对 NULL 不做冲突判定，
+    -- 不会因此插入失败，但这类脏记录也不会再匹配到任何通道。
+    UPDATE gb_cascade_channel sc
+       SET device_id = c.device_id
+      FROM gb_channel c
+     WHERE sc.device_id IS NULL
+       AND c.channel_id = sc.channel_id;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'gb_cascade_channel_cascade_device_channel_key'
+          AND conrelid = 'gb_cascade_channel'::regclass
+    ) THEN
+        ALTER TABLE gb_cascade_channel
+            ADD CONSTRAINT gb_cascade_channel_cascade_device_channel_key
+            UNIQUE (cascade_id, device_id, channel_id);
+    END IF;
+END $$;
 
 -- -------------------- 设备分组 --------------------
 

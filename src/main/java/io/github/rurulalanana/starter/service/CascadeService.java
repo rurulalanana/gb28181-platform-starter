@@ -202,15 +202,53 @@ public class CascadeService {
                 .eq(GbCascadeChannel::getCascadeId, cascadeId));
     }
 
-    /** 已共享的通道编号集合。 */
-    public List<String> sharedChannelIds(String cascadeId) {
-        List<String> ids = new ArrayList<>();
+    /**
+     * 已共享通道的键集合，元素格式 {@code deviceId:channelId}。
+     *
+     * <p><b>为什么带设备编码</b>：通道编码只在单设备内唯一。现场实测有十几台
+     * 设备共用 {@code 34020000001320000001}，只用通道编码做键，
+     * 勾选其中一台会把其余同号通道全部标成「已共享」，
+     * 保存时又把它们当成「用户确认要共享」而写进库 —— 越权暴露。
+     */
+    public java.util.Set<String> sharedChannelKeys(String cascadeId) {
+        java.util.Set<String> keys = new java.util.HashSet<>();
         for (GbCascadeChannel c : sharedChannels(cascadeId)) {
-            if (Boolean.TRUE.equals(c.getShared())) {
-                ids.add(c.getChannelId());
+            if (!Boolean.TRUE.equals(c.getShared())) {
+                continue;
+            }
+            keys.add(channelKey(c.getDeviceId(), c.getChannelId()));
+        }
+        return keys;
+    }
+
+    /**
+     * 判断某通道是否已共享给该级联。
+     *
+     * @param deviceId  设备编码；为空时退化为「只按通道编码匹配」，
+     *                  仅用于兼容老数据里的脏记录
+     * @param channelId 通道编码
+     */
+    public boolean isChannelShared(String cascadeId, String deviceId, String channelId) {
+        if (channelId == null) {
+            return false;
+        }
+        for (GbCascadeChannel c : sharedChannels(cascadeId)) {
+            if (!Boolean.TRUE.equals(c.getShared())) {
+                continue;
+            }
+            if (!channelId.equals(c.getChannelId())) {
+                continue;
+            }
+            if (deviceId == null || c.getDeviceId() == null || deviceId.equals(c.getDeviceId())) {
+                return true;
             }
         }
-        return ids;
+        return false;
+    }
+
+    /** 通道唯一键：{@code deviceId:channelId}。 */
+    public static String channelKey(String deviceId, String channelId) {
+        return (deviceId == null ? "" : deviceId) + ":" + channelId;
     }
 
     /** 保存共享通道（{@code channels} 格式为 {@code serial:code}）。 */
@@ -233,9 +271,9 @@ public class CascadeService {
          */
         java.util.Set<String> keep = new java.util.HashSet<>();
         for (String item : channels == null ? java.util.Collections.<String>emptyList() : channels) {
-            String channelId = parseChannelId(item);
-            if (channelId != null && !channelId.isBlank()) {
-                keep.add(channelId);
+            String[] pair = parseChannelRef(item);
+            if (pair != null) {
+                keep.add(channelKey(pair[0], pair[1]));
             }
         }
         List<GbCascadeChannel> existing = cascadeChannelMapper.selectList(
@@ -243,14 +281,15 @@ public class CascadeService {
                         .eq(GbCascadeChannel::getCascadeId, cascadeId));
         int removed = 0;
         for (GbCascadeChannel sc : existing) {
-            if (!keep.contains(sc.getChannelId())) {
+            if (!keep.contains(channelKey(sc.getDeviceId(), sc.getChannelId()))) {
                 cascadeChannelMapper.deleteById(sc.getId());
                 removed++;
             }
         }
         int count = 0;
-        for (String channelId : keep) {
-            upsertShared(cascade, channelId, true);
+        for (String key : keep) {
+            String[] pair = splitKey(key);
+            upsertShared(cascade, pair[0], pair[1], true);
             count++;
         }
         if (removed > 0) {
@@ -270,36 +309,43 @@ public class CascadeService {
         }
         int count = 0;
         for (String item : channels) {
-            String channelId = parseChannelId(item);
-            if (channelId == null) {
+            String[] pair = parseChannelRef(item);
+            if (pair == null) {
                 continue;
             }
-            upsertShared(cascade, channelId, false);
+            upsertShared(cascade, pair[0], pair[1], false);
             count++;
         }
         return count;
     }
 
-    /** 共享 / 取消共享单个节点。 */
+    /**
+     * 共享 / 取消共享单个节点。
+     *
+     * @param deviceId 设备编码；为 {@code null} 时按通道编码匹配（兼容老调用）
+     */
     @Transactional
-    public void shareNode(String cascadeId, String channelId, boolean share) {
+    public void shareNode(String cascadeId, String deviceId, String channelId, boolean share) {
         GbCascade cascade = find(cascadeId);
         if (cascade == null) {
             throw BizException.notFound("级联配置不存在：" + cascadeId);
         }
-        upsertShared(cascade, channelId, share);
+        upsertShared(cascade, deviceId, channelId, share);
     }
 
-    private void upsertShared(GbCascade cascade, String channelId, boolean shared) {
+    private void upsertShared(GbCascade cascade, String deviceId, String channelId,
+                              boolean shared) {
         GbCascadeChannel existing = cascadeChannelMapper.selectOne(
                 Wrappers.<GbCascadeChannel>lambdaQuery()
                         .eq(GbCascadeChannel::getCascadeId, cascade.getCascadeId())
                         .eq(GbCascadeChannel::getChannelId, channelId)
+                        .eq(deviceId != null, GbCascadeChannel::getDeviceId, deviceId)
                         .last("limit 1"));
         if (existing == null) {
             existing = new GbCascadeChannel();
             existing.setCascadeId(cascade.getCascadeId());
             existing.setParentId(cascade.getParentId());
+            existing.setDeviceId(deviceId);
             existing.setChannelId(channelId);
             existing.setShared(shared);
             existing.setPushed(false);
@@ -336,10 +382,11 @@ public class CascadeService {
         if (Boolean.TRUE.equals(cascade.getShareAllChannel())) {
             return all;
         }
-        List<String> sharedIds = sharedChannelIds(cascade.getCascadeId());
+        List<String> sharedKeys = new ArrayList<>(sharedChannelKeys(cascade.getCascadeId()));
+        java.util.Set<String> keySet = new java.util.HashSet<>(sharedKeys);
         List<GbChannel> out = new ArrayList<>();
         for (GbChannel c : all) {
-            if (sharedIds.contains(c.getChannelId())) {
+            if (keySet.contains(channelKey(c.getDeviceId(), c.getChannelId()))) {
                 out.add(c);
             }
         }
@@ -352,10 +399,12 @@ public class CascadeService {
                     Wrappers.<GbCascadeChannel>lambdaQuery()
                             .eq(GbCascadeChannel::getCascadeId, cascadeId)
                             .eq(GbCascadeChannel::getChannelId, c.getChannelId())
+                            .eq(GbCascadeChannel::getDeviceId, c.getDeviceId())
                             .last("limit 1"));
             if (cc == null) {
                 cc = new GbCascadeChannel();
                 cc.setCascadeId(cascadeId);
+                cc.setDeviceId(c.getDeviceId());
                 cc.setChannelId(c.getChannelId());
                 cc.setShared(true);
                 cc.setCreateTime(LocalDateTime.now());
@@ -410,13 +459,27 @@ public class CascadeService {
         return client;
     }
 
-    private static String parseChannelId(String item) {
+    private static String[] parseChannelRef(String item) {
         if (item == null || item.isBlank()) {
             return null;
         }
         String v = item.trim();
         int colon = v.indexOf(':');
-        // 格式为 serial:code，取 code；只有一段时视为通道编号
-        return colon > 0 && colon + 1 < v.length() ? v.substring(colon + 1) : v;
+        if (colon > 0 && colon + 1 < v.length()) {
+            // serial:code —— 标准形式
+            return new String[]{v.substring(0, colon), v.substring(colon + 1)};
+        }
+        // 只有一段：视为通道编号，设备编码留空（兼容老调用与脏数据）
+        return new String[]{null, v};
+    }
+
+    /** 拆 {@code deviceId:channelId}。 */
+    private static String[] splitKey(String key) {
+        int colon = key.indexOf(':');
+        if (colon <= 0) {
+            return new String[]{null, key};
+        }
+        String dev = key.substring(0, colon);
+        return new String[]{dev.isEmpty() ? null : dev, key.substring(colon + 1)};
     }
 }

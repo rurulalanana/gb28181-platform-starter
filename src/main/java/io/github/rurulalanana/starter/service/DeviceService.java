@@ -74,6 +74,20 @@ public class DeviceService {
                 .eq(GbDevice::getDeviceId, deviceId).last("limit 1"));
     }
 
+    /**
+     * 设备是否在线。
+     *
+     * <p>为什么单独开一个方法而不是让调用方读 {@code device.getOnline()}：
+     * 通道列表要按设备批量判断，集中在这里可以让「设备在线」的判定口径
+     * 只有一处，避免各处各写一遍再慢慢走样。
+     *
+     * @return 设备不存在返回 {@code false}
+     */
+    public boolean deviceOnline(String deviceId) {
+        GbDevice device = findDevice(deviceId);
+        return device != null && Boolean.TRUE.equals(device.getOnline());
+    }
+
     /** 全部通道。 */
     public List<GbChannel> allChannels() {
         return channelMapper.selectList(Wrappers.<GbChannel>lambdaQuery()

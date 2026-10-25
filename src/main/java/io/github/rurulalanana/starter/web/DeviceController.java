@@ -463,13 +463,23 @@ public class DeviceController {
         return ApiResponse.ok();
     }
 
-    /** 自定义通道国标编号。 */
+    /**
+     * 自定义通道国标编号。
+     *
+     * <p>用于「上级平台看到的通道编号」与本地实际编号不一致的场景（下级平台
+     * 通道编号冲突、需要对接到第三方规范）。改的是 {@code custom_id}，
+     * 不动 {@code channel_id} —— 后者是设备实际使用的编号，改了就连不上设备。
+     *
+     * <p><b>必须按 serial + code 精确定位</b>：通道编码只在单设备内唯一，
+     * 多设备环境里两台设备都可能有 {@code ...1320000001}，
+     * 只按 code 查会改到另一台设备的同名通道上。
+     */
     @PostMapping("/setchannelid")
     public ApiResponse<Void> setChannelId(@RequestParam String serial,
                                           @RequestParam String code,
                                           @RequestParam(required = false) String id) {
         StpUtil.checkLogin();
-        GbChannel channel = requireChannel(code);
+        GbChannel channel = requireChannel(serial, code);
         channel.setCustomId(id);
         deviceService.updateChannel(channel);
         return ApiResponse.ok();
@@ -902,6 +912,21 @@ public class DeviceController {
         GbChannel channel = deviceService.findChannel(code);
         if (channel == null) {
             throw BizException.notFound("通道不存在：" + code);
+        }
+        return channel;
+    }
+
+    /**
+     * 按「设备编码 + 通道编码」精确定位通道。
+     *
+     * <p>通道编码只在单设备内唯一，凡是<b>写操作</b>都必须走这个方法：
+     * 只按 code 查在多设备环境里会改到别人的同号通道（而且用户完全看不出来，
+     * 直到某天发现另一台设备的通道名/编号被改了）。
+     */
+    private GbChannel requireChannel(String serial, String code) {
+        GbChannel channel = deviceService.findChannel(serial, code);
+        if (channel == null) {
+            throw BizException.notFound("通道不存在：" + serial + ":" + code);
         }
         return channel;
     }

@@ -554,7 +554,9 @@ public class CascadeLinkService {
         if (Boolean.TRUE.equals(cascade.getShareAllChannel())) {
             return true;
         }
-        return cascadeService.sharedChannelIds(cascade.getCascadeId()).contains(channelId);
+        // 控制指令只带了通道编码，没带设备编码（上级的 DeviceID 就是通道编码），
+        // 所以这里按通道编码匹配；deviceId 传 null 会退化成只比通道编码。
+        return cascadeService.isChannelShared(cascade.getCascadeId(), null, channelId);
     }
 
     /** 控制指令的可读描述，仅用于日志排查（不参与业务）。 */
@@ -587,7 +589,14 @@ public class CascadeLinkService {
     private Collection<GbChannel> channelsOf(List<GbCascadeChannel> shared) {
         List<GbChannel> out = new java.util.ArrayList<>();
         for (GbCascadeChannel sc : shared) {
-            GbChannel c = deviceService.findChannel(sc.getChannelId());
+            // 表里会保留「曾经共享、后来取消」的记录（shared=false），
+            // 漏掉这个判断就会把用户已经关掉的通道继续推给上级 —— 越权暴露。
+            if (!Boolean.TRUE.equals(sc.getShared())) {
+                continue;
+            }
+            // 必须按「设备 + 通道」定位：通道编码只在单设备内唯一，
+            // 两参数版本才有这个精度（deviceId 为 null 时它会自动退化为单参数查）。
+            GbChannel c = deviceService.findChannel(sc.getDeviceId(), sc.getChannelId());
             if (c != null) {
                 out.add(c);
             }

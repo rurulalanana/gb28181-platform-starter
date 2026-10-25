@@ -90,6 +90,8 @@ export const deviceApi = {
   setMediaTransport: (serial, mediaTransport, mode = 'passive') =>
     post('/device/setmediatransport', { serial, media_transport: mediaTransport, media_transport_mode: mode }),
   setChannelName: (params) => post('/device/setchannelname', params),
+  /** 自定义通道国标编号（只改 custom_id，不动 channel_id）。 */
+  setChannelId: (params) => post('/device/setchannelid', params),
   setChannelPtzType: (params) => post('/device/setchannelptztype', params),
   setChannelPosition: (params) => post('/device/setchannelposition', params),
   setChannelOnDemand: (params) => post('/device/setchannelondemand', params),
@@ -211,6 +213,8 @@ export const cascadeApi = {
   channelList: (params) => get('/cascade/channellist', params),
   saveChannels: (params) => post('/cascade/savechannels', params),
   removeChannels: (params) => post('/cascade/removechannels', params),
+  /** 共享全部通道开关。参数名是 shareallchannel（全小写无下划线），别写错。 */
+  setShareAllChannel: (params) => post('/cascade/setshareallchannel', params),
   pushCatalog: (params) => post('/cascade/pushcatalog', params)
 }
 

@@ -64,6 +64,8 @@ public class CascadeController {
     private final CascadeLinkService cascadeLinkService;
     private final DeviceService deviceService;
     private final Gb28181Properties props;
+    /** 只探测「有没有快照」，不现抓 —— 列表里几百条通道逐条拉流截图会打爆设备。 */
+    private final io.github.rurulalanana.starter.service.SnapService snapService;
 
     /**
      * 保存请求体。
@@ -202,7 +204,16 @@ public class CascadeController {
         return ApiResponse.ok(vo);
     }
 
-    /** 级联通道列表。 */
+    /**
+     * 级联通道列表（共享通道选择弹窗的数据源）。
+     *
+     * <p>参数对齐上级平台（LiveGBS）的「选择通道」弹窗：
+     * 关键字搜索、通道类型筛选、只看已选、在线筛选、排序、分页。
+     *
+     * @param channelType {@code all} / {@code video} / {@code audio} / {@code alarm} / {@code other}
+     * @param sort        排序字段：{@code deviceId} / {@code channelId} / {@code customId} / {@code name}
+     * @param order       {@code asc} / {@code desc}
+     */
     @GetMapping("/channellist")
     public ApiResponse<CascadeChannelListVo> channelList(
             @RequestParam String id,
@@ -211,62 +222,221 @@ public class CascadeController {
             @RequestParam(defaultValue = "1000") int limit,
             @RequestParam(required = false) String q,
             @RequestParam(required = false) Boolean online,
-            @RequestParam(defaultValue = "false") Boolean related) {
+            @RequestParam(defaultValue = "false") Boolean related,
+            @RequestParam(defaultValue = "deviceId") String sort,
+            @RequestParam(defaultValue = "asc") String order) {
         StpUtil.checkLogin();
         GbCascade cascade = cascadeService.resolveCascade(id);
-        List<String> sharedIds = cascadeService.sharedChannelIds(cascade.getCascadeId());
+        // 用「设备编码:通道编码」集合：通道编码只在单设备内唯一，
+        // 只用通道编码会把十几台设备的同号通道全标成已共享
+        java.util.Set<String> sharedKeys = cascadeService.sharedChannelKeys(cascade.getCascadeId());
         List<GbChannel> all = deviceService.allChannels();
+
+        // 设备在线状态按设备编码缓存：同一个下级平台下几百路通道共用一个状态，
+        // 逐条查库会变成 N 次查询（N = 通道总数），这里一次批量取。
+        java.util.Map<String, Boolean> deviceOnline = deviceOnlineMap(all);
+
+        String type = channelType == null ? "all" : channelType.trim().toLowerCase();
+        String needle = q == null || q.isBlank() ? null : q.trim().toLowerCase();
+
         List<CascadeChannelVo> list = new ArrayList<>();
         int sharedCount = 0;
         for (GbChannel c : all) {
             boolean isShared = Boolean.TRUE.equals(cascade.getShareAllChannel())
-                    || sharedIds.contains(c.getChannelId());
+                    || sharedKeys.contains(CascadeService.channelKey(c.getDeviceId(), c.getChannelId()));
             if (isShared) {
                 sharedCount++;
             }
             if (Boolean.TRUE.equals(related) && !isShared) {
                 continue;
             }
-            if (online != null && !online.equals(c.isOnline())) {
+            CascadeChannelVo row = toCascadeChannel(c,
+                    isShared ? cascade.getCascadeId() : null, deviceOnline);
+            boolean onlineNow = Boolean.TRUE.equals(row.getOnline());
+            if (online != null && !online.equals(onlineNow)) {
                 continue;
             }
-            if (q != null && !q.isBlank()) {
-                String needle = q.trim().toLowerCase();
-                String name = c.displayName() == null ? "" : c.displayName().toLowerCase();
-                if (!c.getChannelId().toLowerCase().contains(needle) && !name.contains(needle)) {
-                    continue;
-                }
+            if (!"all".equals(type) && !type.isEmpty()
+                    && !type.equals(row.getChannelType())) {
+                continue;
             }
-            CascadeChannelVo row = new CascadeChannelVo();
-            row.setCascadeId(isShared ? cascade.getCascadeId() : null);
-            row.setId(c.getChannelId());
-            row.setDeviceId(c.getDeviceId());
-            row.setName(c.getName());
-            row.setCustomName(c.getCustomName());
-            row.setCustomId(c.getCustomId());
-            row.setDeviceOnline(c.isOnline());
-            row.setChannel(c.getChannelNo());
-            row.setManufacturer(c.getManufacturer());
-            row.setModel(c.getModel());
-            row.setCivilCode(c.getCivilCode());
-            row.setAddress(c.getAddress());
-            row.setParentId(c.getParentId());
-            row.setSecrecy(c.getSecrecy());
-            row.setRegisterWay(c.getRegisterWay());
-            row.setStatus(c.getStatus());
-            row.setLongitude(c.getLongitude());
-            row.setLatitude(c.getLatitude());
-            row.setPtzType(c.getPtzType());
-            row.setOndemand(c.getOnDemand());
-            row.setAudioEnable(c.getAudio());
+            if (needle != null && !matchesKeyword(row, needle)) {
+                continue;
+            }
             list.add(row);
         }
+
+        sortChannels(list, sort, order);
+
         CascadeChannelListVo vo = new CascadeChannelListVo();
         vo.setChannelCount(list.size());
-        vo.setChannelRelateCount(sharedCount);
+        // 「全部共享」时实际共享数就是全部通道数，不是 gb_cascade_channel 里的记录数
+        // （那个开关会让显式列表失效，界面上显示 0 路会被误读成「什么都没共享」）
+        vo.setChannelRelateCount(Boolean.TRUE.equals(cascade.getShareAllChannel())
+                ? list.size() : sharedCount);
         vo.setShareAllChannel(cascade.getShareAllChannel());
         vo.setChannelList(PageQuery.slice(list, start, limit));
         return ApiResponse.ok(vo);
+    }
+
+    /**
+     * 组装一行级联通道视图。
+     *
+     * @param cascadeId    已共享时传级联 ID，未共享传 {@code null}
+     * @param onlineByDev  设备编码 → 是否在线（本批次批量查出）
+     */
+    private CascadeChannelVo toCascadeChannel(GbChannel c, String cascadeId,
+                                              java.util.Map<String, Boolean> onlineByDev) {
+        CascadeChannelVo row = new CascadeChannelVo();
+        row.setCascadeId(cascadeId);
+        row.setId(c.getChannelId());
+        row.setDeviceId(c.getDeviceId());
+        row.setName(c.getName());
+        row.setCustomName(c.getCustomName());
+        row.setCustomId(c.getCustomId());
+        row.setDeviceOnline(onlineByDev.get(c.getDeviceId()));
+        // 通道可用 = 设备在线 && 通道自身 Status=ON。
+        // 只看 status 会误报：设备掉线后它上报的通道 status 仍是最后一次的 ON。
+        row.setOnline(Boolean.TRUE.equals(row.getDeviceOnline()) && c.isOnline());
+        row.setChannel(c.getChannelNo());
+        String typeCode = typeCodeOf(c.getChannelId());
+        row.setTypeCode(typeCode);
+        row.setChannelType(channelTypeOf(typeCode));
+        row.setManufacturer(c.getManufacturer());
+        row.setModel(c.getModel());
+        row.setCivilCode(c.getCivilCode());
+        row.setAddress(c.getAddress());
+        row.setParentId(c.getParentId());
+        row.setSecrecy(c.getSecrecy());
+        row.setRegisterWay(c.getRegisterWay());
+        row.setStatus(c.getStatus());
+        row.setLongitude(c.getLongitude());
+        row.setLatitude(c.getLatitude());
+        row.setPtzType(c.getPtzType());
+        row.setOndemand(c.getOnDemand());
+        row.setAudioEnable(c.getAudio());
+        if (snapService.exists(c.getDeviceId(), c.getChannelId())) {
+            row.setSnapshot("/api/v1/cloudrecord/snap/" + c.getDeviceId()
+                    + "/" + c.getChannelId() + ".jpg");
+        }
+        return row;
+    }
+
+    /** 一次性取出这批通道所属设备的在线状态。 */
+    private java.util.Map<String, Boolean> deviceOnlineMap(List<GbChannel> channels) {
+        java.util.Map<String, Boolean> map = new java.util.HashMap<>();
+        for (GbChannel c : channels) {
+            String dev = c.getDeviceId();
+            if (dev == null || map.containsKey(dev)) {
+                continue;
+            }
+            map.put(dev, deviceService.deviceOnline(dev));
+        }
+        return map;
+    }
+
+    /** 关键字是否命中（名称 / 自定义名 / 通道编码 / 自定义编码 / 设备编码 / 厂家）。 */
+    private static boolean matchesKeyword(CascadeChannelVo row, String needle) {
+        return contains(row.getName(), needle)
+                || contains(row.getCustomName(), needle)
+                || contains(row.getId(), needle)
+                || contains(row.getCustomId(), needle)
+                || contains(row.getDeviceId(), needle)
+                || contains(row.getManufacturer(), needle);
+    }
+
+    private static boolean contains(String value, String needle) {
+        return value != null && value.toLowerCase().contains(needle);
+    }
+
+    /**
+     * 从 20 位国标编码取类型编码（第 11~13 位，GB/T 28181 附录 D）。
+     *
+     * @return 如 {@code 131}；编码不足 13 位或非数字返回 {@code null}
+     */
+    private static String typeCodeOf(String channelId) {
+        if (channelId == null || channelId.length() < 13) {
+            return null;
+        }
+        String sub = channelId.substring(10, 13);
+        for (int i = 0; i < sub.length(); i++) {
+            if (!Character.isDigit(sub.charAt(i))) {
+                return null;
+            }
+        }
+        return sub;
+    }
+
+    /**
+     * 类型编码 → 大类。
+     *
+     * <p>归并成四类而不是照搬国标 20 多种细类：现场筛选的真实需求就是
+     * 「只看视频」「只看报警」，列 20 个选项反而没人用（上级平台同样只分三类）。
+     *
+     * <p>编码含义（GB/T 28181—2016 附录 D）：
+     * 131 摄像机 / 132 网络摄像机 / 133 网络硬盘录像机 → 视频；
+     * 134 音频输入 / 135 音频输出 → 音频；
+     * 137 报警输入 / 138 报警输出 / 139 报警控制器 → 报警。
+     */
+    private static String channelTypeOf(String typeCode) {
+        if (typeCode == null) {
+            return "other";
+        }
+        switch (typeCode) {
+            case "131":
+            case "132":
+            case "133":
+                return "video";
+            case "134":
+            case "135":
+                return "audio";
+            case "137":
+            case "138":
+            case "139":
+                return "alarm";
+            default:
+                return "other";
+        }
+    }
+
+    /**
+     * 按指定字段排序。
+     *
+     * <p>与上级平台一致，默认按<b>设备编码</b>升序：同一个下级平台的通道聚在一起，
+     * 找「某台设备下的通道」比按通道编码散排直观得多。
+     */
+    private static void sortChannels(List<CascadeChannelVo> list, String sort, String order) {
+        java.util.Comparator<CascadeChannelVo> cmp;
+        String key = sort == null ? "deviceId" : sort.trim();
+        switch (key) {
+            case "channelId":
+                cmp = java.util.Comparator.comparing(
+                        r -> nz(r.getId()), java.util.Comparator.naturalOrder());
+                break;
+            case "customId":
+                // 自定义编号可能为空：空值统一排最后，避免它们挤在最前面挡住真实数据
+                cmp = java.util.Comparator.comparing(
+                        r -> nz(r.getCustomId()), java.util.Comparator.naturalOrder());
+                break;
+            case "name":
+                cmp = java.util.Comparator.comparing(
+                        r -> nz(r.getCustomName() != null ? r.getCustomName() : r.getName()),
+                        java.util.Comparator.naturalOrder());
+                break;
+            default:
+                // 设备编码相同时用通道编码做次级排序，否则同一设备下顺序随机
+                cmp = java.util.Comparator
+                        .comparing((CascadeChannelVo r) -> nz(r.getDeviceId()))
+                        .thenComparing(r -> nz(r.getId()));
+        }
+        if ("desc".equalsIgnoreCase(order)) {
+            cmp = cmp.reversed();
+        }
+        list.sort(cmp);
+    }
+
+    private static String nz(String s) {
+        return s == null ? "\uFFFF" : s;
     }
 
     /** 保存级联配置。 */
@@ -384,8 +554,11 @@ public class CascadeController {
                                        @RequestParam(value = "cascade_id") String cascadeId,
                                        @RequestParam(defaultValue = "true") Boolean share) {
         StpUtil.checkLogin();
+        // code 为空时说明调用方把通道编码传在 serial 上（兼容老调用）
         String channelId = code == null || code.isBlank() ? serial : code;
-        cascadeService.shareNode(cascadeId, channelId, Boolean.TRUE.equals(share));
+        String deviceId = code == null || code.isBlank() ? null : serial;
+        cascadeService.shareNode(cascadeId, deviceId, channelId,
+                Boolean.TRUE.equals(share));
         return ApiResponse.ok();
     }
 

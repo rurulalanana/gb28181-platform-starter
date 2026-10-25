@@ -213,67 +213,147 @@
     -->
     <el-dialog
       v-model="channelDialog"
-      :title="`选择共享通道 · ${channelTarget?.name || ''}`"
-      width="760px"
+      :title="`选择通道 · ${channelTarget?.name || ''}`"
+      width="min(1180px, 94vw)"
       append-to-body
-      @closed="channelRows = []"
+      :close-on-press-escape="!editingCustomId.row"
+      @closed="resetChannelDialog"
     >
-      <div class="ch-head">
-        <el-input
-          v-model="channelKeyword"
-          placeholder="按通道名称或编码搜索"
-          clearable
-          style="width: 260px"
-          :prefix-icon="Search"
-        />
-        <div class="ch-head-right">
-          <span class="ch-count">已选 {{ channelSelected.size }} 路</span>
-          <el-button size="small" @click="selectAllChannels">全选当前结果</el-button>
-          <el-button size="small" @click="channelSelected.clear()">清空</el-button>
+      <div class="ch-toolbar">
+        <div class="ch-toolbar-left">
+          <span class="ch-label">搜索</span>
+          <el-input
+            v-model="channelKeyword"
+            placeholder="关键字"
+            clearable
+            style="width: 200px"
+            @keyup.enter="reloadChannelList"
+          />
+          <span class="ch-label">通道类型</span>
+          <el-select v-model="channelType" style="width: 120px" @change="reloadChannelList">
+            <el-option label="全部" value="all" />
+            <el-option label="视频" value="video" />
+            <el-option label="音频" value="audio" />
+            <el-option label="报警" value="alarm" />
+            <el-option label="其它" value="other" />
+          </el-select>
+          <el-checkbox v-model="channelOnlyRelated" @change="reloadChannelList">
+            只看已选({{ channelSelected.size }})
+          </el-checkbox>
+          <el-checkbox v-model="shareAllLocal">全部共享</el-checkbox>
+        </div>
+        <div class="ch-toolbar-right">
+          <span class="ch-count">已选 {{ channelSelected.size }} 路 / 共 {{ channelTotal }} 条</span>
         </div>
       </div>
 
       <el-alert
-        v-if="channelTarget?.shareAllChannel"
+        v-if="shareAllLocal"
         type="warning"
         :closable="false"
         show-icon
         class="ch-alert"
-        title="当前已开启「共享全部通道」"
-        description="开启时上级能看到本级所有通道，本页的选择不生效。若要只共享部分通道，请先在编辑里关闭「共享全部通道」。"
+        title="已开启「全部共享」"
+        description="保存后上级能看到本级所有通道，本页的勾选不生效。"
       />
 
       <el-table
         ref="channelTableRef"
-        :data="filteredChannels"
+        v-loading="channelLoading"
+        :data="channelRows"
         size="small"
-        height="360"
-        row-key="id"
+        height="440"
+        row-key="rowKey"
+        :class="{ 'is-disabled': shareAllLocal }"
         @selection-change="onChannelSelect"
+        @sort-change="onChannelSort"
       >
-        <el-table-column type="selection" width="46" reserve-selection />
-        <el-table-column label="通道名称" min-width="180" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.name || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="通道编码" width="180">
-          <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
-        </el-table-column>
-        <el-table-column label="设备编码" width="180">
+        <el-table-column type="selection" width="44" reserve-selection />
+        <el-table-column label="设备国标编号" prop="deviceId" width="168" sortable="custom">
           <template #default="{ row }"><span class="mono">{{ row.deviceId }}</span></template>
         </el-table-column>
-        <el-table-column label="在线" width="76" align="center">
+        <el-table-column label="通道国标编号" prop="id" width="168" sortable="custom">
+          <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
+        </el-table-column>
+        <!--
+          自定义通道国标编号：行内编辑，与上级平台（LiveGBS）一致 ——
+          点一下单元格就地变成输入框，回车/失焦保存，Esc 取消。
+          用弹框改一个 20 位字符串太重：改错一位就要重开弹框，
+          而且看不到相邻行做对照（编号通常是按设备顺序批量微调的）。
+          改的是 custom_id，不动 channel_id —— 后者是设备实际使用的编号。
+        -->
+        <el-table-column label="自定义通道国标编号" prop="customId" width="190" sortable="custom">
           <template #default="{ row }">
-            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
+            <el-input
+              v-if="editingCustomId.row === row"
+              ref="customIdInputRef"
+              v-model="editingCustomId.value"
+              size="small"
+              class="mono cid-input"
+              placeholder="留空=用原编号"
+              :disabled="editingCustomId.saving"
+              @keydown.enter.prevent="commitCustomId(row)"
+              @keydown.esc.stop.prevent="cancelCustomId"
+              @blur="commitCustomId(row)"
+            />
+            <el-button
+              v-else
+              link
+              type="primary"
+              class="mono"
+              :title="row.customId ? '点击修改' : '点击为该通道设置自定义编号'"
+              @click="startEditCustomId(row)"
+            >
+              {{ row.customId || row.id }}
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="通道名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.customName || row.name || '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="快照" width="76" align="center">
+          <template #default="{ row }">
+            <img
+              v-if="row.snapshot"
+              :src="row.snapshot"
+              class="ch-snap"
+              alt="快照"
+              @click="previewSnap(row)"
+            />
+            <div v-else class="ch-snap is-empty"><el-icon><Picture /></el-icon></div>
+          </template>
+        </el-table-column>
+        <el-table-column label="在线状态" width="84" align="center">
+          <template #default="{ row }">
+            <span :class="row.online ? 'ch-online' : 'ch-offline'">
               {{ row.online ? '在线' : '离线' }}
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="厂家" width="100" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.manufacturer || '—' }}</template>
+        </el-table-column>
       </el-table>
+
+      <div class="ch-pager">
+        <el-pagination
+          v-model:current-page="channelPage"
+          v-model:page-size="channelPageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          :total="channelTotal"
+          layout="total, prev, pager, next, sizes"
+          background
+          @current-change="loadChannelPage"
+          @size-change="onChannelPageSize"
+        />
+      </div>
 
       <template #footer>
         <el-button @click="channelDialog = false">取消</el-button>
         <el-button type="primary" :loading="channelSaving" @click="saveChannels">
-          保存（{{ channelSelected.size }} 路）
+          保存
         </el-button>
       </template>
     </el-dialog>
@@ -281,9 +361,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, Search } from '@element-plus/icons-vue'
+import { Connection, Picture } from '@element-plus/icons-vue'
 import { cascadeApi, deviceApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -402,78 +482,264 @@ async function pushCatalog(row) {
 }
 
 /* ==================== 共享通道 ==================== */
+/*
+ * 对齐上级平台（LiveGBS）的「选择通道」弹窗：
+ * 服务端分页 + 服务端筛选/排序，而不是把全部通道拉到前端再过滤。
+ *
+ * 为什么改成服务端分页：原来一次性拉全部通道（limit=0）在 500 条时还能忍，
+ * 但现场接入十几个下级平台后通道数是几千级，一次几 MB 的 JSON
+ * 加上浏览器渲染几千行表格，弹窗要卡好几秒。
+ *
+ * 为什么勾选状态与列表分开存：翻页会换掉整个数据集，
+ * 只看当前页的勾选会丢掉其它页的选择。已选集合独立维护，
+ * 表格用 reserve-selection 保留本页勾选，保存时提交整个集合。
+ */
 
 const channelDialog = ref(false)
 const channelSaving = ref(false)
+const channelLoading = ref(false)
 const channelTarget = ref(null)
 const channelRows = ref([])
+const channelTotal = ref(0)
 const channelKeyword = ref('')
+const channelType = ref('all')
+const channelOnlyRelated = ref(false)
+/** 「全部共享」开关：对应级联的 shareAllChannel，保存时一并写回。 */
+const shareAllLocal = ref(false)
 const channelSelected = ref(new Set())
 const channelTableRef = ref(null)
+const channelPage = ref(1)
+const channelPageSize = ref(10)
+const channelSort = reactive({ prop: 'deviceId', order: 'asc' })
 
-/** 关键字过滤：名称 + 通道编码 + 设备编码，三者都能搜。 */
-const filteredChannels = computed(() => {
-  const k = channelKeyword.value.trim().toLowerCase()
-  if (!k) return channelRows.value
-  return channelRows.value.filter((c) =>
-    `${c.name || ''} ${c.id || ''} ${c.deviceId || ''}`.toLowerCase().includes(k)
-  )
-})
+/** 已共享通道的完整编码集合（跨页），保存时整体提交。 */
+const channelSharedAll = ref(new Set())
+
+/**
+ * 表格行唯一键。
+ *
+ * <p>不能用通道编码：不同设备的通道编码可以完全相同（国标允许），
+ * 用编码做 row-key 会让两台设备的同号通道被当成同一行，
+ * 勾一行等于勾了两行、reserve-selection 也会串。
+ */
+function rowKeyOf(row) {
+  return `${row.deviceId}:${row.id}`
+}
+
+function resetChannelDialog() {
+  channelRows.value = []
+  channelSelected.value = new Set()
+  channelSharedAll.value = new Set()
+  channelKeyword.value = ''
+  channelType.value = 'all'
+  channelOnlyRelated.value = false
+  channelPage.value = 1
+  channelTotal.value = 0
+  // 行内编辑态必须清掉：下次打开弹窗时 editingCustomId.row 指向的是
+  // 上一批（已丢弃的）行对象，引用比对永远不成立，输入框会卡在编辑态
+  cancelCustomId()
+}
+
+/** 拉取当前页。 */
+async function loadChannelPage() {
+  if (!channelTarget.value) return
+  channelLoading.value = true
+  try {
+    const data = await cascadeApi.channelList({
+      id: channelTarget.value.id,
+      start: (channelPage.value - 1) * channelPageSize.value,
+      limit: channelPageSize.value,
+      q: channelKeyword.value.trim() || undefined,
+      channel_type: channelType.value,
+      related: channelOnlyRelated.value || undefined,
+      sort: channelSort.prop,
+      order: channelSort.order
+    })
+    const rows = data?.channelList || []
+    // 附加唯一键：reserve-selection 靠 row-key 识别行
+    channelRows.value = rows.map((r) => ({ ...r, rowKey: rowKeyOf(r) }))
+    channelTotal.value = data?.channelCount || 0
+    // 回填本页勾选。必须在下一个 tick：表格要先拿到 data 才能 toggleRowSelection
+    await nextTick()
+    const table = channelTableRef.value
+    if (!table) return
+    table.clearSelection()
+    channelRows.value.forEach((r) => {
+      if (channelSharedAll.value.has(rowKeyOf(r))) table.toggleRowSelection(r, true)
+    })
+  } catch (e) {
+    ElMessage.error(e.message || '加载通道失败')
+  } finally {
+    channelLoading.value = false
+  }
+}
+
+/** 筛选条件变了：回到第一页再查。 */
+function reloadChannelList() {
+  channelPage.value = 1
+  loadChannelPage()
+}
+
+function onChannelPageSize() {
+  channelPage.value = 1
+  loadChannelPage()
+}
+
+function onChannelSort({ prop, order }) {
+  // 取消排序时回落默认：按设备编码升序
+  channelSort.prop = prop || 'deviceId'
+  channelSort.order = order === 'descending' ? 'desc' : 'asc'
+  reloadChannelList()
+}
 
 async function openChannels(row) {
   channelTarget.value = row
-  channelDialog.value = true
+  shareAllLocal.value = Boolean(row.shareAllChannel)
   channelSelected.value = new Set()
+  channelSharedAll.value = new Set()
+  channelPage.value = 1
+  channelDialog.value = true
   try {
-    // 同时取「全部通道」与「已共享」两份：前者作为可选项，后者回填勾选状态。
-    // 分两次请求比让后端拼一个混合结构更清楚，且已共享列表很小。
-    const [all, shared] = await Promise.all([
-      deviceApi.channelList({ start: 0, limit: 0 }),
-      cascadeApi.channelList({ id: row.id, related: true, start: 0, limit: 0 })
-    ])
-    channelRows.value = all?.channelList || []
-    const ids = (shared?.channelList || []).map((c) => c.id)
-    channelSelected.value = new Set(ids)
-    // 等表格渲染完再回填勾选，否则 toggleRowSelection 找不到行
-    requestAnimationFrame(() => {
-      const table = channelTableRef.value
-      if (!table) return
-      channelRows.value.forEach((c) => {
-        if (channelSelected.value.has(c.id)) table.toggleRowSelection(c, true)
-      })
+    /*
+     * 单独取一次「全部已共享通道」用于初始化勾选集合。
+     * 不能只靠当前页的 cascadeId 判断：翻到第 5 页时前三页的已选状态就丢了，
+     * 保存时会把这些通道当成「取消勾选」而删掉。
+     */
+    const shared = await cascadeApi.channelList({
+      id: row.id,
+      related: true,
+      start: 0,
+      limit: 0
     })
+    const keys = (shared?.channelList || []).map((c) => rowKeyOf(c))
+    channelSharedAll.value = new Set(keys)
+    channelSelected.value = new Set(keys)
+    await loadChannelPage()
   } catch (e) {
     ElMessage.error(e.message || '加载通道失败')
   }
 }
 
 function onChannelSelect(rows) {
-  channelSelected.value = new Set(rows.map((r) => r.id))
+  /*
+   * 只更新「当前页覆盖到的那部分」：
+   *   1. 先把本页所有行从已选集合里删掉（它们的状态由本次事件全权代表）
+   *   2. 再把当前勾选的行加回去
+   * 这样其它页的选择不受影响 —— 直接整体替换会丢掉跨页选择。
+   */
+  const next = new Set(channelSharedAll.value)
+  channelRows.value.forEach((r) => next.delete(rowKeyOf(r)))
+  rows.forEach((r) => next.add(rowKeyOf(r)))
+  channelSharedAll.value = next
+  channelSelected.value = new Set(next)
 }
 
-function selectAllChannels() {
-  const table = channelTableRef.value
-  if (!table) return
-  filteredChannels.value.forEach((c) => table.toggleRowSelection(c, true))
+/**
+ * 自定义通道国标编号的行内编辑状态。
+ *
+ * <p>同一时刻只允许编辑一行：`row` 保存正在编辑的那一行对象本身，
+ * 提交时用引用比对确认「这次提交属于当前编辑行」——
+ * 只用行号判断会在列表刷新/翻页后错位。
+ */
+const editingCustomId = reactive({
+  row: null,
+  value: '',
+  saving: false
+})
+const customIdInputRef = ref(null)
+
+/** 进入行内编辑并聚焦全选，方便直接覆盖输入。 */
+async function startEditCustomId(row) {
+  if (editingCustomId.saving) return
+  editingCustomId.row = row
+  editingCustomId.value = row.customId || ''
+  await nextTick()
+  const el = customIdInputRef.value
+  const target = Array.isArray(el) ? el[0] : el
+  target?.focus?.()
+  target?.select?.()
+}
+
+/** 退出行内编辑（不保存）。 */
+function cancelCustomId() {
+  editingCustomId.row = null
+  editingCustomId.value = ''
+}
+
+/**
+ * 提交行内编辑。
+ *
+ * <p>回车与失焦都会调到这里，必须幂等：
+ * 回车后输入框会被移除，若同时触发 blur 就会重复提交。
+ */
+async function commitCustomId(row) {
+  // 已经不是当前编辑行（Esc 取消、或已被另一次提交收尾）→ 直接忽略
+  if (editingCustomId.row !== row || editingCustomId.saving) return
+  const value = (editingCustomId.value || '').trim()
+  const original = row.customId || ''
+  if (value === original) {
+    cancelCustomId()
+    return
+  }
+  if (value && !/^\d{20}$/.test(value)) {
+    // 保持编辑态：清空用户刚敲的内容比让他继续改更烦人
+    ElMessage.warning('国标编号必须是 20 位数字，留空表示使用原编号')
+    await nextTick()
+    const el = customIdInputRef.value
+    ;(Array.isArray(el) ? el[0] : el)?.focus?.()
+    return
+  }
+  editingCustomId.saving = true
+  try {
+    // 必须带 serial：通道编码只在单设备内唯一，只传 code 会改到别的设备的同号通道
+    await deviceApi.setChannelId({
+      serial: row.deviceId,
+      code: row.id,
+      id: value
+    })
+    row.customId = value || null
+    ElMessage.success('已保存，重新推送目录后上级生效')
+    cancelCustomId()
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    editingCustomId.saving = false
+  }
+}
+
+function previewSnap(row) {
+  if (!row.snapshot) return
+  window.open(row.snapshot, '_blank')
 }
 
 async function saveChannels() {
   if (!channelTarget.value) return
   channelSaving.value = true
   try {
-    const ids = [...channelSelected.value]
-    if (ids.length === 0) {
+    // 「全部共享」是级联配置上的开关，与具体通道列表互斥，先写它
+    if (shareAllLocal.value !== Boolean(channelTarget.value.shareAllChannel)) {
+      await cascadeApi.setShareAllChannel({
+        id: channelTarget.value.id,
+        shareallchannel: shareAllLocal.value
+      })
+      channelTarget.value.shareAllChannel = shareAllLocal.value
+    }
+    const keys = [...channelSharedAll.value]
+    /*
+     * 不勾任何通道时给出明确警告：上级会看不到本级的通道，
+     * 而界面上只会显示「已选 0 路」，容易被误当成「还没加载完」。
+     */
+    if (keys.length === 0 && !shareAllLocal.value) {
       ElMessage.warning('未选择任何通道，上级将看不到本级的通道')
     }
-    /*
-     * 后端契约是全量覆盖（savechannels 传 channels[]），
-     * 所以「取消勾选」也能生效 —— 不需要先删再存。
-     */
+    // 后端契约是全量覆盖（channels[] 传 serial:code），取消勾选也能生效
     await cascadeApi.saveChannels({
       id: channelTarget.value.id,
-      'channels[]': ids
+      'channels[]': keys
     })
-    ElMessage.success(`已保存 ${ids.length} 路共享通道，可点「推送目录」通知上级`)
+    ElMessage.success(
+      `已保存 ${keys.length} 路共享通道，可点「推送目录」通知上级`
+    )
     channelDialog.value = false
     load()
   } catch (e) {
@@ -599,6 +865,84 @@ onMounted(load)
   gap: var(--sp-3);
   margin-bottom: var(--sp-3);
   flex-wrap: wrap;
+}
+
+/* 弹窗顶部工具栏：搜索 / 类型 / 只看已选 / 全部共享 */
+.ch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.ch-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.ch-label {
+  font-size: var(--fs-sm);
+  color: var(--text-2, #606266);
+  white-space: nowrap;
+}
+
+/* 快照缩略图：与上级平台一致，固定 64×36（16:9），点开看大图 */
+.ch-snap {
+  width: 64px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 3px;
+  cursor: pointer;
+  display: block;
+  margin: 0 auto;
+}
+
+/* 无快照时的占位：不现抓（列表几百条会打爆设备），只提示「没有」 */
+.ch-snap.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fill-2, #f5f7fa);
+  color: var(--text-3, #c0c4cc);
+  cursor: default;
+  font-size: 16px;
+}
+
+/* 在线绿色 / 离线灰色：与上级平台的配色习惯一致，
+   不用 badge 圆点是因为通道列表行高小，圆点太占视觉。 */
+.ch-online {
+  color: var(--success-600, #16a34a);
+  font-weight: 600;
+}
+
+.ch-offline {
+  color: var(--text-3, #c0c4cc);
+}
+
+/* 分页右对齐：左侧留白让「共 N 条」不贴着表格边框 */
+.ch-pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-3);
+}
+
+/* 行内编辑输入框：与单元格等宽，不留内边距造成的错位 */
+.cid-input {
+  width: 100%;
+}
+
+.cid-input :deep(.el-input__wrapper) {
+  padding: 0 var(--sp-2);
+}
+
+/* 「全部共享」开启时表格仅作浏览：勾选不生效，操作它只会造成误解 */
+:deep(.is-disabled) .el-table__body,
+:deep(.is-disabled) .el-table__header {
+  opacity: 0.55;
 }
 
 .ch-head-right {

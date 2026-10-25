@@ -88,11 +88,14 @@ public class SnapService {
      */
     public byte[] read(String serial, String code) {
         try {
+            // 先清理再读：清理会把过期文件删掉，若放在检查之后，
+            // 就会出现「刚确认存在、下一行就被自己删了」然后抛
+            // NoSuchFileException 的竞态（表现为接口 404 而列表里有快照）。
+            purgeExpired();
             Path file = root().resolve(safe(serial) + "_" + safe(code) + ".jpg");
             if (!Files.exists(file)) {
                 return null;
             }
-            purgeExpired();
             return Files.readAllBytes(file);
         } catch (IOException e) {
             log.debug("读取快照失败: serial={} code={} {}", serial, code, e.getMessage());
@@ -101,18 +104,28 @@ public class SnapService {
     }
 
     /**
-     * 快照是否已存在。
+     * 快照是否可用。
      *
      * <p>列表页要逐通道判断「有没有快照」，只探测存在性即可 ——
      * 读整个文件（几十 KB）来判断会白白浪费 IO。
      *
+     * <p><b>必须把「过期」也算作不存在</b>：清理是延迟的（下次读写时才跑），
+     * 过期的图仍然躺在磁盘上。只判断 {@code Files.exists} 会让列表显示有缩略图，
+     * 点开却是 404（读的时候已经被清理掉了），或者更糟：
+     * 看到一张几分钟前的旧画面被当成当前状态。
+     *
      * @param serial 设备编码
      * @param code   通道编码
-     * @return 是否已有快照
+     * @return 是否有一张<b>未过期</b>的快照
      */
     public boolean exists(String serial, String code) {
         try {
-            return Files.exists(root().resolve(safe(serial) + "_" + safe(code) + ".jpg"));
+            Path file = root().resolve(safe(serial) + "_" + safe(code) + ".jpg");
+            if (!Files.exists(file)) {
+                return false;
+            }
+            return System.currentTimeMillis() - Files.getLastModifiedTime(file).toMillis()
+                    <= MAX_AGE_MS;
         } catch (Exception e) {
             return false;
         }
