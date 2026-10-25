@@ -294,6 +294,32 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
+    /**
+     * 设备校时。
+     *
+     * <p>设备时钟漂移会让它上报的录像时间与平台检索区间对不上，
+     * 表现为「按时间段查不到录像，但录像确实存在」，排查成本极高。
+     *
+     * @param time 要下发的本地时间 {@code yyyy-MM-dd'T'HH:mm:ss}；留空用平台当前时间
+     */
+    @PostMapping("/synctime")
+    public ApiResponse<Void> syncTime(@RequestParam String serial,
+                                      @RequestParam(required = false) String code,
+                                      @RequestParam(required = false) String time) {
+        StpUtil.checkLogin();
+        java.time.LocalDateTime t = null;
+        if (time != null && !time.isBlank()) {
+            try {
+                t = java.time.LocalDateTime.parse(time.trim().replace(' ', 'T'));
+            } catch (Exception e) {
+                throw BizException.badRequest(
+                        "time 格式应为 yyyy-MM-ddTHH:mm:ss，收到：" + time);
+            }
+        }
+        controlService.syncTime(channel(serial, code), t);
+        return ApiResponse.ok();
+    }
+
     // ==================== 配置 / 订阅 ====================
 
     /** 设备配置。 */

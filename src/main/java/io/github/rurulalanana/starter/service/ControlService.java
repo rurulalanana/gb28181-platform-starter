@@ -294,6 +294,29 @@ public class ControlService {
         sendControl(channelId, deviceId -> ManscdpBuilder.alarmReset(client().nextSn(), deviceId));
     }
 
+    /**
+     * 设备校时（标准 A.2.3.1.9 / 9.12）。
+     *
+     * <p>把平台当前时间下发给设备。设备时钟漂移会让它上报的录像
+     * {@code StartTime/EndTime} 与平台检索区间对不上 ——
+     * 用户按「昨天下午 3 点」查录像会什么都查不到，而录像其实存在。
+     * 这类问题排查成本极高（看起来像设备没录像），所以提供手动校时入口，
+     * 也便于定时任务批量校准。
+     *
+     * @param channelId 通道编码；内部会换算成 SIP 寻址用的设备编码
+     * @param localTime 要下发的本地时间；{@code null} 表示用平台当前时间
+     */
+    public void syncTime(String channelId, java.time.LocalDateTime localTime) {
+        java.time.LocalDateTime t = localTime == null
+                ? java.time.LocalDateTime.now() : localTime;
+        // 格式严格：yyyy-MM-dd'T'HH:mm:ss。带毫秒或时区后缀会被设备判非法
+        String text = t.format(java.time.format.DateTimeFormatter
+                .ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+        sendControl(channelId, deviceId ->
+                ManscdpBuilder.timeSync(client().nextSn(), deviceId, text));
+        log.info("已下发校时: channel={} time={}", channelId, text);
+    }
+
     /** 设备配置下发（2022）：直接透传 xml（由调用方按标准拼装配置段）。 */
     public void deviceConfig(String channelId, String xml) {
         if (xml == null || xml.isBlank()) {
