@@ -223,10 +223,16 @@ public class StreamService {
         RtpSession existing = platform.sessionManager()
                 .getByChannel(deviceId, channel, MediaType.PLAYBACK);
         if (existing != null && !RtpSession.CLOSED.equals(existing.getState())) {
-            // 同一段录像已在回放：复用；不同段则重开（下面的 play 会先关旧会话）
-            String want = item == null ? null : item.getFilePath();
+            /*
+             * 判断「是不是同一段录像」必须比较**会话身份**而不是 filePath：
+             * 大量设备（实测 LiveGBS、多数国产摄像机）不提供 FilePath，
+             * 只按时间段管理录像。改造前 want=null 时无条件复用，
+             * 于是点不同时间段都命中同一个卡在 NEGOTIATING 的会话 ——
+             * 界面上表现为「换时间点播毫无反应，也不报错」。
+             */
+            String want = recordIdentity(item);
             String have = existing.getMediaUri();
-            if (want == null || want.equals(have)) {
+            if (want != null && want.equals(have)) {
                 return toStream(existing, GbStream.TYPE_PLAYBACK);
             }
         }
@@ -239,6 +245,27 @@ public class StreamService {
     /** 开始历史回放（设备直连：设备编码即通道编码）。 */
     public GbStream startPlayback(String deviceId, RecordItem item) {
         return startPlayback(deviceId, deviceId, item);
+    }
+
+    /**
+     * 录像段的「会话身份」：有 FilePath 用它，否则用起止时间。
+     *
+     * <p>与 {@code Gb28181MediaService#playback} 写入 {@code mediaUri} 的规则
+     * <b>必须完全一致</b>，否则复用判断永远不成立、每点一次都重开会话。
+     */
+    private static String recordIdentity(RecordItem item) {
+        if (item == null) {
+            return null;
+        }
+        if (item.getFilePath() != null && !item.getFilePath().isBlank()) {
+            return item.getFilePath();
+        }
+        String start = RecordItem.formatTime(item.getStartTime());
+        if (start == null) {
+            return null;
+        }
+        String end = RecordItem.formatTime(item.getEndTime());
+        return start + "/" + (end == null ? start : end);
     }
 
     /**

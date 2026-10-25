@@ -12,6 +12,7 @@ import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.dto.PlaybackStartRequest;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbStream;
+import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.RecordService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.PlaybackVo;
@@ -57,6 +58,8 @@ public class PlaybackController {
 
     private final RecordService recordService;
     private final StreamService streamService;
+    /** 用于把通道编码反查成设备编码（SIP 寻址只认设备编码）。 */
+    private final DeviceService deviceService;
 
     /**
      * 查询录像列表。
@@ -77,10 +80,15 @@ public class PlaybackController {
             @RequestParam(defaultValue = "15") Integer timeout) {
         StpUtil.checkLogin();
         String channelId = code == null || code.isBlank() ? serial : code;
+        // serial 是设备编码（SIP 寻址），channelId 是通道编码（<DeviceID>）。
+        // 录像挂在通道上，但 SIP 只认注册实体 —— 两者不能混用。
+        String deviceId = code == null || code.isBlank()
+                ? deviceService.deviceIdOfChannel(channelId) : serial;
         String start = starttime;
         String end = endtime == null || endtime.isBlank()
                 ? TimeFormats.toIso(LocalDateTime.now()) : endtime;
-        List<RecordItem> items = recordService.queryDeviceRecords(channelId, start, end, timeout);
+        List<RecordItem> items = recordService.queryDeviceRecords(
+                deviceId == null ? channelId : deviceId, channelId, start, end, timeout);
         List<RecordVo> list = new ArrayList<>();
         for (RecordItem item : items) {
             list.add(recordView(item, channelId));
@@ -138,9 +146,30 @@ public class PlaybackController {
                 throw BizException.badRequest(
                         "未找到匹配的录像文件，请先调用 playback/recordlist 获取 FilePath");
             }
-            req.setFilePath(records.get(0).getFilePath());
+            GbDeviceRecord hit = records.get(0);
+            /*
+             * 只有设备真的给了 FilePath 才填（回放 INVITE 的 u= 用它）。
+             * 大量设备（实测 LiveGBS、多数国产摄像机）不填 FilePath，
+             * 而是按时间段管理录像 —— 此时必须留空，让媒体层改用
+             * StartTime/EndTime 定位。强行把 Name 或路径塞进 u=
+             * 会让设备按「文件不存在」直接拒绝。
+             */
+            req.setFilePath(hit.getFilePath() == null ? "" : hit.getFilePath());
+            req.setStarttime(TimeFormats.toIso(hit.getStartTime()));
+            if (hit.getEndTime() != null) {
+                req.setEndtime(TimeFormats.toIso(hit.getEndTime()));
+            }
         }
-        RecordItem item = RecordItem.ofFilePath(channelId, req.getFilePath());
+        /*
+         * 构造回放项：有 FilePath 走按文件回放，没有则按时间区间回放。
+         * 见 RecordItem#ofRange 的说明 —— FilePath 在标准里是可选的。
+         */
+        RecordItem item = req.getFilePath() == null || req.getFilePath().isBlank()
+                ? RecordItem.ofRange(channelId,
+                        TimeFormats.toDate(TimeFormats.parse(req.getStarttime())),
+                        TimeFormats.toDate(TimeFormats.parse(req.getEndtime() == null
+                                ? req.getStarttime() : req.getEndtime())), null)
+                : RecordItem.ofFilePath(channelId, req.getFilePath());
         GbStream stream = streamService.startPlayback(deviceId, channelId, item);
         StreamVo base = streamService.describe(streamService.session(deviceId, channelId));
         PlaybackVo vo = new PlaybackVo();

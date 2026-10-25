@@ -308,23 +308,24 @@ public class SipEventBridge implements SipCallback {
             return null;
         } else if ("Catalog".equals(cmdType)) {
             /*
-             * 这里有两种语义完全不同的 MANSCDP，必须按 rootName 分流：
+             * 这里有两种语义不同的 MANSCDP，必须按 rootName 分流：
              *
              *   1) <Query>  —— 上级平台来查我们的目录。**必须应答**，
              *      否则上级的目录页永远空白（它按 SN 等应答，等不到就超时）。
-             *      改造前这里没区分，Query 被当成「目录推送」去解析
-             *      （Items 当然为空），结果一条应答都不发 ——
-             *      这是「级联加进来了但上级看不到通道」的直接原因。
              *
-             *   2) <Notify>/<Response> —— 设备/下级平台主动推送目录变更，
-             *      只包含变化的条目，必须按增量 upsert，绝不能当全量快照。
+             *   2) <Notify> —— 下级平台主动推送目录变更，只包含变化的条目，
+             *      必须按增量 upsert，绝不能当全量快照。
+             *
+             * <Response>（下级应答我们的目录查询）不在这里处理：
+             * 它走 onManscdpResponse 的 handleCatalog，才有分页聚合 ——
+             * LiveGBS 按标准一帧一页上报，走增量路径会被读成「只有 1 个通道」。
              */
             if ("Query".equals(msg.getRootName())) {
                 handleCatalogQuery(event);
             } else {
                 String deviceId = msg.getDeviceId();
                 if (deviceId != null && !deviceId.isBlank()) {
-                    handlePushedCatalog(deviceId, msg, "MESSAGE");
+                    handlePushedCatalog(deviceId, msg, msg.getRootName());
                 }
             }
         } else if ("DeviceControl".equals(cmdType)) {

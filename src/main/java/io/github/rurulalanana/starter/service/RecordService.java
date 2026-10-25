@@ -131,38 +131,92 @@ public class RecordService {
      */
     public List<RecordItem> queryDeviceRecords(String channelId, String startTime,
                                                String endTime, Integer timeoutSeconds) {
+        return queryDeviceRecords(channelId, channelId, startTime, endTime, timeoutSeconds);
+    }
+
+    /**
+     * 检索设备录像（标准 9.8 RecordInfo）。
+     *
+     * <p><b>SIP 寻址用设备编码、查询目标用通道编码</b>：国标里录像挂在通道上，
+     * 所以 MANSCDP 的 {@code <DeviceID>} 必须是通道编码；而 SIP 的 To / 请求行
+     * 只认设备编码（设备才是注册实体）。
+     *
+     * <p>改造前这个方法只有一个 ID 且传的是通道编码，于是：
+     * <ul>
+     *   <li>直连摄像机（设备编码 == 通道编码）能跑通，问题被掩盖；</li>
+     *   <li>下级平台 / 级联（两者不同）必然抛「设备未注册或会话已失效」——
+     *       而界面上只显示「没有录像」，用户会以为设备真的没录像。</li>
+     * </ul>
+     *
+     * @param deviceId       设备编码（SIP 寻址）
+     * @param channelId      通道编码（{@code <DeviceID>}，也是缓存键）
+     * @param timeoutSeconds 等待设备应答的超时
+     * @return 录像段列表；设备不应答时返回空列表
+     */
+    public List<RecordItem> queryDeviceRecords(String deviceId, String channelId,
+                                               String startTime, String endTime,
+                                               Integer timeoutSeconds) {
         Gb28181MediaService media = platform.mediaService();
         if (media == null) {
             throw BizException.badRequest("媒体服务未启动");
         }
         CompletableFuture<List<RecordItem>> future = new CompletableFuture<>();
-        media.queryRecordInfo(channelId, startTime, endTime, future::complete);
+        media.queryRecordInfo(deviceId, channelId, startTime, endTime, future::complete);
         int timeout = timeoutSeconds == null || timeoutSeconds <= 0
                 ? QUERY_TIMEOUT_SECONDS : timeoutSeconds;
         try {
             List<RecordItem> items = future.get(timeout, TimeUnit.SECONDS);
             cacheDeviceRecords(channelId, items);
             return items;
+        } catch (java.util.concurrent.TimeoutException te) {
+            /*
+             * 超时也把已收到的帧交上去：设备少报了 SumNum、或分页帧中途丢包时，
+             * 聚合永远等不到「收齐」。让用户看到 5 段远好于「一段都没有」。
+             */
+            List<RecordItem> partial = media.takePendingRecords(channelId);
+            if (!partial.isEmpty()) {
+                log.info("设备录像检索超时，返回已收到的 {} 段: device={} channel={}",
+                        partial.size(), deviceId, channelId);
+                cacheDeviceRecords(channelId, partial);
+                return partial;
+            }
+            log.warn("设备录像检索超时: device={} channel={}（设备未应答）",
+                    deviceId, channelId);
+            return List.of();
         } catch (Exception e) {
-            log.warn("设备录像检索超时或失败: channel={} {}", channelId, e.getMessage());
+            log.warn("设备录像检索失败: device={} channel={} {}",
+                    deviceId, channelId, e.getMessage());
             return List.of();
         }
     }
 
-    /** 把检索结果写入本地缓存表，便于分页查询与按天统计。 */
+    /**
+     * 把检索结果写入本地缓存表，便于分页查询与按天统计。
+     *
+     * <p><b>唯一键用「通道 + 起始时间 + 结束时间」，不用 FilePath</b>：
+     * 标准 A.2.4.4 里 {@code FilePath} 是<b>可选</b>字段，实测 LiveGBS
+     * 与大量国产设备根本不填。改造前这里 {@code if (filePath == null) continue}
+     * 直接跳过 —— 于是「录像列表能查到，但缓存是空的」，
+     * 接着回放因找不到缓存行而报「未找到匹配的录像文件」。
+     * 录像段天然由时间区间唯一标识，用它做键既可靠又无需设备配合。
+     */
     @Transactional
     public void cacheDeviceRecords(String channelId, List<RecordItem> items) {
         if (items == null || items.isEmpty()) {
             return;
         }
         for (RecordItem item : items) {
-            if (item.getFilePath() == null) {
+            if (item.getStartTime() == null) {
+                // 连起始时间都没有的条目无法定位也无法回放，跳过
                 continue;
             }
+            LocalDateTime start = TimeFormats.of(item.getStartTime());
+            LocalDateTime end = TimeFormats.of(item.getEndTime());
             GbDeviceRecord existing = deviceRecordMapper.selectOne(
                     Wrappers.<GbDeviceRecord>lambdaQuery()
                             .eq(GbDeviceRecord::getChannelId, channelId)
-                            .eq(GbDeviceRecord::getFilePath, item.getFilePath())
+                            .eq(GbDeviceRecord::getStartTime, start)
+                            .eq(end != null, GbDeviceRecord::getEndTime, end)
                             .last("limit 1"));
             GbDeviceRecord record = existing == null ? new GbDeviceRecord() : existing;
             record.setChannelId(channelId);
@@ -170,8 +224,8 @@ public class RecordService {
             record.setName(item.getName());
             record.setFilePath(item.getFilePath());
             record.setAddress(item.getAddress());
-            record.setStartTime(TimeFormats.of(item.getStartTime()));
-            record.setEndTime(TimeFormats.of(item.getEndTime()));
+            record.setStartTime(start);
+            record.setEndTime(end);
             record.setType(item.getType());
             record.setSize(item.getFileSize());
             if (record.getStartTime() != null && record.getEndTime() != null) {
@@ -187,15 +241,32 @@ public class RecordService {
         }
     }
 
-    /** 本地缓存的设备录像查询。 */
-    public List<GbDeviceRecord> deviceRecords(String channelId, LocalDateTime from, LocalDateTime to,
-                                              String type) {
+    /**
+     * 本地缓存的设备录像查询。
+     *
+     * <p><b>区间语义是「有交集」而不是「起始时间落在区间内」</b>：
+     * 录像段往往比用户查询的窗口长得多 —— 例如计划录像每 2 小时一段
+     * （{@code 08:00~10:00}），用户点 09:00 想回放。
+     * 用 {@code start_time BETWEEN 09:00 AND 09:30} 判不出这段录像，
+     * 界面上就报「未找到匹配的录像文件」，而录像明明存在。
+     *
+     * <p>正解：{@code start_time <= to AND end_time >= from}，
+     * 另需兼容 {@code end_time} 为空的单帧记录（此时退化为起点在区间内）。
+     */
+    public List<GbDeviceRecord> deviceRecords(String channelId, LocalDateTime from,
+                                              LocalDateTime to, String type) {
         return deviceRecordMapper.selectList(Wrappers.<GbDeviceRecord>lambdaQuery()
-                .eq(channelId != null && !channelId.isBlank(), GbDeviceRecord::getChannelId, channelId)
+                .eq(channelId != null && !channelId.isBlank(),
+                        GbDeviceRecord::getChannelId, channelId)
                 .eq(type != null && !type.isBlank() && !"all".equalsIgnoreCase(type),
                         GbDeviceRecord::getType, type)
-                .ge(from != null, GbDeviceRecord::getStartTime, from)
+                // 录像段起点不能晚于查询结束
                 .le(to != null, GbDeviceRecord::getStartTime, to)
+                // 录像段终点不能早于查询起点（end_time 为空时退化为起点判断）
+                .and(from != null, w -> w
+                        .ge(GbDeviceRecord::getEndTime, from)
+                        .or(x -> x.isNull(GbDeviceRecord::getEndTime)
+                                .ge(GbDeviceRecord::getStartTime, from)))
                 .orderByDesc(GbDeviceRecord::getStartTime));
     }
 
