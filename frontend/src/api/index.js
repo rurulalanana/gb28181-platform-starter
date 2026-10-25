@@ -49,6 +49,23 @@ export const aclApi = {
   remove: (id) => post('/acl/remove', { id })
 }
 
+/**
+ * HTTPS 证书管理接口（`/api/v1/tls/*`）。
+ *
+ * TLS 在 nginx 终结（应用只监听内网端口），所以这里的 install 做的是
+ * 「校验证书 → 落盘 → 生成 nginx 片段 → nginx -t → reload」。
+ * 校验不通过时不会 reload，站点保持原状。
+ *
+ * `<p>`注意私钥只会单向写入，任何接口都不会读回。
+ */
+export const tlsApi = {
+  status: () => get('/tls/status'),
+  // 第三参是 body：PEM 内容动辄几 KB，绝不能塞进 query string
+  install: (cert, key) => post('/tls/install', null, { cert, key }, 60000),
+  disable: () => post('/tls/disable'),
+  gmReadiness: () => get('/tls/gm-readiness')
+}
+
 /** 设备与通道接口（`/api/v1/device/*`）。 */
 export const deviceApi = {
   list: (params) => get('/device/list', params),

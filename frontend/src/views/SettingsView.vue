@@ -410,6 +410,235 @@
         </div>
       </section>
 
+      <!-- ---------- HTTPS 与国密 ---------- -->
+      <section v-show="active === 'tls'" class="sec">
+        <header class="sec-head">
+          <div>
+            <h2 class="sec-title">
+              HTTPS 与国密
+              <HelpTip text="TLS 在 nginx 终结：本平台的标准部署是 nginx(公网) 反代 java(内网)，录像由 nginx 直读磁盘。因此这里做的是「校验证书 → 落盘 → 生成 nginx 配置片段 → nginx -t 语法校验 → reload」，校验不通过时不会 reload，站点保持原状。私钥只会单向写入，任何接口都不会读回。" />
+            </h2>
+            <p class="sec-sub">证书安装、续期与国密 35114 就绪度</p>
+          </div>
+          <el-button text :icon="Refresh" :loading="tlsLoading" @click="loadTls">刷新</el-button>
+        </header>
+
+        <!-- 当前状态 -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">当前状态</span>
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="tlsStatus.configured ? 'success' : 'info'"
+            >
+              {{ tlsStatus.configured ? `HTTPS 已启用 · ${tlsStatus.port}` : '仅 HTTP' }}
+            </el-tag>
+          </div>
+
+          <div class="info-list">
+            <div class="info-row">
+              <span class="info-label">状态</span>
+              <span class="info-value">
+                {{ tlsStatus.message || '—' }}
+              </span>
+            </div>
+            <template v-if="tlsStatus.hasCertificate">
+              <div class="info-row">
+                <span class="info-label">适用域名</span>
+                <span class="info-value mono">
+                  {{ (tlsStatus.domainNames || []).join(', ') || '（证书未包含域名）' }}
+                </span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">颁发者</span>
+                <span class="info-value mono info-value--break">{{ tlsStatus.issuer }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">有效期至</span>
+                <span class="info-value">
+                  <span class="mono">{{ (tlsStatus.notAfter || '').slice(0, 19).replace('T', ' ') }}</span>
+                  <el-tag
+                    v-if="tlsStatus.expired"
+                    size="small"
+                    effect="plain"
+                    type="danger"
+                    class="tls-tag"
+                  >已过期</el-tag>
+                  <el-tag
+                    v-else-if="(tlsStatus.daysRemaining ?? 99) <= 30"
+                    size="small"
+                    effect="plain"
+                    type="warning"
+                    class="tls-tag"
+                  >剩余 {{ tlsStatus.daysRemaining }} 天，请续期</el-tag>
+                  <el-tag
+                    v-else
+                    size="small"
+                    effect="plain"
+                    type="success"
+                    class="tls-tag"
+                  >剩余 {{ tlsStatus.daysRemaining }} 天</el-tag>
+                </span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">算法</span>
+                <span class="info-value mono">
+                  {{ tlsStatus.signatureAlgorithm }} / {{ tlsStatus.keyAlgorithm }}
+                  <el-tag v-if="tlsStatus.selfSigned" size="small" effect="plain" type="warning" class="tls-tag">
+                    自签名
+                  </el-tag>
+                </span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">存放目录</span>
+                <span class="info-value mono info-value--break">{{ tlsStatus.certDir }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 安装 / 更新 -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">安装或更新证书</span>
+            <span class="panel-hint">支持证书链；私钥不能带口令</span>
+          </div>
+          <div class="tls-form">
+            <div class="tls-field">
+              <div class="tls-field-head">
+                <span class="cfg-label">证书（PEM）</span>
+                <el-button link type="primary" size="small" @click="pickFile('cert')">选择文件</el-button>
+              </div>
+              <el-input
+                v-model="tlsForm.cert"
+                type="textarea"
+                :rows="5"
+                spellcheck="false"
+                placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----&#10;（如有中间证书，按顺序在其后追加）"
+              />
+            </div>
+            <div class="tls-field">
+              <div class="tls-field-head">
+                <span class="cfg-label">私钥（PEM）</span>
+                <el-button link type="primary" size="small" @click="pickFile('key')">选择文件</el-button>
+              </div>
+              <el-input
+                v-model="tlsForm.key"
+                type="textarea"
+                :rows="4"
+                spellcheck="false"
+                placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"
+              />
+            </div>
+
+            <div class="tls-actions">
+              <el-button
+                type="primary"
+                :loading="tlsInstalling"
+                :disabled="!tlsForm.cert.trim() || !tlsForm.key.trim()"
+                @click="installCert"
+              >
+                校验并启用
+              </el-button>
+              <el-button
+                v-if="tlsStatus.configured"
+                :loading="tlsDisabling"
+                @click="disableTls"
+              >
+                停用 HTTPS
+              </el-button>
+              <span class="form-hint">
+                校验失败不会 reload，站点保持原状
+              </span>
+            </div>
+
+            <el-alert
+              type="info"
+              :closable="false"
+              show-icon
+              class="tls-alert"
+              title="上传前会做三项检查"
+              description="① 证书可解析且未过期；② 私钥与证书配对（用私钥签一段数据、证书公钥验签，避免「key values mismatch」在 reload 时才暴露）；③ nginx 配置语法通过 nginx -t。任一项失败都不改变现有可用状态。"
+            />
+          </div>
+        </div>
+
+        <!-- 国密就绪度 -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">GB/T 35114 国密就绪度</span>
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="gm.ready ? 'success' : 'warning'"
+            >
+              {{ gm.ready ? '具备条件' : '尚缺条件' }}
+            </el-tag>
+          </div>
+
+          <div class="info-list">
+            <div class="info-row">
+              <span class="info-label">JDK 国密算法</span>
+              <span class="info-value mono">
+                {{ (gm.jdkSmAlgorithms || []).length ? gm.jdkSmAlgorithms.join(', ') : '未提供（JDK 标准版不含 SM 系列）' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">BouncyCastle</span>
+              <span class="info-value">
+                <el-tag size="small" effect="plain" :type="gm.bouncyCastlePresent ? 'success' : 'danger'">
+                  {{ gm.bouncyCastlePresent ? '已引入' : '未引入' }}
+                </el-tag>
+                <span class="tls-note">SM2/SM3/SM4 的 Java 实现依赖</span>
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">OpenSSL</span>
+              <span class="info-value mono">
+                {{ gm.opensslVersion }}
+                <el-tag size="small" effect="plain" :type="gm.opensslSupportsSm2 ? 'success' : 'danger'" class="tls-tag">
+                  {{ gm.opensslSupportsSm2 ? '支持 SM2' : '不支持 SM2 曲线' }}
+                </el-tag>
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">nginx</span>
+              <span class="info-value mono">
+                {{ gm.nginxVersion }}
+                <el-tag size="small" effect="plain" :type="gm.nginxSupportsGmTls ? 'success' : 'danger'" class="tls-tag">
+                  {{ gm.nginxSupportsGmTls ? '支持国密套件' : '不支持国密套件' }}
+                </el-tag>
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">设备证书 CA</span>
+              <span class="info-value">
+                <el-tag size="small" effect="plain" :type="gm.caConfigured ? 'success' : 'danger'">
+                  {{ gm.caConfigured ? '已配置' : '未配置' }}
+                </el-tag>
+              </span>
+            </div>
+            <div v-if="(gm.missing || []).length" class="info-row">
+              <span class="info-label">尚缺</span>
+              <span class="info-value">
+                <ul class="tls-missing">
+                  <li v-for="(m, i) in gm.missing" :key="i">{{ m }}</li>
+                </ul>
+              </span>
+            </div>
+          </div>
+
+          <el-alert
+            type="warning"
+            :closable="false"
+            show-icon
+            class="tls-alert"
+            :title="gm.note"
+          />
+        </div>
+      </section>
+
       <!-- ---------- 对象存储 ---------- -->
       <section v-show="active === 'storage'" class="sec">
         <header class="sec-head">
@@ -575,6 +804,7 @@ import {
   Cloudy,
   CopyDocument,
   Filter,
+  Key,
   Lock,
   Monitor,
   Plus,
@@ -582,7 +812,7 @@ import {
   RefreshRight,
   Setting
 } from '@element-plus/icons-vue'
-import { aclApi, configApi, systemApi, webrtcApi } from '@/api'
+import { aclApi, configApi, systemApi, tlsApi, webrtcApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import HelpTip from '@/components/HelpTip.vue'
 
@@ -602,6 +832,7 @@ const SECTIONS = [
   { key: 'service', label: '服务运维', icon: markRaw(RefreshRight) },
   { key: 'config', label: '运行时配置', icon: markRaw(Setting) },
   { key: 'acl', label: '接入控制', icon: markRaw(Filter) },
+  { key: 'tls', label: 'HTTPS 与国密', icon: markRaw(Key) },
   { key: 'storage', label: '对象存储', icon: markRaw(Cloudy) },
   { key: 'security', label: '账号安全', icon: markRaw(Lock) }
 ]
@@ -1261,10 +1492,109 @@ async function removeAcl(row) {
   }
 }
 
+/* ==================== HTTPS 与国密 ==================== */
+
+const tlsLoading = ref(false)
+const tlsInstalling = ref(false)
+const tlsDisabling = ref(false)
+const tlsStatus = ref({})
+const tlsForm = reactive({ cert: '', key: '' })
+const gm = ref({})
+
+async function loadTls() {
+  tlsLoading.value = true
+  try {
+    const st = await tlsApi.status()
+    tlsStatus.value = st || {}
+  } catch (e) {
+    ElMessage.error(e.message || '加载 HTTPS 状态失败')
+  } finally {
+    tlsLoading.value = false
+  }
+}
+
+async function loadGm() {
+  try {
+    gm.value = (await tlsApi.gmReadiness()) || {}
+  } catch (e) {
+    // 就绪度自检失败不影响主流程，不打扰用户
+    gm.value = {}
+  }
+}
+
+/**
+ * 选择本地文件并读入文本框。
+ *
+ * <p>用文件选择而不是强制粘贴：证书链 PEM 往往几千字符，
+ * 手工复制粘贴极易漏掉中间证书或尾部的 END 行，而这类错误
+ * 在「证书能解析但链不完整」时最难排查。
+ *
+ * @param {'cert'|'key'} which
+ */
+function pickFile(which) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.pem,.crt,.cer,.key,.txt'
+  input.onchange = () => {
+    const file = input.files && input.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      tlsForm[which] = String(reader.result || '')
+    }
+    reader.onerror = () => ElMessage.error('读取文件失败')
+    reader.readAsText(file)
+  }
+  input.click()
+}
+
+async function installCert() {
+  tlsInstalling.value = true
+  try {
+    const st = await tlsApi.install(tlsForm.cert, tlsForm.key)
+    tlsStatus.value = st || {}
+    // 成功后立刻清空：私钥不该在页面内存里多留一秒
+    tlsForm.cert = ''
+    tlsForm.key = ''
+    ElMessage.success('证书已安装，nginx 已重载')
+    if (st?.message && /过期|续期/.test(st.message)) {
+      ElMessage.warning(st.message)
+    }
+  } catch (e) {
+    // 后端会带出具体原因（不配对 / 已过期 / nginx -t 失败）
+    ElMessage.error(e.message || '安装失败')
+  } finally {
+    tlsInstalling.value = false
+  }
+}
+
+async function disableTls() {
+  try {
+    await ElMessageBox.confirm(
+      '停用后 HTTPS 端口将不再提供服务，仍在用 https:// 访问的用户会立刻断连。\n\n证书文件会保留，重新启用时无需再次上传。',
+      '停用 HTTPS',
+      { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  tlsDisabling.value = true
+  try {
+    tlsStatus.value = (await tlsApi.disable()) || {}
+    ElMessage.success('HTTPS 已停用')
+  } catch (e) {
+    ElMessage.error(e.message || '停用失败')
+  } finally {
+    tlsDisabling.value = false
+  }
+}
+
 onMounted(() => {
   loadServer()
   loadConfig()
   loadAcl()
+  loadTls()
+  loadGm()
 })
 </script>
 
@@ -1893,6 +2223,75 @@ onMounted(() => {
 /* 对话框里的匹配值输入用等宽：编码和网段逐位比对，等宽更好认 */
 .acl-form :deep(.el-input__inner) {
   font-family: var(--mono);
+}
+
+/* ==================== HTTPS 与国密 ==================== */
+
+.panel-hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-500);
+}
+
+.tls-form {
+  padding: var(--sp-4);
+}
+
+.tls-field {
+  margin-bottom: var(--sp-4);
+}
+
+.tls-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-2);
+}
+
+/*
+ * PEM 用等宽 + 小字号：内容是一行行 64 字符的 Base64，
+ * 非等宽字体会让「行数对不对」变得看不出来（少一行 END 是常见错误）。
+ */
+.tls-field :deep(.el-textarea__inner) {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.tls-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.tls-alert {
+  margin: var(--sp-4) var(--sp-4) 0;
+}
+
+.tls-tag {
+  margin-left: var(--sp-2);
+}
+
+.tls-note {
+  margin-left: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--ink-500);
+}
+
+.tls-missing {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.tls-missing li {
+  margin-bottom: 2px;
+}
+
+/* 证书颁发者的 DN 可能很长（含 O/OU/C），允许折行而不是撑出横向滚动 */
+.info-value--break {
+  word-break: break-all;
 }
 
 /* ==================== 窄屏 ==================== */

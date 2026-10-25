@@ -206,4 +206,66 @@ public class Gb28181Properties {
         /** 是否采集设备状态（对应 DeviceStatus 查询）。 */
         private boolean collectDeviceStatus = true;
     }
+
+    /**
+     * HTTPS（TLS 证书）配置。
+     *
+     * <p><b>为什么 TLS 在 nginx 终结而不在应用内</b>：本项目的标准部署是
+     * {@code nginx(公网端口) → java(内网端口)}，录像由 nginx sendfile 直读。
+     * 若在应用内开 HTTPS，nginx 回源就得改成 https，证书更新要重启连接器，
+     * 等于两套东西互相打架；而 nginx 本来就该干这件事。
+     *
+     * <p>因此本组配置只描述「nginx 该怎么配」，实际生效由
+     * {@code TlsCertificateService} 生成 nginx 配置片段并 reload 完成。
+     */
+    @Data
+    public static class Tls {
+
+        /**
+         * 证书与私钥的存放目录。
+         *
+         * <p>默认放在应用目录下的 {@code ssl/}。私钥写入后权限强制为 600 ——
+         * 私钥泄漏等于任何人都能冒充本站，比密码泄漏严重得多。
+         */
+        private String certDir;
+
+        /**
+         * nginx 的 HTTPS 站点配置文件绝对路径。
+         *
+         * <p>默认 {@code /etc/nginx/conf.d/gb28181-ssl.conf}。由本应用整体生成，
+         * 不要手工编辑 —— 下次上传证书会被覆盖。
+         */
+        private String nginxConfPath = "/etc/nginx/conf.d/gb28181-ssl.conf";
+
+        /**
+         * nginx 可执行文件路径。
+         *
+         * <p>用于 {@code nginx -t} 语法校验与 {@code nginx -s reload}。
+         * 应用需有权限执行它（通常意味着以 root 运行）。
+         */
+        private String nginxBin = "nginx";
+
+        /**
+         * 是否允许本应用自动 reload nginx。
+         *
+         * <p><b>默认为 true，但这是一个提权面</b>：应用能以 root 身份执行
+         * {@code nginx -s reload}。若不允许，上传证书后只生成配置并提示运维手工
+         * reload（界面会明确指出命令）。高安全要求的环境建议关掉。
+         *
+         * <p>注意：无论此项为何，{@code nginx -t} 失败时都<b>不会</b> reload ——
+         * 一份坏配置 reload 会让整站（含录像直读）全部不可用。
+         */
+        private boolean autoReload = true;
+
+        /**
+         * HTTPS 监听端口。默认 443。
+         *
+         * <p>与 HTTP 端口是两套独立监听：HTTP 保持可用（内网/老客户端），
+         * 由前端决定是否跳转。
+         */
+        private int port = 443;
+    }
+
+    /** HTTPS 配置。 */
+    private Tls tls = new Tls();
 }
