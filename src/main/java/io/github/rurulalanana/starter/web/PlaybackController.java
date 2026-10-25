@@ -13,8 +13,10 @@ import io.github.rurulalanana.starter.dto.PlaybackStartRequest;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.service.DeviceService;
+import io.github.rurulalanana.starter.service.DownloadService;
 import io.github.rurulalanana.starter.service.RecordService;
 import io.github.rurulalanana.starter.service.StreamService;
+import io.github.rurulalanana.starter.vo.PlaybackDownloadVo;
 import io.github.rurulalanana.starter.vo.PlaybackVo;
 import io.github.rurulalanana.starter.vo.RecordListVo;
 import io.github.rurulalanana.starter.vo.RecordVo;
@@ -60,6 +62,10 @@ public class PlaybackController {
     private final StreamService streamService;
     /** 用于把通道编码反查成设备编码（SIP 寻址只认设备编码）。 */
     private final DeviceService deviceService;
+    /** 设备录像下载：把回放流录成本地 MP4。 */
+    private final DownloadService downloadService;
+    /** 录像文件路径 → 带签名的静态 URL 的唯一出口。 */
+    private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
     /**
      * 查询录像列表。
@@ -137,16 +143,17 @@ public class PlaybackController {
             if (req.getStarttime() == null || req.getStarttime().isBlank()) {
                 throw BizException.badRequest("缺少 filePath，且未提供 starttime 用于定位录像");
             }
-            // 未给 filePath 时从缓存里挑一条覆盖 starttime 的录像
+            LocalDateTime wantStart = TimeFormats.parse(req.getStarttime());
+            // 未给 filePath 时从缓存里挑**覆盖这个起点**的那一段
             List<GbDeviceRecord> records = recordService.deviceRecords(channelId,
-                    TimeFormats.parse(req.getStarttime()),
+                    wantStart,
                     TimeFormats.parse(req.getEndtime() == null
                             ? req.getStarttime() : req.getEndtime()), null);
             if (records.isEmpty()) {
                 throw BizException.badRequest(
                         "未找到匹配的录像文件，请先调用 playback/recordlist 获取 FilePath");
             }
-            GbDeviceRecord hit = records.get(0);
+            GbDeviceRecord hit = pickRecord(records, wantStart);
             /*
              * 只有设备真的给了 FilePath 才填（回放 INVITE 的 u= 用它）。
              * 大量设备（实测 LiveGBS、多数国产摄像机）不填 FilePath，
@@ -190,8 +197,7 @@ public class PlaybackController {
 
     /** 停止回放。 */
     @PostMapping("/stop")
-    public ApiResponse<StreamStopVo> stop(@RequestParam(required = false) String streamid,
-                                          @RequestParam(required = false) String serial,
+    public ApiResponse<StreamStopVo> stop(@RequestParam(required = false) String streamid,                                          @RequestParam(required = false) String serial,
                                           @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
         RtpSession session = resolveSession(streamid, serial, code);
@@ -235,24 +241,39 @@ public class PlaybackController {
             throw BizException.badRequest("回放会话不存在，请先调用 playback/start");
         }
         Gb28181MediaService.PlaybackCommand cmd;
-        java.util.Date seekTime = null;
+        long seekSecond = 0L;
         float rate = scale == null ? 1f : scale;
         switch (command == null ? "" : command.trim().toLowerCase()) {
-            case "play" -> {
-                cmd = Gb28181MediaService.PlaybackCommand.PLAY;
-                // range=now 表示从当前位置继续；否则按相对秒数跳转
+            case "pause" -> cmd = Gb28181MediaService.PlaybackCommand.PAUSE;
+            case "play", "resume" -> {
+                /*
+                 * range 的语义是「相对本段录像起点的秒数」，不是绝对时间：
+                 * 国标设备的 npt 是段内偏移，传绝对秒数会跳到「开播 N 年后」
+                 * 而立刻结束。不传 range（或传 now）= 从当前位置继续。
+                 */
                 if (range != null && !range.isBlank() && !"now".equalsIgnoreCase(range)) {
                     try {
-                        long offset = Long.parseLong(range.trim());
-                        seekTime = new java.util.Date(System.currentTimeMillis() + offset * 1000);
-                        cmd = Gb28181MediaService.PlaybackCommand.SEEK;
+                        seekSecond = Math.max(0L, Long.parseLong(range.trim()));
                     } catch (NumberFormatException e) {
-                        throw BizException.badRequest("range 应为秒数或 now：" + range);
+                        throw BizException.badRequest("range 应为相对秒数或 now：" + range);
                     }
+                    cmd = Gb28181MediaService.PlaybackCommand.SEEK;
+                } else {
+                    cmd = Gb28181MediaService.PlaybackCommand.RESUME;
                 }
             }
-            case "pause" -> cmd = Gb28181MediaService.PlaybackCommand.PAUSE;
-            case "scale" -> cmd = Gb28181MediaService.PlaybackCommand.SPEED;
+            case "seek" -> {
+                if (range == null || range.isBlank()) {
+                    throw BizException.badRequest("seek 需要 range（相对秒数）");
+                }
+                try {
+                    seekSecond = Math.max(0L, Long.parseLong(range.trim()));
+                } catch (NumberFormatException e) {
+                    throw BizException.badRequest("range 应为相对秒数：" + range);
+                }
+                cmd = Gb28181MediaService.PlaybackCommand.SEEK;
+            }
+            case "scale", "speed" -> cmd = Gb28181MediaService.PlaybackCommand.SPEED;
             case "teardown" -> {
                 streamService.stop(session.getDeviceId(), session.getChannelId());
                 return ApiResponse.ok();
@@ -261,13 +282,83 @@ public class PlaybackController {
         }
         // 回放控制是发给设备的信令，目标必须是设备编码（不是通道编码）
         streamService.mediaService().playbackControl(session.getDeviceId(), session.getCallId(),
-                cmd, seekTime, rate);
+                cmd, seekSecond, rate);
+        return ApiResponse.ok();
+    }
+
+    // ==================== 录像下载 ====================
+
+    /**
+     * 开始下载：对当前回放流开始录制成本地 MP4。
+     *
+     * <p>必须先有回放流（先调 {@code playback/start}）—— 这样「边看边下」
+     * 共用一路流，不会为下载重复向设备发起 INVITE 而占掉一路带宽。
+     *
+     * @param streamid 回放会话键
+     * @param duration 录像段总时长（秒），用于计算进度；{@code 0} 表示未知
+     */
+    @PostMapping("/download/start")
+    public ApiResponse<PlaybackDownloadVo.Start> downloadStart(@RequestParam String streamid,
+                                                       @RequestParam(defaultValue = "0") long duration) {
+        StpUtil.checkLogin();
+        String key = downloadService.start(streamid, duration);
+        PlaybackDownloadVo.Start vo = new PlaybackDownloadVo.Start();
+        vo.setStreamId(key);
+        vo.setTotalSecond(duration);
+        return ApiResponse.ok(vo);
+    }
+
+    /** 下载进度。 */
+    @GetMapping("/download/progress")
+    public ApiResponse<PlaybackDownloadVo.Progress> downloadProgress(@RequestParam String streamid) {
+        StpUtil.checkLogin();
+        var p = downloadService.progress(streamid);
+        PlaybackDownloadVo.Progress vo = new PlaybackDownloadVo.Progress();
+        vo.setRecordedSecond(p.recordedSecond());
+        vo.setTotalSecond(p.totalSecond());
+        vo.setFinished(p.finished());
+        vo.setFileSize(p.fileSize());
+        vo.setPercent(p.totalSecond() > 0
+                ? Math.min(100, (int) (p.recordedSecond() * 100 / p.totalSecond())) : 0);
+        return ApiResponse.ok(vo);
+    }
+
+    /**
+     * 结束下载，返回可下载的 MP4 地址。
+     *
+     * <p>地址走已有的 {@code /record/...} 静态路径（nginx sendfile + 签名鉴权），
+     * 前端 {@code <a download>} 即可直接下载，支持 Range 断点续传。
+     */
+    @PostMapping("/download/finish")
+    public ApiResponse<PlaybackDownloadVo.Finish> downloadFinish(@RequestParam String streamid) {
+        StpUtil.checkLogin();
+        String path = downloadService.finish(streamid);
+        PlaybackDownloadVo.Finish vo = new PlaybackDownloadVo.Finish();
+        if (path == null) {
+            vo.setOk(false);
+            vo.setMessage("录制未产出文件，请确认录像时段内设备确实有数据");
+            return ApiResponse.ok(vo);
+        }
+        java.io.File file = new java.io.File(path);
+        vo.setOk(true);
+        vo.setFilePath(path);
+        vo.setFileName(file.getName());
+        vo.setFileSize(file.length());
+        // 走「路径 → 签名静态 URL」的统一出口，避免漏签导致 403
+        vo.setUrl(spaWebConfiguration.toStaticUrl(path));
+        return ApiResponse.ok(vo);
+    }
+
+    /** 取消下载。 */
+    @PostMapping("/download/cancel")
+    public ApiResponse<Void> downloadCancel(@RequestParam String streamid) {
+        StpUtil.checkLogin();
+        downloadService.cancel(streamid);
         return ApiResponse.ok();
     }
 
     /** 回放流列表。 */
-    @GetMapping("/streamlist")
-    public ApiResponse<StreamListVo> streamList(
+    @GetMapping("/streamlist")    public ApiResponse<StreamListVo> streamList(
             @RequestParam(defaultValue = "0") int start,
             @RequestParam(defaultValue = "100") int limit,
             @RequestParam(required = false) String serial,
@@ -329,6 +420,59 @@ public class PlaybackController {
         RtpSession session = (serial == null || serial.isBlank())
                 ? null : streamService.session(serial, channel);
         return session != null ? session : streamService.session(channel);
+    }
+
+    /**
+     * 从候选录像段里挑出「包含请求起点」的那一段。
+     *
+     * <p><b>为什么不能用 {@code records.get(0)}</b>：{@code deviceRecords} 按
+     * 起始时间<b>降序</b>返回，而交集查询会把相邻的段也带进来 ——
+     * 请求 00:00~02:00 时，00:00-02:00 与 02:00-04:00 都满足交集条件
+     * （后者 start=02:00 &le; to=02:00），降序第一条就是 02:00-04:00。
+     * 用户点 00:00 的录像，看到的却是从 02:00 开始的画面 —— 偏移量正好
+     * 等于一段录像的长度，很容易被误判成时区问题。
+     *
+     * <p>挑选优先级：
+     * <ol>
+     *   <li>起点与请求完全相同的（用户点的是段首，最精确）</li>
+     *   <li>真正包含请求起点的段里，起点最晚的（区间最贴合）</li>
+     *   <li>都没有时退化为起点最早的那段（至少不会跳到很后面）</li>
+     * </ol>
+     */
+    private static GbDeviceRecord pickRecord(List<GbDeviceRecord> records,
+                                             LocalDateTime wantStart) {
+        if (wantStart == null) {
+            return records.get(0);
+        }
+        GbDeviceRecord covering = null;
+        for (GbDeviceRecord r : records) {
+            LocalDateTime s = r.getStartTime();
+            if (s == null) {
+                continue;
+            }
+            if (s.isEqual(wantStart)) {
+                return r;
+            }
+            LocalDateTime e = r.getEndTime();
+            boolean inRange = e == null
+                    ? !s.isAfter(wantStart)
+                    : (!s.isAfter(wantStart) && !e.isBefore(wantStart));
+            if (inRange && (covering == null || s.isAfter(covering.getStartTime()))) {
+                covering = r;
+            }
+        }
+        if (covering != null) {
+            return covering;
+        }
+        // 兜底：起点最早的一段
+        GbDeviceRecord earliest = records.get(0);
+        for (GbDeviceRecord r : records) {
+            if (r.getStartTime() != null && earliest.getStartTime() != null
+                    && r.getStartTime().isBefore(earliest.getStartTime())) {
+                earliest = r;
+            }
+        }
+        return earliest;
     }
 
     /** 由 streamid 或 serial/code 定位通道编号（仅用于展示）。 */

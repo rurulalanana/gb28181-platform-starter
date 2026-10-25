@@ -118,6 +118,11 @@ export const playbackApi = {
   start: (payload) => post('/playback/start', null, payload),
   stop: (params) => post('/playback/stop', params),
   control: (params) => post('/playback/control', params),
+  /** 录像下载：把回放流录成本地 MP4（三步 start → progress → finish）。 */
+  downloadStart: (params) => post('/playback/download/start', params),
+  downloadProgress: (params) => get('/playback/download/progress', params),
+  downloadFinish: (params) => post('/playback/download/finish', params),
+  downloadCancel: (params) => post('/playback/download/cancel', params),
   streamList: (params) => get('/playback/streamlist', params),
   streamInfo: (streamid) => get('/playback/streaminfo', { streamid })
 }

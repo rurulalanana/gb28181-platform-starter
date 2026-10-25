@@ -32,6 +32,8 @@ export function useXgPlayer(containerRef) {
   const audioInfo = ref(null)
   /** 视频信息 `{ codec, width, height, fps }`。 */
   const videoInfo = ref(null)
+  /** 回放播放位置（秒，录像段内的相对位置）；直播恒为 0。 */
+  const position = ref(0)
 
   const player = shallowRef(null)
   /** ws-flv 引擎实例。 */
@@ -53,14 +55,24 @@ export function useXgPlayer(containerRef) {
   let decodeRetryCount = 0
   /** 销毁标记：异步流程返回后若已停止，丢弃结果。 */
   let disposed = false
+  /**
+   * 当前回放参数（录像段的 duration 与信令回调）。
+   *
+   * <p>存在闭包里是为了 <b>跨解码重试重建</b>保留：重建会重新走 playFlv，
+   * 若每次都要调用方重新传，重建后的进度条就没了。
+   */
+  let currentVod = null
 
   /**
    * 播放。
    *
    * @param {string} streamId 流标识 `<设备编码>/<通道编码>`
    * @param {object} urls     播放地址集合 `{ wsFlv, httpFlv, webrtc }`
-   * @param {object} [opts]   `{ proto: 'wsflv'|'webrtc' }`
+   * @param {object} [opts]   `{ proto: 'wsflv'|'webrtc', vod: {...} }`
    * @param {function} [opts.onFatal] 播放彻底失败时的回调（解码错误重试耗尽后触发）
+   * @param {object} [opts.vod] 录像回放参数，给了就切到「伪点播」模式：
+   *   `{ duration, onSeek, onPause, onResume, onRate }`。
+   *   见 {@link applyVodControls} 的说明。
    * @param {boolean} [opts._rebuild] 内部重建标记（重建不清空解码重试计数）
    */
   async function play(streamId, urls, opts = {}) {
@@ -76,16 +88,22 @@ export function useXgPlayer(containerRef) {
     // 用户主动点播才算「重新开始」，重置解码重试计数；
     // 内部重建（解码失败自愈）要继续沿用计数，否则会变成无限重试。
     if (!opts._rebuild) decodeRetryCount = 0
+    // 回放参数要跨重建保留，否则解码重试后进度条/拖动就失效了
+    if (opts.vod !== undefined) currentVod = opts.vod
 
     if (proto === 'webrtc') {
       await playWebrtc(streamId)
     } else {
-      await playFlv(urls?.wsFlv || urls?.httpFlv, opts.onFatal)
+      await playFlv(urls?.wsFlv || urls?.httpFlv, opts.onFatal, currentVod)
     }
   }
 
-  /** 直播通路：自研 ws-flv。 */
-  async function playFlv(url, onFatal) {
+  /**
+   * 直播通路：自研 ws-flv。
+   *
+   * @param {object|null} vod 录像回放参数；非空时进入「伪点播」模式
+   */
+  async function playFlv(url, onFatal, vod) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -96,7 +114,7 @@ export function useXgPlayer(containerRef) {
     }
 
     state.value = '连接中…'
-    const uiConfig = baseUiConfig()
+    const uiConfig = baseUiConfig(vod ? 'vod' : 'live')
 
     // MediaSource 必须在创建播放器之前就绪：先拿到 object URL 交给 xgplayer，
     // 再把同一个 MediaSource 实例交给 ws-flv 引擎往里灌数据。
@@ -113,7 +131,8 @@ export function useXgPlayer(containerRef) {
     player.value = new Player({
       el,
       url: objectUrl,
-      isLive: true,
+      // 回放走「伪点播」：只有 isLive=false 才会渲染进度条与时间插件
+      isLive: !vod,
       autoplay: true,
       // 直播默认静音：浏览器只允许静音自动播放；点音量按钮即可出声。
       // xgplayer 的顶层配置项是 autoplayMuted（不是 muted）。
@@ -180,20 +199,30 @@ export function useXgPlayer(containerRef) {
     // player 自身的 playPause action（keyboard 插件的默认键位），
     // 不依赖 play 插件；浏览器媒体策略、页面切后台也会触发 pause。
     // 所以这里做兜底 —— 任何原因导致的暂停都立即恢复播放。
-    media.addEventListener('pause', () => {
-      if (disposed) return
-      // 停止播放时（stop）会主动 pause，那时要放过
-      if (!stream) return
-      media.play().catch(() => {})
-    })
+    //
+    // 回放（vod）例外：暂停是有意义的操作，交给设备执行（SIP PAUSE），
+    // 见 applyVodControls。
+    if (!vod) {
+      media.addEventListener('pause', () => {
+        if (disposed) return
+        // 停止播放时（stop）会主动 pause，那时要放过
+        if (!stream) return
+        media.play().catch(() => {})
+      })
+    }
 
     // 直播不允许变速：倍速按钮已移除，这里再兜底一次，
     // 防止外部代码或残留的 rate 状态影响直播速度。
-    const resetRate = () => {
-      if (media.playbackRate !== 1) media.playbackRate = 1
+    // 回放的倍速由 applyVodControls 转成设备侧 Scale。
+    if (!vod) {
+      const resetRate = () => {
+        if (media.playbackRate !== 1) media.playbackRate = 1
+      }
+      media.addEventListener('ratechange', resetRate)
+      resetRate()
+    } else {
+      applyVodControls(p, media, vod, position)
     }
-    media.addEventListener('ratechange', resetRate)
-    resetRate()
 
     // 解码错误的自愈。
     //
@@ -223,7 +252,9 @@ export function useXgPlayer(containerRef) {
       const timer = setTimeout(() => {
         if (disposed) return
         stop()
-        play(currentStream.value, { wsFlv: url }, { proto: 'wsflv', onFatal, _rebuild: true })
+        // vod 必须显式回传：stop() 会清空 currentVod，不传就变成直播模式了
+        play(currentStream.value, { wsFlv: url },
+          { proto: 'wsflv', onFatal, _rebuild: true, vod })
       }, 1200 * decodeRetryCount)
       waitTimers.push(timer)
     })
@@ -384,6 +415,8 @@ export function useXgPlayer(containerRef) {
   /** 停止并释放资源。 */
   function stop() {
     disposed = true
+    // 清掉回放参数：否则下一次播直播（不传 vod）会残留上一段的进度条配置
+    currentVod = null
     for (const t of waitTimers) clearTimeout(t)
     waitTimers.length = 0
     if (stream) {
@@ -431,6 +464,7 @@ export function useXgPlayer(containerRef) {
     stats.value = null
     audioInfo.value = null
     videoInfo.value = null
+    position.value = 0
     if (state.value === '播放中') state.value = '已停止'
   }
 
@@ -457,6 +491,7 @@ export function useXgPlayer(containerRef) {
     stats,
     audioInfo,
     videoInfo,
+    position,
     play,
     stop,
     switchProtocol
@@ -466,9 +501,12 @@ export function useXgPlayer(containerRef) {
 /**
  * xgplayer 通用外观配置：去掉与业务无关的入口，保持界面干净。
  *
- * <p>直播场景刻意<b>移除</b> {@code play}（播放/暂停按钮）与
+ * <p><b>直播</b>刻意<b>移除</b> {@code play}（播放/暂停按钮）与
  * {@code playbackRate}（倍速）：直播是持续流，暂停会让画面卡住却没有意义，
  * 倍速对直播同样无意义（LiveGBS 等主流平台也都不提供）。
+ *
+ * <p><b>回放</b>反过来要保留这两项 —— 它们会被 {@link applyVodControls}
+ * 接成设备信令（PAUSE / PLAY / Scale），进度条同理。
  *
  * <h3>为什么必须关掉 {@code closeVideoClick} / {@code closeVideoDblclick}</h3>
  * <p>xgplayer 默认在 video 元素上接管单击与双击（单击暂停、双击全屏），
@@ -484,18 +522,114 @@ export function useXgPlayer(containerRef) {
  * stopPropagation，事件正常冒泡到外层容器。双击全屏由业务层自己实现
  * （视频墙用 320ms 内的两次 click 判定），比播放器内置的更可控。
  *
- * <p>注意：移除按钮只是去掉 UI 入口，键盘空格（keyboard 插件的
- * {@code playPause} action）与浏览器媒体策略仍能触发暂停，
- * 所以还要在 media 上做兜底拦截（见 {@code playFlv}）。
+ * @param {'live'|'vod'} mode 直播 / 录像回放
  */
-function baseUiConfig() {
+function baseUiConfig(mode = 'live') {
+  const ignores = ['download', 'testSpeed', 'definition']
+  if (mode === 'live') {
+    // 直播没有「暂停」「倍速」语义，连按钮一起去掉
+    ignores.push('play', 'playbackRate')
+  }
   return {
-    ignores: ['download', 'testSpeed', 'definition', 'play', 'playbackRate'],
+    ignores,
     // 点画面不暂停、也不拦截事件冒泡（详见上面的说明）
     closeVideoClick: true,
     // 双击全屏交给业务层判定，避免与播放器内置行为重复触发
     closeVideoDblclick: true
   }
+}
+
+/**
+ * 给录像回放装上「伪点播」控件：进度条 / 暂停 / 倍速 全部走设备信令。
+ *
+ * <h3>为什么叫「伪点播」</h3>
+ * 设备回放拿到的其实是<b>一路实时流</b>（ZLM 从设备收 PS 再转 FLV），
+ * 浏览器眼里它没有时长、不能 seek。但用户要的操作体验是点播：
+ * 有进度条、能暂停、能倍速、能拖动。
+ *
+ * <p>做法是把 UI 表现与数据通路拆开：
+ * <ul>
+ *   <li><b>进度条</b>：用 {@code player.config.customDuration} 告诉 xgplayer
+ *       「这段有多长」，再用 {@code player.config.timeOffset} 把「媒体自身
+ *       时间轴」平移成「录像段内的位置」。媒体时间轴从 0 开始自然推进，
+ *       平移后显示的就是录像段内的真实位置。</li>
+ *   <li><b>暂停 / 继续 / 倍速</b>：不靠本地缓冲，而是发 SIP {@code INFO}
+ *       让<b>设备</b>停发/续发/加速（{@code PAUSE} / {@code PLAY npt=now-} /
+ *       {@code Scale}）。本地缓冲做这些会因为「推流速度不变」而越积越多或卡死。</li>
+ *   <li><b>拖动</b>：覆写 {@code player.seek}，换成发 SIP {@code PLAY npt=<秒>}，
+ *       并重算 {@code timeOffset} 让进度条立刻落到目标位置。
+ *       <b>绝不能</b>真去改 {@code media.currentTime} —— MSE 的 buffered
+ *       范围之外根本 seek 不过去，会直接卡死在等待数据。</li>
+ * </ul>
+ *
+ * <p>注意 {@code customDuration} / {@code timeOffset} 是 <b>player 顶层配置</b>
+ * （xgplayer 的 progress 插件读的是 {@code this.playerConfig.xxx}，
+ * 而 {@code playerConfig === player.config}），不是 {@code progress} 插件内部字段。
+ */
+function applyVodControls(p, media, vod, positionRef) {
+  const duration = Math.max(1, Math.round(vod.duration || 0))
+  // 进度条总长；同时把偏移归零，让首帧显示在 0
+  p.config.customDuration = duration
+  p.config.timeOffset = 0
+
+  const clamp = (t) => {
+    const n = Number(t)
+    if (!Number.isFinite(n)) return 0
+    return Math.min(Math.max(0, n), duration)
+  }
+
+  /*
+   * 覆写 seek：进度条拖动最终都会走到 player.seek()（progress 插件在
+   * updateWidth 里直接调它），在这里拦下来转成设备指令。
+   */
+  p.seek = (time) => {
+    const target = clamp(time)
+    // 立刻把显示位置挪到目标：timeOffset = 目标 - 媒体当前时间
+    p.config.timeOffset = target - (media.currentTime || 0)
+    vod.onSeek?.(target)
+  }
+
+  /*
+   * 播放/暂停只在「用户已经开始看」之后才上报。
+   * 起播时 autoplay 也会触发一次 play 事件，那时发 PLAY 给设备是多余的，
+   * 还可能把设备刚建立的推流状态打乱。
+   */
+  let userReady = false
+  p.on('playing', () => {
+    userReady = true
+  })
+  p.on('pause', () => {
+    if (userReady) vod.onPause?.()
+  })
+  p.on('play', () => {
+    if (userReady) vod.onResume?.()
+  })
+
+  /*
+   * 倍速：xgplayer 的 playbackRate 插件会改 media.playbackRate，
+   * 这里监听 media 的 ratechange 转成设备侧 Scale。
+   *
+   * 为什么要同时改 media 和发指令：设备按 Scale 加速推流后，
+   * 本地必须同倍速消耗，否则缓冲区会一直涨（延迟越拖越大）。
+   */
+  let lastRate = 1
+  media.addEventListener('ratechange', () => {
+    const rate = media.playbackRate
+    if (!Number.isFinite(rate) || rate === lastRate) return
+    lastRate = rate
+    vod.onRate?.(rate)
+  })
+
+  /*
+   * 把当前位置报给业务层（显示墙钟时间用）。
+   * 用 timeupdate 而不是定时器：它跟着媒体时钟走，暂停时自动停。
+   */
+  const reportTime = () => {
+    const pos = (p.config.timeOffset || 0) + (media.currentTime || 0)
+    positionRef.value = Math.min(duration, Math.max(0, pos))
+  }
+  p.on('timeupdate', reportTime)
+  media.addEventListener('timeupdate', reportTime)
 }
 
 /** 等待 ICE 收集完成（最多 2 秒，超时用当前候选继续）。 */

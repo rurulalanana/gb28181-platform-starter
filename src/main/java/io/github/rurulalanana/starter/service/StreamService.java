@@ -352,6 +352,31 @@ public class StreamService {
         return platform.sessionManager().getByKey(sessionKey);
     }
 
+    /** 录像服务（ZLM 录制器）；未启用时返回 {@code null}。 */
+    public io.github.rurulalanana.gb28181.sip.zlm.RecordingService recordingService() {
+        return platform.recordingService();
+    }
+
+    /**
+     * ZLM 是否已真正收到该会话的 RTP。
+     *
+     * <p>「会话存在」不等于「媒体源就绪」：会话在 INVITE 发出后立刻创建，
+     * 而 ZLM 要等设备推来第一个 RTP 包才注册媒体源。
+     * 录制、抓拍等依赖媒体源的操作必须用本方法判断就绪。
+     */
+    public boolean isReceiving(String sessionKey) {
+        RtpSession session = platform.sessionManager().getByKey(sessionKey);
+        if (session == null) {
+            return false;
+        }
+        var mediaServer = platform.mediaServer();
+        if (mediaServer == null) {
+            return false;
+        }
+        // 用 ZLM 实际坐标探测：单端口模式下 app/stream 与业务坐标不同
+        return mediaServer.isRtpReceiving(session.getZlmApp(), session.getStream());
+    }
+
     /** 当前全部会话。 */
     public List<RtpSession> sessions() {
         return new ArrayList<>(platform.sessionManager().sessions());
