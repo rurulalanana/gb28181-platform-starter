@@ -443,6 +443,48 @@
                 {{ tlsStatus.message || '—' }}
               </span>
             </div>
+            <div class="info-row">
+              <span class="info-label">监听端口</span>
+              <span class="info-value">
+                <span class="mono">{{ tlsStatus.port }}</span>
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  class="tls-probe-btn"
+                  :loading="tlsProbing"
+                  @click="probeTls"
+                >
+                  检测公网可达性
+                </el-button>
+              </span>
+            </div>
+            <!--
+              检测结果单独展示：这是「本机 curl 通、浏览器打不开」的唯一解释来源，
+              必须把「安全组没放通」这个结论写在台面上，
+              否则运维会先去怀疑证书和 nginx，绕一大圈。
+            -->
+            <div v-if="tlsProbe" class="info-row">
+              <span class="info-label">公网检测</span>
+              <span class="info-value">
+                <el-tag
+                  size="small"
+                  effect="plain"
+                  :type="tlsProbe.reachable === null ? 'info' : (tlsProbe.reachable ? 'success' : 'danger')"
+                >
+                  {{ tlsProbe.reachable === null ? '无法判断' : (tlsProbe.reachable ? '可访问' : '不可访问') }}
+                </el-tag>
+                <el-tag
+                  size="small"
+                  effect="plain"
+                  :type="tlsProbe.listening ? 'success' : 'danger'"
+                  class="tls-tag"
+                >
+                  {{ tlsProbe.listening ? '本机已监听' : '本机未监听' }}
+                </el-tag>
+                <div class="tls-probe-hint">{{ tlsProbe.hint }}</div>
+              </span>
+            </div>
             <template v-if="tlsStatus.hasCertificate">
               <div class="info-row">
                 <span class="info-label">适用域名</span>
@@ -541,6 +583,17 @@
               >
                 校验并启用
               </el-button>
+              <!--
+                改完端口后用它：只重写 nginx 配置，不需要把私钥再贴一遍。
+                私钥经手次数越多泄漏风险越大，而证书文件本来就在磁盘上。
+              -->
+              <el-button
+                v-if="tlsStatus.hasCertificate"
+                :loading="tlsRegenerating"
+                @click="regenerateTls"
+              >
+                按当前端口重新生成
+              </el-button>
               <el-button
                 v-if="tlsStatus.configured"
                 :loading="tlsDisabling"
@@ -552,6 +605,20 @@
                 校验失败不会 reload，站点保持原状
               </span>
             </div>
+
+            <!--
+              端口提示：国内云服务器常因备案限制用不了 443，
+              所以要明确告诉运维「端口在哪改」，而不是让对方去翻文档。
+            -->
+            <el-alert
+              v-if="tlsStatus.hasCertificate && !tlsStatus.configured"
+              type="info"
+              :closable="false"
+              show-icon
+              class="tls-alert"
+              :title="`证书已就绪，点「按当前端口重新生成」即可在 ${tlsStatus.port} 端口启用`"
+              description="HTTPS 端口可在「运行时配置 → HTTPS」里改，无需重启应用。若云服务器的安全组没有放通该端口，公网仍然访问不到 —— 需在云控制台放通。"
+            />
 
             <el-alert
               type="info"
@@ -1055,6 +1122,8 @@ const CFG_LABELS = {
   'record.reconcile-interval-ms': '录像对账间隔',
   'record.url-sign-enabled': '录像地址签名校验',
   'record.url-sign-ttl-seconds': '录像地址有效期',
+  'tls.port': 'HTTPS 监听端口',
+  'tls.auto-reload': '自动 reload nginx',
   'log.oplog-retain-days': '操作日志保留天数',
   'log.status-retain-days': '状态日志保留天数',
   'stream.idle-reap-interval-ms': '空闲流回收间隔',
@@ -1496,7 +1565,10 @@ async function removeAcl(row) {
 
 const tlsLoading = ref(false)
 const tlsInstalling = ref(false)
+const tlsRegenerating = ref(false)
 const tlsDisabling = ref(false)
+const tlsProbing = ref(false)
+const tlsProbe = ref(null)
 const tlsStatus = ref({})
 const tlsForm = reactive({ cert: '', key: '' })
 const gm = ref({})
@@ -1565,6 +1637,35 @@ async function installCert() {
     ElMessage.error(e.message || '安装失败')
   } finally {
     tlsInstalling.value = false
+  }
+}
+
+async function regenerateTls() {
+  tlsRegenerating.value = true
+  try {
+    tlsStatus.value = (await tlsApi.regenerate()) || {}
+    ElMessage.success(`HTTPS 配置已按当前设置重新生成（端口 ${tlsStatus.value.port}）`)
+  } catch (e) {
+    ElMessage.error(e.message || '重新生成失败')
+  } finally {
+    tlsRegenerating.value = false
+  }
+}
+
+/**
+ * 检测端口能否从公网访问。
+ *
+ * <p>它回答的是「证书/nginx 都配对了，为什么浏览器打不开」——
+ * 在本机 curl 永远通，必须走公网地址才能命中云安全组。
+ */
+async function probeTls() {
+  tlsProbing.value = true
+  try {
+    tlsProbe.value = (await tlsApi.probe(tlsStatus.value.port)) || null
+  } catch (e) {
+    ElMessage.error(e.message || '检测失败')
+  } finally {
+    tlsProbing.value = false
   }
 }
 
@@ -2292,6 +2393,20 @@ onMounted(() => {
 /* 证书颁发者的 DN 可能很长（含 O/OU/C），允许折行而不是撑出横向滚动 */
 .info-value--break {
   word-break: break-all;
+}
+
+.tls-probe-btn {
+  margin-left: var(--sp-2);
+}
+
+/* 检测结论可能是一整句排查建议，单独成行并限制宽度，避免把布局撑开 */
+.tls-probe-hint {
+  margin-top: var(--sp-1);
+  max-width: 620px;
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--text-secondary);
+  white-space: normal;
 }
 
 /* ==================== 窄屏 ==================== */

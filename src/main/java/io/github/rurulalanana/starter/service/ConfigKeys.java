@@ -66,6 +66,29 @@ public final class ConfigKeys {
     /** 录像地址签名有效期（秒）。 */
     public static final String RECORD_URL_SIGN_TTL_SECONDS = "record.url-sign-ttl-seconds";
 
+    // ==================== HTTPS ====================
+
+    /**
+     * HTTPS 监听端口。
+     *
+     * <p><b>为什么端口要能改</b>：国内云服务器经常因备案限制而无法使用 80/443，
+     * 或者端口已被别的站点占用。写死在 yml 里意味着「为了换个端口得停机重启」，
+     * 而改端口本身就是运维最常做的一件事。
+     *
+     * <p>改成运行时配置后，在界面上改完 → 重新生成 nginx 配置并 reload → 立即生效，
+     * 不需要重启应用（也不需要重新上传证书 —— 证书文件还在原处）。
+     */
+    public static final String TLS_PORT = "tls.port";
+
+    /**
+     * 是否允许应用自动 reload nginx。
+     *
+     * <p><b>这是一个提权面</b>：开启时应用能以 root 身份执行 {@code nginx -s reload}。
+     * 关闭后上传证书仍会生成配置并做 {@code nginx -t} 校验，只是不自动 reload，
+     * 界面会提示需要手工执行。高安全要求环境建议关闭。
+     */
+    public static final String TLS_AUTO_RELOAD = "tls.auto-reload";
+
     // ==================== 日志 ====================
 
     /** 操作日志保留天数。 */
@@ -160,6 +183,16 @@ public final class ConfigKeys {
                     "录像地址签名有效期（秒，默认 12 小时）。"
                             + "它同时是「播放页签最长能连续播多久」和「复制出去的链接多久失效」。"
                             + "下限 5 分钟：太小会导致长片播到一半续传被拒（每次 Range 都要重新校验）。"),
+            intDef(TLS_PORT, "48087", "tls", 1, 65_535,
+                    "HTTPS 监听端口（默认 48087）。"
+                            + "选 48087 而不是 443 是因为国内云服务器常因备案限制而无法使用 80/443，"
+                            + "而且 443 很可能已被同机其它站点占用。"
+                            + "改完点「重新生成配置」即可生效，不需要重启应用、也不需要重新上传证书。"
+                            + "注意：小于 1024 的端口需要 nginx 以 root 启动。"),
+            boolDef(TLS_AUTO_RELOAD, "true", "tls",
+                    "是否允许本应用自动 reload nginx。开启时应用能以 root 身份执行 nginx -s reload——"
+                            + "这是一个提权面，高安全要求环境建议关闭。"
+                            + "关闭后上传证书仍会生成配置并做语法校验，只是不自动 reload，需手工执行。"),
 
             intDef(LOG_OPLOG_RETAIN_DAYS, "7", "log", 1, 3650,
                     "操作日志保留天数（谁在什么时候做了什么）。"),

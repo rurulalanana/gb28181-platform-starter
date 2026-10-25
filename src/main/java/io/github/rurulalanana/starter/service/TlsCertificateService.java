@@ -62,15 +62,25 @@ public class TlsCertificateService {
 
     private final Gb28181Properties props;
 
+    /**
+     * 运行时配置：端口与自动 reload 开关都在这里，改完即时生效。
+     *
+     * <p>这两个值为什么不像其它 tls.* 一样读 {@link Gb28181Properties}：
+     * 端口是运维最常调的一项（备案限制、端口冲突），
+     * 若写死在 yml 里，每换一次端口就要停机重启一次，
+     * 而重启会中断所有录像与设备注册。
+     */
+    private final RuntimeConfigService config;
+
     // ==================== 状态查询 ====================
 
     /** 当前 HTTPS 状态。 */
     public TlsStatus status() {
         TlsStatus st = new TlsStatus();
-        st.setPort(props.getTls().getPort());
+        st.setPort(currentPort());
         st.setCertDir(certDir().toString());
         st.setNginxConfPath(props.getTls().getNginxConfPath());
-        st.setAutoReload(props.getTls().isAutoReload());
+        st.setAutoReload(currentAutoReload());
 
         Path cert = certDir().resolve(CERT_FILE);
         boolean confExists = confExists();
@@ -179,6 +189,29 @@ public class TlsCertificateService {
     }
 
     /**
+     * 按当前配置重新生成 nginx 配置并 reload（不重新上传证书）。
+     *
+     * <p><b>为什么需要这个操作</b>：端口是最常调的一项配置（备案限制、
+     * 端口冲突、与别的站点争用）。若改端口必须重新上传证书，运维就得把
+     * 私钥再从本地翻出来贴一遍 —— 而私钥经手次数越多，泄漏风险越大。
+     * 证书文件本来就在磁盘上，只重写配置就够。
+     *
+     * <p>前置条件：证书文件必须已存在，否则生成出来的配置会让 nginx -t 失败
+     * （certificate file not found），直接报错比让用户猜更清楚。
+     */
+    public TlsStatus regenerate() {
+        Path cert = certDir().resolve(CERT_FILE);
+        Path key = certDir().resolve(KEY_FILE);
+        if (!Files.isRegularFile(cert) || !Files.isRegularFile(key)) {
+            throw BizException.badRequest("证书文件不存在，请先上传证书与私钥");
+        }
+        applyNginxConfig(true);
+        TlsStatus st = status();
+        log.info("https 配置已按当前设置重新生成：端口 {}", st.getPort());
+        return st;
+    }
+
+    /**
      * 停用 HTTPS（删除 nginx 站点配置）。
      *
      * <p><b>不删除证书文件</b>：运维可能只是临时排查，重新启用时不必再上传一次。
@@ -203,6 +236,74 @@ public class TlsCertificateService {
             }
         }
         return status();
+    }
+
+    // ==================== 公网可达性自检 ====================
+
+    /**
+     * 检测 HTTPS 端口是否真的能从公网访问。
+     *
+     * <p><b>为什么需要这个检测</b>：证书装好、nginx reload 成功、本机
+     * {@code curl https://127.0.0.1:端口} 也返回 200，但用户就是打不开 ——
+     * 这种「一切都对但用不了」的情况，九成是<b>云服务器安全组没有放通该端口</b>。
+     * 而安全组在运维视野之外（要登录云控制台才看得到），
+     * 于是现场排查会先去怀疑证书、nginx、防火墙，绕一大圈。
+     *
+     * <p><b>为什么用公网 IP 而不是 127.0.0.1</b>：云主机的流量走 NAT，
+     * 访问自己的公网 IP 也要经过云网关，<b>因此会命中安全组规则</b>。
+     * 这正是我们要测的：能连上说明放通了，连不上说明没放通。
+     * 用 127.0.0.1 测永远是通的，测不出问题。
+     *
+     * @param port 要检测的端口；{@code null} 表示当前 HTTPS 端口
+     */
+    public PortProbe probe(Integer port) {
+        int target = port == null ? currentPort() : port;
+        PortProbe result = new PortProbe();
+        result.setPort(target);
+
+        // 监听是否在（本地回环能连上说明 nginx 已在监听）
+        result.setListening(canConnect("127.0.0.1", target, 1500));
+
+        String publicIp = props.getMediaIp();
+        if (publicIp == null || publicIp.isBlank()) {
+            result.setReachable(null);
+            result.setHint("未配置 gb28181.media-ip，无法确定公网地址，跳过公网检测");
+            return result;
+        }
+        result.setPublicIp(publicIp);
+        // 走公网 IP：云环境下会经过网关，因而能反映安全组状态
+        boolean ok = canConnect(publicIp, target, 3000);
+        result.setReachable(ok);
+
+        if (!result.isListening()) {
+            result.setHint("本机未在 " + target + " 端口监听，请先在「HTTPS 与国密」里安装证书"
+                    + "或在「运行时配置」里检查 tls.port");
+        } else if (!ok) {
+            result.setHint("本机已在监听，但经公网地址连不上 —— 这是云安全组未放通 " + target
+                    + "/TCP 的典型表现。请到云控制台为该实例的安全组添加入站规则"
+                    + "（协议 TCP，端口 " + target + "，源 0.0.0.0/0 或按需限制）。"
+                    + "服务器自身的 iptables / firewalld 可以先不管：若它们拦截，"
+                    + "本机回环也会连不上，而这里显示本机已监听。");
+        } else {
+            result.setHint("端口 " + target + " 可正常访问");
+        }
+        return result;
+    }
+
+    /**
+     * 尝试建立一次 TCP 连接。
+     *
+     * <p>只测 TCP 握手、不发数据：目的是判断「网络与端口是否可达」，
+     * 不是校验证书 —— 用 HTTPS 请求会因为自签证书而得到误导性的失败。
+     * 超时设得短（秒级）：运维点一下要立刻有结果。
+     */
+    private static boolean canConnect(String host, int port, int timeoutMs) {
+        try (java.net.Socket s = new java.net.Socket()) {
+            s.connect(new java.net.InetSocketAddress(host, port), timeoutMs);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ==================== 国密就绪度自检 ====================
@@ -321,8 +422,8 @@ public class TlsCertificateService {
 
     /** 执行 reload；失败只告警不影响已完成的工作（配置已校验通过）。 */
     private void reloadNginx() {
-        if (!props.getTls().isAutoReload()) {
-            log.warn("已生成 nginx 配置但未自动 reload（gb28181.tls.auto-reload=false）。"
+        if (!currentAutoReload()) {
+            log.warn("已生成 nginx 配置但未自动 reload（tls.auto-reload=false）。"
                     + "请手工执行：nginx -t && nginx -s reload");
             return;
         }
@@ -332,7 +433,29 @@ public class TlsCertificateService {
                     "nginx reload 失败（配置已写入且语法正确，站点仍按旧配置运行）：" + r.output()
                             + "。请手工执行 nginx -s reload");
         }
-        log.info("nginx 已 reload，HTTPS 生效于端口 {}", props.getTls().getPort());
+        log.info("nginx 已 reload，HTTPS 生效于端口 {}", currentPort());
+    }
+
+    /** 当前生效的 HTTPS 端口（优先运行时配置，回落 yml）。 */
+    private int currentPort() {
+        int p = config.getInt(ConfigKeys.TLS_PORT);
+        if (p < 1 || p > 65535) {
+            // 库里的脏数据：回落到 yml，绝不拼一个非法端口进 nginx 配置
+            // （listen 非法会让 nginx -t 失败，进而整站配置都改不了）
+            int fallback = props.getTls().getPort();
+            log.warn("运行时配置 tls.port 非法（{}），改用 {} 重新生成", p, fallback);
+            return fallback;
+        }
+        return p;
+    }
+
+    /** 是否允许自动 reload（优先运行时配置，回落 yml）。 */
+    private boolean currentAutoReload() {
+        try {
+            return config.getBoolean(ConfigKeys.TLS_AUTO_RELOAD);
+        } catch (RuntimeException e) {
+            return props.getTls().isAutoReload();
+        }
     }
 
     /**
@@ -350,7 +473,7 @@ public class TlsCertificateService {
         Path dir = certDir();
         String cert = dir.resolve(CERT_FILE).toString();
         String key = dir.resolve(KEY_FILE).toString();
-        int port = props.getTls().getPort();
+        int port = currentPort();
         int appPort = 48092;
 
         return "# 本文件由 gb28181-platform-starter 自动生成，请勿手工编辑。\n"
@@ -823,5 +946,18 @@ public class TlsCertificateService {
         private boolean caConfigured;
         private List<String> missing;
         private String note;
+    }
+
+    /** 端口可达性检测结果。 */
+    @lombok.Data
+    public static class PortProbe {
+        private int port;
+        /** 本机回环是否可连（等价于「nginx 在监听」）。 */
+        private boolean listening;
+        /** 经公网地址是否可连；{@code null} 表示无法判断（未配 media-ip）。 */
+        private Boolean reachable;
+        private String publicIp;
+        /** 面向运维的结论与下一步动作。 */
+        private String hint;
     }
 }

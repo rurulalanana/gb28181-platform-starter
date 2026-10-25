@@ -18,8 +18,10 @@ import org.springframework.web.bind.annotation.RestController;
  * <pre>
  * GET  /api/v1/tls/status           当前证书状态（域名、有效期、剩余天数）
  * POST /api/v1/tls/install          上传证书与私钥，校验后生成 nginx 配置并 reload
+ * POST /api/v1/tls/regenerate       按当前端口等设置重新生成配置（不重传证书）
  * POST /api/v1/tls/disable          停用 HTTPS（保留证书文件）
  * GET  /api/v1/tls/gm-readiness     国密 35114 就绪度自检
+ * GET  /api/v1/tls/probe            检测端口能否从公网访问（排查安全组）
  * </pre>
  *
  * <p><b>只有管理员可用</b>：这里能改整站的传输层安全配置，一次误操作
@@ -75,6 +77,20 @@ public class TlsController {
     }
 
     /**
+     * 按当前配置重新生成 nginx 配置并 reload（不重传证书）。
+     *
+     * <p>主要用途是改端口：端口是最常调的一项（备案限制、端口冲突），
+     * 而重新上传证书意味着把私钥再从本地贴一遍 —— 私钥经手次数越多，
+     * 泄漏风险越大。证书文件本来就在磁盘上，只重写配置就够。
+     */
+    @PostMapping("/regenerate")
+    public ApiResponse<TlsCertificateService.TlsStatus> regenerate() {
+        StpUtil.checkLogin();
+        StpUtil.checkRoleOr("admin");
+        return ApiResponse.ok(tlsService.regenerate());
+    }
+
+    /**
      * 国密 35114 就绪度自检。
      *
      * <p>只读检测，不改变任何配置 —— 它回答的是「要上 35114 还缺什么」，
@@ -85,6 +101,19 @@ public class TlsController {
     public ApiResponse<TlsCertificateService.GmReadiness> gmReadiness() {
         StpUtil.checkLogin();
         return ApiResponse.ok(tlsService.gmReadiness());
+    }
+
+    /**
+     * 检测 HTTPS 端口能否从公网访问。
+     *
+     * <p>专治「本机 curl 通、浏览器打不开」——九成是云安全组没放通端口。
+     * 检测走公网 IP（云环境下会经过网关，因而能命中安全组规则）。
+     */
+    @GetMapping("/probe")
+    public ApiResponse<TlsCertificateService.PortProbe> probe(
+            @org.springframework.web.bind.annotation.RequestParam(required = false) Integer port) {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(tlsService.probe(port));
     }
 
     /** 证书安装请求。 */

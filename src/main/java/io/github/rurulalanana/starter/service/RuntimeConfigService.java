@@ -204,6 +204,15 @@ public class RuntimeConfigService {
             // sip.password → gb28181.sip-password（不在 starter 下）
             case ConfigKeys.SIP_PASSWORD ->
                     "gb28181.sip-password";
+            /*
+             * tls.* 在 yml 里是嵌套结构（gb28181.tls.port），
+             * 不是 kebab-case 平铺。走默认分支会拼成 gb28181.starter.tls-port，
+             * 那个属性不存在 —— 于是 yml 里改了端口不生效，只能靠库里覆盖。
+             */
+            case ConfigKeys.TLS_PORT ->
+                    "gb28181.tls.port";
+            case ConfigKeys.TLS_AUTO_RELOAD ->
+                    "gb28181.tls.auto-reload";
             case ConfigKeys.STREAM_NONE_READER_DELAY_MS ->
                     "gb28181.stream-none-reader-delay-ms";
             case ConfigKeys.STREAM_IDLE_REAP_INTERVAL_MS ->

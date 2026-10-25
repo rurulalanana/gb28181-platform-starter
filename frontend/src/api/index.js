@@ -62,8 +62,12 @@ export const tlsApi = {
   status: () => get('/tls/status'),
   // 第三参是 body：PEM 内容动辄几 KB，绝不能塞进 query string
   install: (cert, key) => post('/tls/install', null, { cert, key }, 60000),
+  // 改完端口/自动 reload 开关后调它：只重写 nginx 配置，不需要重传私钥
+  regenerate: () => post('/tls/regenerate', undefined, undefined, 60000),
   disable: () => post('/tls/disable'),
-  gmReadiness: () => get('/tls/gm-readiness')
+  gmReadiness: () => get('/tls/gm-readiness'),
+  // 走公网 IP 建 TCP 连接：云环境下会命中安全组，能判断端口是否真的放通
+  probe: (port) => get('/tls/probe', port ? { port } : undefined)
 }
 
 /** 设备与通道接口（`/api/v1/device/*`）。 */
