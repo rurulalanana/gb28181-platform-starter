@@ -253,6 +253,18 @@ public class CascadeLinkService {
      * @return 是否成功发起推流
      */
     public boolean pushToUplink(String channelId, String dstIp, int dstPort, String ssrc) {
+        return pushToUplink(channelId, dstIp, dstPort, ssrc, false);
+    }
+
+    /**
+     * 同上，但可指定传输方式。
+     *
+     * @param tcp {@code true} 用 TCP 主动推流（上级 SDP 声明 {@code TCP/RTP/AVP}
+     *            且未要求 {@code a=setup:active} 时）。公网级联里上级常常只能收
+     *            TCP，固定 UDP 会导致上级超时报「none rtp data receive」。
+     */
+    public boolean pushToUplink(String channelId, String dstIp, int dstPort,
+                                String ssrc, boolean tcp) {
         GbChannel channel = deviceService.findChannel(channelId);
         if (channel == null) {
             log.warn("级联上行推流失败：通道不存在 {}", channelId);
@@ -278,9 +290,10 @@ public class CascadeLinkService {
         }
         // 单端口模式下 ZLM 固定 app=rtp、stream=<设备>_<通道>
         boolean ok = media.startSendRtpToSource("rtp", deviceId + "_" + channelId,
-                dstIp, dstPort, ssrc, 20_000L);
+                dstIp, dstPort, ssrc, 20_000L, tcp);
         if (ok) {
-            log.info("级联上行推流成功: {} → {}:{}", channelId, dstIp, dstPort);
+            log.info("级联上行推流成功: {} → {}:{} ({})", channelId, dstIp, dstPort,
+                    tcp ? "TCP主动" : "UDP主动");
         } else {
             log.warn("级联上行推流失败：媒体源未就绪 {} → {}:{}",
                     channelId, dstIp, dstPort);
