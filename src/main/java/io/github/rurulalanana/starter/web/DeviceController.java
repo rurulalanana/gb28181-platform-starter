@@ -470,6 +470,8 @@ public class DeviceController {
      * 通道编号冲突、需要对接到第三方规范）。改的是 {@code custom_id}，
      * 不动 {@code channel_id} —— 后者是设备实际使用的编号，改了就连不上设备。
      *
+     * <p>{@code id} 传空表示清除自定义编号（恢复使用原通道编号）。
+     *
      * <p><b>必须按 serial + code 精确定位</b>：通道编码只在单设备内唯一，
      * 多设备环境里两台设备都可能有 {@code ...1320000001}，
      * 只按 code 查会改到另一台设备的同名通道上。
@@ -479,9 +481,11 @@ public class DeviceController {
                                           @RequestParam String code,
                                           @RequestParam(required = false) String id) {
         StpUtil.checkLogin();
-        GbChannel channel = requireChannel(serial, code);
-        channel.setCustomId(id);
-        deviceService.updateChannel(channel);
+        // 不能用 updateChannel：updateById 会跳过 null 字段，清空就永远写不进库
+        boolean ok = deviceService.setChannelCustomId(serial, code, id);
+        if (!ok) {
+            throw BizException.notFound("通道不存在：" + serial + ":" + code);
+        }
         return ApiResponse.ok();
     }
 

@@ -280,6 +280,8 @@
           点一下单元格就地变成输入框，回车/失焦保存，Esc 取消。
           用弹框改一个 20 位字符串太重：改错一位就要重开弹框，
           而且看不到相邻行做对照（编号通常是按设备顺序批量微调的）。
+          编辑框预填的是**当前生效的编号**（自定义编号，没有则原编号），
+          用户可以在此基础上改几位，而不是对着空框重打 20 位。
           改的是 custom_id，不动 channel_id —— 后者是设备实际使用的编号。
         -->
         <el-table-column label="自定义通道国标编号" prop="customId" width="190" sortable="custom">
@@ -290,7 +292,7 @@
               v-model="editingCustomId.value"
               size="small"
               class="mono cid-input"
-              placeholder="留空=用原编号"
+              placeholder="清空=恢复原编号"
               :disabled="editingCustomId.saving"
               @keydown.enter.prevent="commitCustomId(row)"
               @keydown.esc.stop.prevent="cancelCustomId"
@@ -301,7 +303,7 @@
               link
               type="primary"
               class="mono"
-              :title="row.customId ? '点击修改' : '点击为该通道设置自定义编号'"
+              :title="row.customId ? '点击修改（当前生效编号）' : '点击设置自定义编号（预填原编号）'"
               @click="startEditCustomId(row)"
             >
               {{ row.customId || row.id }}
@@ -648,16 +650,43 @@ const editingCustomId = reactive({
 })
 const customIdInputRef = ref(null)
 
-/** 进入行内编辑并聚焦全选，方便直接覆盖输入。 */
+/**
+ * 通道当前「对外生效」的编号。
+ *
+ * <p>设置过自定义编号就用它，否则用原通道编号 —— 与列里的显示保持一致。
+ * 编辑时必须基于这个值预填，不能用 {@code customId || ''}：
+ * 大多数通道没有自定义编号，那样一进编辑框就是空的，
+ * 用户还得把 20 位原编号手打一遍才能改一位，等于不能改。
+ */
+function effectiveChannelId(row) {
+  return row.customId || row.id || ''
+}
+
+/** 进入行内编辑，光标定位到末尾（不是全选）。 */
 async function startEditCustomId(row) {
   if (editingCustomId.saving) return
   editingCustomId.row = row
-  editingCustomId.value = row.customId || ''
+  editingCustomId.value = effectiveChannelId(row)
   await nextTick()
   const el = customIdInputRef.value
   const target = Array.isArray(el) ? el[0] : el
-  target?.focus?.()
-  target?.select?.()
+  if (!target) return
+  target.focus?.()
+  /*
+   * 光标放在末尾而不是全部选中。
+   *
+   * 全选看着「方便重新输入」，实际很坑：编号是 20 位，最常见的操作是
+   * 改末尾几位（按设备顺序微调）。全选状态下随手敲一个数字就把整串冲掉，
+   * 接着就弹「必须是 20 位数字」，还得重来一遍。
+   * 放末尾可以正常退格/方向键修改；要整体替换按 Ctrl+A 即可。
+   */
+  const inner = target.input || target.$el?.querySelector?.('input')
+  const len = (editingCustomId.value || '').length
+  try {
+    inner?.setSelectionRange?.(len, len)
+  } catch (e) {
+    // 某些浏览器在非文本 input 上会抛错，忽略即可（光标停在末尾是默认行为）
+  }
 }
 
 /** 退出行内编辑（不保存）。 */
@@ -671,13 +700,20 @@ function cancelCustomId() {
  *
  * <p>回车与失焦都会调到这里，必须幂等：
  * 回车后输入框会被移除，若同时触发 blur 就会重复提交。
+ *
+ * <p>判定「有没有真的改过」要比较<b>生效编号</b>而不是输入框原文：
+ * 编辑框是带着原编号进去的，用户什么都没动就提交时，
+ * 原文 {@code 34020000001320000001} 与 {@code customId=''} 并不相等，
+ * 按原文比较会把每个通道都写成「自定义编号=原编号」的冗余记录。
  */
 async function commitCustomId(row) {
   // 已经不是当前编辑行（Esc 取消、或已被另一次提交收尾）→ 直接忽略
   if (editingCustomId.row !== row || editingCustomId.saving) return
   const value = (editingCustomId.value || '').trim()
-  const original = row.customId || ''
-  if (value === original) {
+  const before = effectiveChannelId(row)
+  // 留空 = 恢复使用原通道编号
+  const after = value || (row.id || '')
+  if (after === before) {
     cancelCustomId()
     return
   }
@@ -691,13 +727,19 @@ async function commitCustomId(row) {
   }
   editingCustomId.saving = true
   try {
+    /*
+     * 与通道原编号相同时存 null 而不是原样存下来：
+     * 存了也能显示对，但库里会多出一条「自定义编号 = 原编号」的无意义记录，
+     * 日后排查「这条通道到底被人改过没有」时会造成误判。
+     */
+    const toSave = value === row.id ? '' : value
     // 必须带 serial：通道编码只在单设备内唯一，只传 code 会改到别的设备的同号通道
     await deviceApi.setChannelId({
       serial: row.deviceId,
       code: row.id,
-      id: value
+      id: toSave
     })
-    row.customId = value || null
+    row.customId = toSave || null
     ElMessage.success('已保存，重新推送目录后上级生效')
     cancelCustomId()
   } catch (e) {

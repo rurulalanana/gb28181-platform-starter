@@ -785,6 +785,32 @@ public class DeviceService {
     }
 
     /**
+     * 单独设置通道的「自定义国标编号」，{@code null}/空串表示清除。
+     *
+     * <p><b>为什么不复用 {@link #updateChannel}</b>：它走 {@code updateById}，
+     * 而 MyBatis-Plus 默认的 {@code FieldStrategy.NOT_NULL} 会<b>跳过 null 字段</b>，
+     * 于是「清空自定义编号」永远不生效 —— 接口返回 200、界面也提示成功，
+     * 库里却还是旧值，下次刷新又变回去。要写 null 只能显式用 UpdateWrapper 的
+     * {@code set(...)}，那是无条件进 SQL 的。
+     *
+     * <p>定位必须用「设备 + 通道」：通道编码只在单设备内唯一。
+     *
+     * @return 是否命中并更新了记录
+     */
+    public boolean setChannelCustomId(String deviceId, String channelId, String customId) {
+        if (channelId == null || channelId.isBlank()) {
+            return false;
+        }
+        String value = customId == null || customId.isBlank() ? null : customId.trim();
+        int rows = channelMapper.update(null, Wrappers.<GbChannel>lambdaUpdate()
+                .eq(GbChannel::getDeviceId, deviceId)
+                .eq(GbChannel::getChannelId, channelId)
+                .set(GbChannel::getCustomId, value)
+                .set(GbChannel::getUpdateTime, LocalDateTime.now()));
+        return rows > 0;
+    }
+
+    /**
      * 平台启动时收敛残留的通道状态。
      *
      * <p><b>为什么必须做</b>：通道的 {@code status=ON} 与 {@code stream_id} 都由
