@@ -97,6 +97,15 @@ public final class ConfigKeys {
     /** 状态变更日志保留天数。 */
     public static final String LOG_STATUS_RETAIN_DAYS = "log.status-retain-days";
 
+    /** 报警记录保留天数。 */
+    public static final String ALARM_RETAIN_DAYS = "alarm.retain-days";
+
+    /** 移动位置（GPS 轨迹）记录保留天数。 */
+    public static final String POSITION_RETAIN_DAYS = "position.retain-days";
+
+    /** 设备录像索引（设备侧文件清单缓存）保留天数。 */
+    public static final String DEVICE_RECORD_RETAIN_DAYS = "device.record-retain-days";
+
     // ==================== 流 / 任务 ====================
 
     /** 空闲流回收间隔（毫秒）。 */
@@ -199,6 +208,19 @@ public final class ConfigKeys {
             intDef(LOG_STATUS_RETAIN_DAYS, "30", "log", 1, 3650,
                     "设备/通道状态变更日志保留天数。它是排查「某天为什么掉线」的关键证据，"
                             + "建议比操作日志留得更久。"),
+            intDef(ALARM_RETAIN_DAYS, "180", "data", 1, 3650,
+                    "报警记录保留天数（默认 180 天）。"
+                            + "移动侦测类报警在高频点位上每天可产生上千条，不清理几个月就会把库撑大，"
+                            + "而报警列表按发生时间倒序分页，表越大翻页越慢，最终表现是页面打不开。"
+                            + "报警通常按季度复盘，180 天是「该看的都在」与「库不胀」的平衡点。"),
+            intDef(POSITION_RETAIN_DAYS, "30", "data", 1, 3650,
+                    "移动位置（GPS 轨迹）记录保留天数（默认 30 天）。"
+                            + "车载/单兵设备按固定周期上报，一台设备一天可达数百到上万条，"
+                            + "是增长最快的表。轨迹用于回溯「最近去过哪」，不需要长期保留。"),
+            intDef(DEVICE_RECORD_RETAIN_DAYS, "30", "data", 1, 3650,
+                    "设备侧录像索引（文件清单缓存）保留天数（默认 30 天）。"
+                            + "它只是「设备录像检索」的结果缓存，真实清单在设备上、随时可重新检索，"
+                            + "所以保留期不必长。不清的后果是每次检索都要在越来越大的表里查重。"),
 
             longDef(STREAM_IDLE_REAP_INTERVAL_MS, "20000", "stream", 5_000, 600_000,
                     "空闲流回收巡检间隔（毫秒）。无观看者且无录像的流会被关闭以释放设备带宽。"

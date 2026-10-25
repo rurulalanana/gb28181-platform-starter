@@ -146,7 +146,7 @@ public class UserController {
         StpUtil.checkLogin();
         StpUtil.checkRoleOr("admin");
         int deleted = 0;
-        for (String token : id.split(",")) {
+        for (String token : id.split(",")) { // secret-scan: allow 这里 token 是逗号分隔的 ID 片段，不是凭据
             if (token.isBlank()) {
                 continue;
             }
@@ -160,6 +160,15 @@ public class UserController {
                 throw BizException.badRequest("不能删除当前登录用户");
             }
             deleted += userMapper.deleteById(userId);
+            /*
+             * 必须踢下线。
+             *
+             * <p>不踢的后果：鉴权只校验「登录态」，不校验账号是否还存在 ——
+             * 被删账号的 token 能继续用到过期（默认 7 天）。
+             * 想象一下「开除一个人、收回了账号，他还能看一周全部录像」的场景，
+             * 这是审计一定会问的问题，也是真实的越权面。
+             */
+            kickoutQuietly(userId);
         }
         return ApiResponse.ok(DeletedVo.of(deleted));
     }
@@ -179,6 +188,10 @@ public class UserController {
         }
         user.setEnable(enable);
         userMapper.updateById(user);
+        // 停用必须立即生效：否则被停用的账号仍能用现有 token 继续操作到过期（默认 7 天）
+        if (!Boolean.TRUE.equals(enable)) {
+            kickoutQuietly(id);
+        }
         return ApiResponse.ok();
     }
 
@@ -197,7 +210,15 @@ public class UserController {
         }
         user.setPassword(userService.encodePassword(password));
         userMapper.updateById(user);
-        log.info("管理员 {} 重置了用户 {} 的密码", StpUtil.getLoginId(), id);
+        /*
+         * 重置密码后把该用户所有会话踢下线。
+         *
+         * <p>重置密码的典型场景是「怀疑账号被盗」—— 若旧会话仍然有效，
+         * 攻击者手里那个 token 还能继续用，改密码就失去了意义。
+         */
+        kickoutQuietly(id);
+        log.info("管理员 {} 重置了用户 {} 的密码（已清除其全部会话）",
+                StpUtil.getLoginId(), id);
         return ApiResponse.ok();
     }
 
@@ -211,6 +232,24 @@ public class UserController {
     }
 
     // ==================== 内部 ====================
+
+    /**
+     * 清除指定用户的全部会话（失败只记日志）。
+     *
+     * <p>为什么不让异常冒出去：踢下线是「附带动作」，主体操作（停用/删除/改密）
+     * 已经落库成功了。如果因为 Sa-Token 的会话存储抖动而报错，
+     * 前端会显示「操作失败」，管理员重试一次仍然失败 —— 而实际上账号已经是停用状态。
+     * 这种「操作成功但提示失败」最容易被反复操作，反而把状态搞乱。
+     * 所以这里降级为告警日志，并在日志里写清需要人工确认。
+     */
+    private void kickoutQuietly(long userId) {
+        try {
+            StpUtil.logout(userId);
+        } catch (Exception e) {
+            log.warn("清除用户 {} 的会话失败，该账号的旧 token 可能在过期前仍然有效（默认 7 天），"
+                    + "请检查 sa_token_store 或手工清理：{}", userId, e.toString());
+        }
+    }
 
     /** 出参：不包含密码哈希。 */
     private UserVo userView(GbUser u) {

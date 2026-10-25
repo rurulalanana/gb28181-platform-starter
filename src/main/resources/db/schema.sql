@@ -457,6 +457,8 @@ CREATE TABLE IF NOT EXISTS gb_operation_log (
 
 -- 老库升级：补充「操作人」列（CREATE TABLE IF NOT EXISTS 不会修改已存在的表）
 ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS operator VARCHAR(64);
+-- 请求参数（脱敏 + 截断）：审计要回答「谁把什么改成了什么」，只记 URL 不够
+ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS params VARCHAR(1024);
 
 -- 老库升级：补充流传输的 TCP 被动/主动模式列
 -- CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，缺这列时 MyBatis 查询会直接报

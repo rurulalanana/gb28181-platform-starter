@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PlatformScheduler {
 
     private final DeviceService deviceService;
+    private final AlarmService alarmService;
     private final OperationLogService operationLogService;
     private final SystemMetricsService systemMetricsService;
     private final RecordService recordService;
@@ -233,6 +234,57 @@ public class PlatformScheduler {
             }
         } catch (Exception e) {
             log.warn("状态日志清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 报警 / 移动位置 / 设备录像索引的过期清理（每小时一次）。
+     *
+     * <p><b>这三张表此前完全没有清理路径</b>，是比操作日志更严重的隐患：
+     * <ul>
+     *   <li>{@code gb_alarm}：移动侦测类报警在高频点位上每天上千条；</li>
+     *   <li>{@code gb_position_log}：车载/单兵设备按固定周期上报 GPS，
+     *       一台设备一天就有数百到上万条；</li>
+     *   <li>{@code gb_device_record}：每次「设备录像检索」都写入设备侧文件清单。</li>
+     * </ul>
+     * 跑几个月就能把库撑到几十 GB，而这些表都参与按时间倒序的分页查询 ——
+     * 表现是「报警页面越用越慢，最后打不开」，且清理只能靠 DBA 手工 DELETE。
+     *
+     * <p>保留期与报警/位置的实际用途挂钩：
+     * 报警通常按「季度复盘」看，位置轨迹更短（一周足够回溯），
+     * 设备录像索引只是缓存（设备端的录像清单随时可以重新检索），所以最短。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void purgeUnboundedTables() {
+        if (!due("unbounded-purge", 3_600_000L)) {
+            return;
+        }
+        int alarmDays = config.getInt(ConfigKeys.ALARM_RETAIN_DAYS);
+        int positionDays = config.getInt(ConfigKeys.POSITION_RETAIN_DAYS);
+        int deviceRecordDays = config.getInt(ConfigKeys.DEVICE_RECORD_RETAIN_DAYS);
+        try {
+            int alarms = alarmService.purgeExpired(alarmDays);
+            if (alarms > 0) {
+                log.info("报警清理：{} 条超过 {} 天的记录已删除", alarms, alarmDays);
+            }
+        } catch (Exception e) {
+            log.warn("报警清理失败: {}", e.getMessage());
+        }
+        try {
+            int positions = deviceService.purgePositionLogs(positionDays);
+            if (positions > 0) {
+                log.info("位置记录清理：{} 条超过 {} 天的记录已删除", positions, positionDays);
+            }
+        } catch (Exception e) {
+            log.warn("位置记录清理失败: {}", e.getMessage());
+        }
+        try {
+            int cached = deviceService.purgeDeviceRecords(deviceRecordDays);
+            if (cached > 0) {
+                log.info("设备录像索引清理：{} 条超过 {} 天的缓存已删除", cached, deviceRecordDays);
+            }
+        } catch (Exception e) {
+            log.warn("设备录像索引清理失败: {}", e.getMessage());
         }
     }
 

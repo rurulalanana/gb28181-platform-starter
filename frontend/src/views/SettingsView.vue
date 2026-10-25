@@ -1079,7 +1079,8 @@ const CFG_GROUPS = [
   { key: 'device', label: '设备接入与采集' },
   { key: 'record', label: '录像与磁盘' },
   { key: 'stream', label: '流与点播' },
-  { key: 'log', label: '日志清理' }
+  { key: 'log', label: '日志清理' },
+  { key: 'data', label: '数据保留' }
 ]
 
 /** 实际有配置项的分组（后端未来可能新增分组）。 */
@@ -1126,6 +1127,9 @@ const CFG_LABELS = {
   'tls.auto-reload': '自动 reload nginx',
   'log.oplog-retain-days': '操作日志保留天数',
   'log.status-retain-days': '状态日志保留天数',
+  'alarm.retain-days': '报警记录保留天数',
+  'position.retain-days': '移动位置保留天数',
+  'device.record-retain-days': '设备录像索引保留天数',
   'stream.idle-reap-interval-ms': '空闲流回收间隔',
   'stream.none-reader-delay-ms': '无人观看关流等待'
 }

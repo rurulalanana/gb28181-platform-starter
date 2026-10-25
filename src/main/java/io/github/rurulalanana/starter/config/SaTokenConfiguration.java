@@ -27,6 +27,8 @@ import javax.sql.DataSource;
 public class SaTokenConfiguration implements WebMvcConfigurer {
 
     private final OperationLogInterceptor operationLogInterceptor;
+    /** 写操作权限守卫：非 GET 请求默认要求写权限，管理类接口要求管理员。 */
+    private final WritePermissionInterceptor writePermissionInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -57,6 +59,10 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                 );
         // 操作日志：记录 /api/v1/** 的接口调用（排除项在拦截器内部处理）
         registry.addInterceptor(operationLogInterceptor)
+                .addPathPatterns("/api/v1/**");
+        // 写操作权限守卫：必须排在登录校验之后（依赖已登录），
+        // 排在操作日志之前（越权请求被拒绝时也要留痕，见下面的说明）。
+        registry.addInterceptor(writePermissionInterceptor)
                 .addPathPatterns("/api/v1/**");
     }
 

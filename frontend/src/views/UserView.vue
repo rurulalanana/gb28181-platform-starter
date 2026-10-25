@@ -22,8 +22,8 @@
         </el-table-column>
         <el-table-column label="角色" width="110" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.role === 'admin' ? 'primary' : 'info'" size="small" effect="light">
-              {{ row.role === 'admin' ? '管理员' : '普通用户' }}
+            <el-tag :type="row.role === 'admin' ? 'primary' : (row.role === 'operator' ? 'warning' : 'info')" size="small" effect="light">
+              {{ row.role === 'admin' ? '管理员' : (row.role === 'operator' ? '操作员' : '只读用户') }}
             </el-tag>
           </template>
         </el-table-column>
@@ -95,9 +95,13 @@
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role">
-            <el-option label="普通用户" value="user" />
-            <el-option label="管理员" value="admin" />
+            <el-option label="管理员（含系统配置与用户管理）" value="admin" />
+            <el-option label="操作员（设备控制与日常运维）" value="operator" />
+            <el-option label="只读用户（只能查看与播放）" value="user" />
           </el-select>
+          <div class="role-hint">
+            只读用户不能执行任何修改操作；操作员可控制设备与录像，但不能改系统配置、管理用户或调整安全设置。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -241,6 +245,21 @@ onMounted(load)
 </script>
 
 <style scoped>
+/*
+ * 角色说明文字。
+ *
+ * <p>必须写在界面上而不是只放 tooltip：角色是安全配置，
+ * 选错一个选项就等于开了一个越权口子。让运维在选择时直接看到
+ * 「这个角色能做什么、不能做什么」，比事后发现权限不对要便宜得多。
+ */
+.role-hint {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--ink-600);
+  white-space: normal;
+}
+
 /* 操作列：一排图标按钮，不换行 */
 .row-actions {
   display: flex;

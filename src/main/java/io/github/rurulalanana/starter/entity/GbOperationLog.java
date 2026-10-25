@@ -41,5 +41,17 @@ public class GbOperationLog implements Serializable {
     /** 操作人（登录用户名；未登录/登录前接口为空）。 */
     private String operator;
 
+    /**
+     * 请求参数（已脱敏、已截断）。
+     *
+     * <p><b>为什么必须记</b>：只记「谁在什么时候调了哪个 URL」回答不了审计真正要问的问题
+     * ——「谁把哪个通道的什么改成了什么」。改数据类操作若不留参数，
+     * 事后只能确认「动过」，无法确认「改成了多少」，也就无法追责与回滚。
+     *
+     * <p>密码、私钥、证书、token 等字段会先脱敏再写入（见
+     * {@code OperationLogInterceptor#sanitize}）；否则审计日志本身会变成凭据泄漏源。
+     */
+    private String params;
+
     private LocalDateTime createTime;
 }

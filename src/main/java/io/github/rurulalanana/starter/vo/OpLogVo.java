@@ -33,6 +33,15 @@ public class OpLogVo implements Serializable {
     /** 操作人（登录用户名）。 */
     private String operator;
 
+    /**
+     * 请求参数（已脱敏、已截断）。
+     *
+     * <p>这是审计最有价值的一列：「谁在什么时候调了哪个 URL」只能说明「动过」，
+     * 而「他把哪一项配置改成了多少」必须靠参数才能回答。
+     * 敏感字段（密码/密钥/token）在写入时已替换为 {@code ***(N字符)}。
+     */
+    private String params;
+
     /** 时间（yyyy-MM-dd HH:mm:ss）。 */
     private String createTime;
 }

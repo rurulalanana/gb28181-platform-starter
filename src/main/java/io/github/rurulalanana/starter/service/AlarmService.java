@@ -124,6 +124,29 @@ public class AlarmService {
                 .eq(GbAlarm::getAlarmId, alarmId).last("limit 1"));
     }
 
+    /**
+     * 报警过期清理。
+     *
+     * <p><b>此前这张表完全没有清理路径</b>，而移动侦测类报警在高频点位上
+     * 每天可产生上千条。跑几个月就是几十万行，而报警列表是按
+     * {@code start_time DESC} 分页查的 —— 表越大翻页越慢，
+     * 最终表现是「报警页面打不开」，且只能靠 DBA 手工 DELETE。
+     *
+     * <p>用 {@code start_time}（报警发生时间）而不是入库时间作判据：
+     * 设备补传的历史报警可能入库很晚，但那属于「旧报警」，
+     * 不该因为刚入库就永久留下。
+     *
+     * @param retainDays 保留天数；{@code <=0} 直接跳过
+     * @return 删除的行数
+     */
+    public int purgeExpired(int retainDays) {
+        if (retainDays <= 0) {
+            return 0;
+        }
+        return alarmMapper.delete(Wrappers.<GbAlarm>lambdaQuery()
+                .lt(GbAlarm::getStartTime, LocalDateTime.now().minusDays(retainDays)));
+    }
+
     /** 删除报警（支持逗号分隔的多个 ID）。 */
     @Transactional
     public int remove(String ids) {

@@ -76,6 +76,17 @@
             <span>{{ row.operator || '—' }}</span>
           </template>
         </el-table-column>
+        <!--
+          请求参数列：审计真正要看的东西。
+          「谁调了哪个 URL」只能说明动过，而「把哪一项改成了多少」必须靠参数，
+          没有这一列，前面的记录再多也回答不了追责问题。
+          敏感字段（密码/密钥/token）后端已脱敏成 ***(N字符)，这里原样展示即可。
+        -->
+        <el-table-column label="参数" min-width="260" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono params-cell">{{ row.params || '—' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="用时" width="90" align="right" sortable :sort-by="(r) => r.durationMs">
           <template #default="{ row }">
             <span class="mono">{{ formatDuration(row.durationMs) }}</span>
@@ -214,5 +225,18 @@ onMounted(load)
 /* 时间列：整行显示，避免换行撑高 */
 .time-cell {
   white-space: nowrap;
+}
+
+/*
+ * 参数列：用等宽字并允许折行。
+ * 参数是 key=value&key=value 形式，等宽字下「哪个参数对应哪个值」最容易扫读；
+ * 非等宽会让人把连在一起的字符误读成同一个词。
+ */
+.params-cell {
+  display: block;
+  max-width: 100%;
+  font-size: var(--fs-xs);
+  color: var(--ink-700);
+  word-break: break-all;
 }
 </style>

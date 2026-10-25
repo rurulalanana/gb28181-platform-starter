@@ -12,6 +12,7 @@ import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
+import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbPositionLog;
 import io.github.rurulalanana.starter.entity.GbPreset;
 import io.github.rurulalanana.starter.entity.GbStatusLog;
@@ -52,6 +53,8 @@ public class DeviceService {
     private final GbChannelMapper channelMapper;
     private final GbStatusLogMapper statusLogMapper;
     private final GbPositionLogMapper positionLogMapper;
+    /** 设备侧录像索引（仅用于过期清理；正式读写都在 RecordService）。 */
+    private final io.github.rurulalanana.starter.mapper.GbDeviceRecordMapper deviceRecordMapper;
     private final GbPresetMapper presetMapper;
 
     // ==================== 查询 ====================
@@ -889,6 +892,45 @@ public class DeviceService {
         }
         return statusLogMapper.delete(Wrappers.<GbStatusLog>lambdaQuery()
                 .lt(GbStatusLog::getCreateTime, LocalDateTime.now().minusDays(retainDays)));
+    }
+
+    /**
+     * 移动位置记录过期清理。
+     *
+     * <p>车载/单兵设备按固定周期上报 GPS，一台设备一天就有数百到上万条，
+     * 而这张表此前<b>没有任何清理路径</b>，跑几个月就能把库撑到几十 GB。
+     * 轨迹的用途是「回溯最近去过哪」，一周足够，没必要永久保留。
+     *
+     * @param retainDays 保留天数；{@code <=0} 直接跳过
+     * @return 删除的行数
+     */
+    public int purgePositionLogs(int retainDays) {
+        if (retainDays <= 0) {
+            return 0;
+        }
+        return positionLogMapper.delete(Wrappers.<GbPositionLog>lambdaQuery()
+                .lt(GbPositionLog::getCreateTime, LocalDateTime.now().minusDays(retainDays)));
+    }
+
+    /**
+     * 设备侧录像索引（{@code gb_device_record}）过期清理。
+     *
+     * <p>它只是「设备录像检索」结果的缓存 —— 真实清单在设备上，
+     * 随时可以重新检索，所以保留期可以最短。不清的后果是
+     * 每次检索都要在越来越大的表里查重。
+     *
+     * @param retainDays 保留天数；{@code <=0} 直接跳过
+     * @return 删除的行数
+     */
+    public int purgeDeviceRecords(int retainDays) {
+        if (retainDays <= 0) {
+            return 0;
+        }
+        // 注意用 updateTime 而不是 createTime：这张表没有 createTime 列，
+        // 每次重新检索会 upsert 同一批文件并刷新 updateTime，
+        // 所以「最近被检索过」的时间才是该不该清的判据。
+        return deviceRecordMapper.delete(Wrappers.<GbDeviceRecord>lambdaQuery()
+                .lt(GbDeviceRecord::getUpdateTime, LocalDateTime.now().minusDays(retainDays)));
     }
 
     /** 状态变更记录查询。 */

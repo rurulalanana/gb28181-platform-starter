@@ -130,6 +130,16 @@ public class OperationLogService {
     /** 记录一条操作日志（同步写，失败仅记 warn）。 */
     public void record(String method, String resource, String remoteAddr, String result,
                        long durationMs, String operator) {
+        record(method, resource, remoteAddr, result, durationMs, operator, null);
+    }
+
+    /**
+     * 记录一条操作日志（含请求参数）。
+     *
+     * @param params 已脱敏、已截断的请求参数；可为 {@code null}
+     */
+    public void record(String method, String resource, String remoteAddr, String result,
+                       long durationMs, String operator, String params) {
         try {
             GbOperationLog entry = new GbOperationLog();
             entry.setMethod(method);
@@ -138,6 +148,7 @@ public class OperationLogService {
             entry.setResult(result);
             entry.setDurationMs((int) Math.min(durationMs, Integer.MAX_VALUE));
             entry.setOperator(operator);
+            entry.setParams(params);
             entry.setCreateTime(LocalDateTime.now());
             logMapper.insert(entry);
         } catch (Exception e) {
@@ -209,6 +220,8 @@ public class OperationLogService {
         vo.setResult(e.getResult());
         vo.setDurationMs(e.getDurationMs());
         vo.setOperator(e.getOperator());
+        // 请求参数：审计的核心信息（改了什么），不返回出去等于没记
+        vo.setParams(e.getParams());
         vo.setCreateTime(e.getCreateTime() == null ? null : e.getCreateTime().toString().replace('T', ' '));
         return vo;
     }
