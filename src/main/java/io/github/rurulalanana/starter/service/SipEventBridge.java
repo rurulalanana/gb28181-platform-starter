@@ -327,8 +327,68 @@ public class SipEventBridge implements SipCallback {
                     handlePushedCatalog(deviceId, msg, "MESSAGE");
                 }
             }
+        } else if ("DeviceControl".equals(cmdType)) {
+            /*
+             * 上级对我们的通道下发控制（云台、预置位、拉框缩放、布撤防…）。
+             *
+             * 改造前这里没有任何分支 —— DeviceControl 直接落到方法末尾 return null，
+             * 既不给上级回 <Response>，也不把指令转给设备。表现出来的现象是：
+             * 上级点云台按钮一直转圈最后报「控制失败」，而设备完全没动。
+             *
+             * 只处理根元素为 <Control> 的请求：<Response> 形式的 DeviceControl
+             * 是设备对我们下发指令的应答，走 onManscdpResponse，不该在这里再回一次。
+             */
+            if ("Control".equals(msg.getRootName())) {
+                handleCascadeControl(event);
+            }
         }
         return null;
+    }
+
+    /**
+     * 转发上级的控制指令给设备，并<b>立即</b>应答上级。
+     *
+     * <p>识别来源的方式与目录查询一致：上级永远不注册到本级，只能拿
+     * From 头的平台编码去比对配置里的 {@code parentId}。
+     *
+     * <p>应答时机很关键：设备对云台指令普遍不做应用层应答（国标未强制），
+     * 如果等设备回 {@code <Response>} 再回上级，上级必然超时报「控制失败」，
+     * 而云台其实已经动了。所以这里的 {@code OK} 语义是「已受理」。
+     *
+     * <p>整个流程放异步线程：转发要查库（找通道所属设备、判共享集合），
+     * 而本方法运行在 jain-sip 协议栈线程上，阻塞它会拖慢整个信令栈。
+     */
+    private void handleCascadeControl(ManscdpEvent event) {
+        String fromId = event.getPeer() == null ? null : event.getPeer().getDeviceId();
+        if (fromId == null || fromId.isBlank()) {
+            log.debug("控制指令来源为空，忽略");
+            return;
+        }
+        ManscdpMessage msg = event.getManscdp();
+        int sn = msg.getSn();
+        String channelId = msg.getDeviceId();
+        if (channelId == null || channelId.isBlank()) {
+            log.warn("控制指令缺少 DeviceID，忽略: from={}", fromId);
+            return;
+        }
+        asyncExecutor.run("级联控制转发", () -> {
+            var cascade = cascadeService.findByParentId(fromId);
+            if (cascade == null) {
+                // 不认识的来源：既不转发也不应答，避免变成对外开放的控制入口
+                log.debug("控制指令来自未配置的平台 {}，忽略", fromId);
+                return;
+            }
+            if (!Boolean.TRUE.equals(cascade.getEnabled())) {
+                log.debug("级联 {} 未启用，忽略其控制指令", fromId);
+                return;
+            }
+            boolean ok = cascadeLinkService.forwardControl(
+                    cascade.getCascadeId(), channelId, msg);
+            cascadeLinkService.replyControl(cascade.getCascadeId(), sn, channelId, ok);
+            if (!ok) {
+                log.warn("级联控制未转发: 上级={} 通道={} sn={}", fromId, channelId, sn);
+            }
+        });
     }
 
     /**

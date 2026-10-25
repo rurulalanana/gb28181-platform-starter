@@ -1,8 +1,10 @@
 package io.github.rurulalanana.starter.service;
 
+import io.github.rurulalanana.gb28181.sip.Gb28181SipClient;
 import io.github.rurulalanana.gb28181.sip.Gb28181SipServer;
 import io.github.rurulalanana.gb28181.sip.cascade.CascadeRegistrar;
 import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
+import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbCascade;
 import io.github.rurulalanana.starter.entity.GbCascadeChannel;
@@ -450,9 +452,127 @@ public class CascadeLinkService {
         return items.size();
     }
 
+    // ==================== 控制（云台 / 预置位 / 拉框缩放 …） ====================
+
+    /**
+     * 转发上级下发的设备控制指令给对应设备。
+     *
+     * <p>这是级联里<b>唯一需要「回程」</b>的能力：点播是上级直接连我们的媒体端口，
+     * 目录是我们主动推，只有控制指令要走
+     * 「上级 → 本级 → 设备 → （应答）→ 本级 → 上级」。
+     *
+     * <p><b>为什么要原样转发 XML 而不是逐字段重建</b>：见
+     * {@code ManscdpBuilder#relinkControl} 的注释 —— 控制命令族十几种、
+     * {@code PTZCmd} 是不透明 8 字节串，重建必然丢语义。
+     *
+     * @param cascadeId 命中的级联配置
+     * @param channelId 上级请求里的通道编码（就是我们的通道编码）
+     * @param control   上级的原始 {@code <Control>} 消息
+     * @return 是否成功转发给设备
+     */
+    public boolean forwardControl(String cascadeId, String channelId, ManscdpMessage control) {
+        GbCascade cascade = cascadeService.find(cascadeId);
+        if (cascade == null) {
+            return false;
+        }
+        /*
+         * 授权校验，两道：
+         *   1) allowControl —— 该级联是否允许上级控制（配置开关）
+         *   2) 通道必须在共享集合里 —— 否则上级能控制它「看不见」的通道。
+         *      目录只推了共享通道，正常上级不会知道其它编码；但不校验就等于
+         *      信任对端不会构造任意编码，公网环境下不该有这种信任。
+         */
+        if (!Boolean.TRUE.equals(cascade.getAllowControl())) {
+            log.warn("级联 {} 未开启「允许控制」，拒绝上级控制通道 {}", cascadeId, channelId);
+            return false;
+        }
+        if (!isShared(cascade, channelId)) {
+            log.warn("通道 {} 未共享给级联 {}，拒绝其控制指令（避免越权操作）",
+                    channelId, cascadeId);
+            return false;
+        }
+        String deviceId = deviceService.deviceIdOfChannel(channelId);
+        if (deviceId == null || deviceId.isBlank()) {
+            log.warn("控制指令转发失败：通道 {} 找不到所属设备（可能尚未同步目录）", channelId);
+            return false;
+        }
+        Gb28181SipClient client = clientProvider.client();
+        if (client == null) {
+            log.warn("控制指令转发失败：SIP 信令服务未就绪");
+            return false;
+        }
+        try {
+            /*
+             * 必须用本级的新 SN，且 SIP 层用「设备编码」寻址（DeviceID 仍是通道编码）。
+             * 这两点与 ControlService 的直连控制完全一致，代价是不能复用它的
+             * 方法 —— 那里的入口参数是「通道编码 + 命令码」，而这里手上是
+             * 一条完整的、已被上级编码好的 Control 报文。
+             */
+            String xml = io.github.rurulalanana.gb28181.sip.manscdp.ManscdpBuilder
+                    .relinkControl(client.nextSn(), control);
+            client.sendMessage(deviceId, xml);
+            log.info("级联控制已转发: 上级={} 通道={} 设备={} 指令={}",
+                    cascade.getParentId(), channelId, deviceId, describeControl(control));
+            return true;
+        } catch (Exception e) {
+            log.warn("级联控制转发失败: 通道={} 设备={} err={}",
+                    channelId, deviceId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 应答上级的控制指令。
+     *
+     * <p>语义是「<b>已受理</b>」：设备对云台指令通常不做应用层应答，
+     * 若等设备回 {@code <Response>} 再回上级，上级必然超时并报控制失败，
+     * 而云台其实已经动了。
+     */
+    public void replyControl(String cascadeId, int sn, String channelId, boolean ok) {
+        CascadeRegistrar registrar = links.get(cascadeId);
+        if (registrar == null) {
+            /*
+             * 链路还没建（定时器每轮只处理一条链路，刚启动时可能还没轮到）。
+             * 上级既然能把指令发过来，说明网络通，这里补建一条再应答 ——
+             * 否则上级等不到 <Response>，用户看到的是「控制失败」。
+             */
+            GbCascade cascade = cascadeService.find(cascadeId);
+            if (cascade == null) {
+                return;
+            }
+            registrar = build(cascade);
+            if (registrar == null) {
+                return;
+            }
+            links.put(cascadeId, registrar);
+        }
+        registrar.replyDeviceControl(sn, channelId, ok);
+    }
+
+    /** 通道是否在级联的共享集合里（含「共享全部通道」开关）。 */
+    private boolean isShared(GbCascade cascade, String channelId) {
+        if (Boolean.TRUE.equals(cascade.getShareAllChannel())) {
+            return true;
+        }
+        return cascadeService.sharedChannelIds(cascade.getCascadeId()).contains(channelId);
+    }
+
+    /** 控制指令的可读描述，仅用于日志排查（不参与业务）。 */
+    private static String describeControl(ManscdpMessage msg) {
+        for (String name : msg.childNames()) {
+            if ("SN".equals(name) || "CmdType".equals(name) || "DeviceID".equals(name)) {
+                continue;
+            }
+            String v = msg.firstText(name);
+            if (v != null && !v.isBlank() && v.length() <= 64) {
+                return name + "=" + v;
+            }
+        }
+        return msg.getCmdType();
+    }
+
     /** 某条级联要共享给上级的通道（转成 CatalogItem）。 */
-    private List<CatalogItem> sharedCatalogItems(GbCascade cascade) {
-        List<GbCascadeChannel> shared = cascadeService.sharedChannels(cascade.getCascadeId());
+    private List<CatalogItem> sharedCatalogItems(GbCascade cascade) {        List<GbCascadeChannel> shared = cascadeService.sharedChannels(cascade.getCascadeId());
         List<CatalogItem> items = new java.util.ArrayList<>();
         boolean all = Boolean.TRUE.equals(cascade.getShareAllChannel());
         Collection<GbChannel> channels = all
