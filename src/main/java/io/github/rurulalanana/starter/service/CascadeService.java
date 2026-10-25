@@ -59,6 +59,54 @@ public class CascadeService {
                 .eq(GbCascade::getCascadeId, cascadeId).last("limit 1"));
     }
 
+    /** 全部已启用的级联配置（上行链路维护用）。 */
+    public List<GbCascade> enabledCascades() {
+        return cascadeMapper.selectList(Wrappers.<GbCascade>lambdaQuery()
+                .eq(GbCascade::getEnabled, true));
+    }
+
+    /** 按上级平台编码查询本级配置（上行方向识别「这条查询来自哪个上级」）。 */
+    public GbCascade findByParentId(String parentId) {
+        if (parentId == null || parentId.isBlank()) {
+            return null;
+        }
+        return cascadeMapper.selectOne(Wrappers.<GbCascade>lambdaQuery()
+                .eq(GbCascade::getParentId, parentId).last("limit 1"));
+    }
+
+    /**
+     * 更新在线状态与失败原因。
+     *
+     * <p><b>必须写失败原因</b>：只把 online 置 false 会让界面显示「离线」，
+     * 而运维无从判断是「上级没开机」「密码不对」还是「上级没加白名单」——
+     * 这三种原因的处置方式完全不同。{@code remark} 里带上具体原因，
+     * 现场就不用抓包了。
+     *
+     * @param online 是否在线
+     * @param error  失败原因；{@code null} 表示无错误（成功时清空）
+     */
+    public void updateOnlineState(String cascadeId, boolean online, String error) {
+        GbCascade cascade = find(cascadeId);
+        if (cascade == null) {
+            return;
+        }
+        GbCascade patch = new GbCascade();
+        patch.setId(cascade.getId());
+        patch.setOnline(online);
+        patch.setUpdateTime(LocalDateTime.now());
+        if (error != null) {
+            patch.setRemark(trimTo(error, 200));
+        } else if (online) {
+            // 注册成功时清掉上次的失败原因，否则界面会一直挂着一条过期报错
+            patch.setRemark(null);
+        }
+        cascadeMapper.updateById(patch);
+    }
+
+    private static String trimTo(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max - 1) + "…";
+    }
+
     /** 按上级平台编号查询。 */
     public GbCascade findByParent(String parentId) {
         return cascadeMapper.selectOne(Wrappers.<GbCascade>lambdaQuery()
@@ -172,15 +220,44 @@ public class CascadeService {
         if (cascade == null) {
             throw BizException.notFound("级联配置不存在：" + cascadeId);
         }
-        int count = 0;
-        for (String item : channels) {
+        /*
+         * 语义必须是「全量覆盖」，不是「追加」。
+         *
+         * <p>界面上是一个勾选框列表：用户取消勾选时，期望的是「这个通道不再共享」。
+         * 如果这里只做 upsert，取消勾选不会有任何效果 —— 而界面又会显示已保存成功，
+         * 于是「关掉了还在共享」这种越权会静默存在。级联共享的本质是
+         * 「把本级通道暴露给外部平台」，这个方向上的错误必须失败得明显。
+         *
+         * <p>所以先把本次未列出的关联全部删掉，再 upsert 本次列出的。
+         * 空列表表示「全部取消共享」，这也是一条合法操作。
+         */
+        java.util.Set<String> keep = new java.util.HashSet<>();
+        for (String item : channels == null ? java.util.Collections.<String>emptyList() : channels) {
             String channelId = parseChannelId(item);
-            if (channelId == null) {
-                continue;
+            if (channelId != null && !channelId.isBlank()) {
+                keep.add(channelId);
             }
+        }
+        List<GbCascadeChannel> existing = cascadeChannelMapper.selectList(
+                Wrappers.<GbCascadeChannel>lambdaQuery()
+                        .eq(GbCascadeChannel::getCascadeId, cascadeId));
+        int removed = 0;
+        for (GbCascadeChannel sc : existing) {
+            if (!keep.contains(sc.getChannelId())) {
+                cascadeChannelMapper.deleteById(sc.getId());
+                removed++;
+            }
+        }
+        int count = 0;
+        for (String channelId : keep) {
             upsertShared(cascade, channelId, true);
             count++;
         }
+        if (removed > 0) {
+            log.info("级联 {} 取消共享 {} 路通道", cascadeId, removed);
+        }
+        // 返回「当前共享总数」而不是「本次新增数」：界面需要显示最终结果，
+        // 返回新增数会让用户以为「我只共享了 1 路」而实际有 20 路。
         return count;
     }
 
@@ -236,55 +313,10 @@ public class CascadeService {
 
     // ==================== 目录推送 ====================
 
-    /**
-     * 推送全部共享通道目录（标准 9.5.1 的 {@code Catalog} Notify）。
-     *
-     * <p>标准要求逐个 {@code Item} 或按 {@code CatalogGroupSize} 分组推送；
-     * 这里按配置的分组大小切分。
-     */
-    public int pushCatalog(String cascadeId) {
-        GbCascade cascade = resolveCascade(cascadeId);
-        List<GbChannel> channels = collectSharedChannels(cascade);
-        if (channels.isEmpty()) {
-            log.info("级联 {} 无共享通道，跳过目录推送", cascade.getCascadeId());
-            return 0;
-        }
-        Gb28181SipClient client = requireClient();
-        int groupSize = cascade.getCatalogGroupSize() == null || cascade.getCatalogGroupSize() <= 0
-                ? 1 : cascade.getCatalogGroupSize();
-        int pushed = 0;
-        for (int i = 0; i < channels.size(); i += groupSize) {
-            List<GbChannel> group = channels.subList(i, Math.min(i + groupSize, channels.size()));
-            List<CatalogItem> items = new ArrayList<>();
-            for (GbChannel c : group) {
-                items.add(toCatalogItem(c));
-            }
-            String xml = ManscdpBuilder.catalogResponse(client.nextSn(),
-                    cascade.getLocalId() == null ? cascade.getParentId() : cascade.getLocalId(),
-                    items);
-            client.sendMessage(cascade.getParentId(), xml);
-            pushed += group.size();
-        }
-        markPushed(cascade.getCascadeId(), channels);
-        log.info("级联目录已推送: cascade={} 通道数={}", cascade.getCascadeId(), pushed);
-        return pushed;
-    }
-
-    /** 推送单条通道目录。 */
-    public void pushChannelCatalog(String cascadeId, String channelId, String event) {
-        GbCascade cascade = resolveCascade(cascadeId);
-        GbChannel channel = deviceService.findChannel(channelId);
-        if (channel == null) {
-            throw BizException.notFound("通道不存在：" + channelId);
-        }
-        Gb28181SipClient client = requireClient();
-        String xml = ManscdpBuilder.catalogResponse(client.nextSn(),
-                cascade.getLocalId() == null ? cascade.getParentId() : cascade.getLocalId(),
-                List.of(toCatalogItem(channel)));
-        client.sendMessage(cascade.getParentId(), xml);
-        log.info("级联单通道目录已推送: cascade={} channel={} event={}",
-                cascade.getCascadeId(), channelId, event);
-    }
+    // 目录推送与上行注册都在 CascadeLinkService：那里持有真正的上行链路。
+    // 早先这两个方法直接调 client.sendMessage(parentId, ...)，而该方法要先在
+    // 会话表里查上级地址 —— 上级永远不会注册到本级，于是必然抛
+    // 「设备未注册或会话已失效」。留着只会误导，已移除。
 
     /** 按上级编号解析级联配置（{@code id} 与 {@code serial} 二选一）。 */
     public GbCascade resolveCascade(String cascadeId) {
@@ -339,7 +371,7 @@ public class CascadeService {
     }
 
     /** 通道 → 目录项（级联推送时用自定义编号覆盖国标编号）。 */
-    private CatalogItem toCatalogItem(GbChannel c) {
+    public CatalogItem toCatalogItem(GbChannel c, String event) {
         String exportedId = c.getCustomId() != null && !c.getCustomId().isBlank()
                 ? c.getCustomId() : c.getChannelId();
         return CatalogItem.builder()
@@ -363,6 +395,10 @@ public class CascadeService {
                 .resolution(c.getResolution())
                 .downloadSpeed(c.getDownloadSpeed())
                 .businessGroupId(c.getBusinessGroupId())
+                // 事件类型：ON 首次全量、UPDATE 变更、DEL 删除。
+                // 上级据此决定是新增/更新还是移除该通道 —— 不写会导致
+                // 上级把每条都当成新增，删掉的通道永远留在它的目录里
+                .event(event == null || event.isBlank() ? "ON" : event)
                 .build();
     }
 

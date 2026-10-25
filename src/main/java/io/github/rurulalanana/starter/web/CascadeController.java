@@ -11,6 +11,7 @@ import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbCascade;
 import io.github.rurulalanana.starter.entity.GbChannel;
+import io.github.rurulalanana.starter.service.CascadeLinkService;
 import io.github.rurulalanana.starter.service.CascadeService;
 import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.vo.CascadeChannelListVo;
@@ -59,6 +60,8 @@ import java.util.List;
 public class CascadeController {
 
     private final CascadeService cascadeService;
+    /** 上行链路：注册/保活/目录推送的真正执行者。 */
+    private final CascadeLinkService cascadeLinkService;
     private final DeviceService deviceService;
     private final Gb28181Properties props;
 
@@ -297,6 +300,20 @@ public class CascadeController {
         cascade.setControlPriority(req.getControlPriority());
         cascade.setEnabled(req.getEnable());
         String cascadeId = cascadeService.save(cascade);
+        /*
+         * 保存后立即重建链路。
+         *
+         * <p>地址、端口、密码、本级编号任何一项改了，旧链路都是错的，
+         * 而它仍在按旧配置发心跳 —— 表现是「界面上改对了但还是离线」，
+         * 运维会反复重保存。这里直接重启一遍，让配置改动立刻反映到信令上。
+         *
+         * <p>只重建、不报错：上级不可达时保存仍然应该成功（配置是对的），
+         * 失败原因会写进 remark 供界面展示。
+         */
+        cascadeLinkService.restart(cascadeId);
+        // 上级编码可能变了（新建或改地址），必须刷新判定表，
+        // 否则它点播时会被当成普通设备 INVITE，永远拿不到流
+        cascadeLinkService.refreshParentRegistry();
         return ApiResponse.ok(IdVo.of(cascadeId));
     }
 
@@ -305,7 +322,18 @@ public class CascadeController {
     public ApiResponse<Void> setEnable(@RequestParam String id,
                                        @RequestParam(defaultValue = "false") Boolean enable) {
         StpUtil.checkLogin();
-        cascadeService.setEnable(id, Boolean.TRUE.equals(enable));
+        boolean on = Boolean.TRUE.equals(enable);
+        cascadeService.setEnable(id, on);
+        // 启用 → 立即注册；停用 → 向上级注销。
+        // 停用时不发 Expires:0，上级会一直认为本级在线直到注册有效期自然过期，
+        // 期间它点播本级通道会全部失败，且上级侧看不到任何原因。
+        if (on) {
+            cascadeLinkService.enable(id);
+        } else {
+            cascadeLinkService.disable(id);
+        }
+        // 只登记已启用的上级：停用的级联不应能点播本级通道
+        cascadeLinkService.refreshParentRegistry();
         return ApiResponse.ok();
     }
 
@@ -321,12 +349,19 @@ public class CascadeController {
         return ApiResponse.ok();
     }
 
-    /** 保存共享通道。 */
+    /**
+     * 保存共享通道（<b>全量覆盖</b>）。
+     *
+     * <p>传空数组表示取消全部共享 —— 所以 {@code channels[]} 必须是
+     * {@code required = false}：前端「清空后保存」时不会带这个参数，
+     * 若声明为必填，这个合法操作会被 400 挡住。
+     */
     @PostMapping("/savechannels")
-    public ApiResponse<DeletedVo> saveChannels(@RequestParam String id,
-                                               @RequestParam("channels[]") List<String> channels) {
+    public ApiResponse<DeletedVo> saveChannels(
+            @RequestParam String id,
+            @RequestParam(value = "channels[]", required = false) List<String> channels) {
         StpUtil.checkLogin();
-        int count = cascadeService.saveChannels(id, channels);
+        int count = cascadeService.saveChannels(id, channels == null ? List.of() : channels);
         return ApiResponse.ok(DeletedVo.ofSaved(count));
     }
 
@@ -361,7 +396,7 @@ public class CascadeController {
         if (key == null || key.isBlank()) {
             throw BizException.badRequest("需提供 id 或 serial");
         }
-        int pushed = cascadeService.pushCatalog(key);
+        int pushed = cascadeLinkService.pushCatalog(key);
         return ApiResponse.ok(DeletedVo.ofPushed(pushed));
     }
 
@@ -377,7 +412,7 @@ public class CascadeController {
         if (key == null || key.isBlank()) {
             throw BizException.badRequest("需提供 id 或 serial");
         }
-        cascadeService.pushChannelCatalog(key, code, event);
+        cascadeLinkService.pushChannelCatalog(key, code, event);
         return ApiResponse.ok();
     }
 
@@ -385,7 +420,11 @@ public class CascadeController {
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String id) {
         StpUtil.checkLogin();
+        // 先注销再删：先删就查不到上级地址，Expires:0 发不出去，
+        // 上级会一直认为本级在线直到自然过期
+        cascadeLinkService.forget(id);
         cascadeService.remove(id);
+        cascadeLinkService.refreshParentRegistry();
         return ApiResponse.ok();
     }
 

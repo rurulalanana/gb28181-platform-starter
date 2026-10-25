@@ -39,6 +39,8 @@ public class SipEventBridge implements SipCallback {
     private final DeviceService deviceService;
     private final AlarmService alarmService;
     private final CascadeService cascadeService;
+    /** 上行链路：回复上级的目录查询。 */
+    private final CascadeLinkService cascadeLinkService;
     private final DeviceCollectService collectService;
     private final SipRegistryHealer registryHealer;
     private final PlatformAsyncExecutor asyncExecutor;
@@ -305,19 +307,61 @@ public class SipEventBridge implements SipCallback {
             // 心跳已由 gb28181-sip 自动刷新注册表，此处无需重复处理
             return null;
         } else if ("Catalog".equals(cmdType)) {
-            // 设备/下级平台主动上报目录变更（MESSAGE + Notify/Catalog）。
-            //
-            // 【关键】这与 Query 应答的语义完全不同：
-            // - Response 是「对查询的完整答复」，收齐后可当全量快照
-            // - Notify 是「目录发生变化的增量通知」，只包含变化的那几条
-            // 若把增量当全量，removeChannelsNotIn 会把本次没提到的通道全部误删。
-            // 因此恒以 fullSnapshot=false 落库，只做 upsert，绝不删旧通道。
-            String deviceId = msg.getDeviceId();
-            if (deviceId != null && !deviceId.isBlank()) {
-                handlePushedCatalog(deviceId, msg, "MESSAGE");
+            /*
+             * 这里有两种语义完全不同的 MANSCDP，必须按 rootName 分流：
+             *
+             *   1) <Query>  —— 上级平台来查我们的目录。**必须应答**，
+             *      否则上级的目录页永远空白（它按 SN 等应答，等不到就超时）。
+             *      改造前这里没区分，Query 被当成「目录推送」去解析
+             *      （Items 当然为空），结果一条应答都不发 ——
+             *      这是「级联加进来了但上级看不到通道」的直接原因。
+             *
+             *   2) <Notify>/<Response> —— 设备/下级平台主动推送目录变更，
+             *      只包含变化的条目，必须按增量 upsert，绝不能当全量快照。
+             */
+            if ("Query".equals(msg.getRootName())) {
+                handleCatalogQuery(event);
+            } else {
+                String deviceId = msg.getDeviceId();
+                if (deviceId != null && !deviceId.isBlank()) {
+                    handlePushedCatalog(deviceId, msg, "MESSAGE");
+                }
             }
         }
         return null;
+    }
+
+    /**
+     * 应答上级平台的目录查询。
+     *
+     * <p>靠 <b>From 头里的平台编码</b>识别来源：上级永远不注册到本级，
+     * 所以注册表里查不到它，只能拿「配置里的 parentId」去比对。
+     * 这一步不能省 —— 不校验来源就等于对任意 IP 开放本级通道清单，
+     * 是一个不该有的信息泄漏。
+     *
+     * <p>应答要放到异步线程：构建目录项可能涉及查库（共享通道列表），
+     * 而本方法运行在 jain-sip 协议栈线程上，阻塞它会拖慢整个信令栈。
+     */
+    private void handleCatalogQuery(ManscdpEvent event) {
+        String fromId = event.getPeer() == null ? null : event.getPeer().getDeviceId();
+        int sn = event.getManscdp().getSn();
+        String targetId = event.getManscdp().getDeviceId();
+        if (fromId == null || fromId.isBlank()) {
+            log.debug("目录查询来源为空，忽略");
+            return;
+        }
+        asyncExecutor.run("级联目录查询应答", () -> {
+            var cascade = cascadeService.findByParentId(fromId);
+            if (cascade == null) {
+                log.debug("目录查询来自未配置的平台 {}，不应答（避免信息泄漏）", fromId);
+                return;
+            }
+            if (!Boolean.TRUE.equals(cascade.getEnabled())) {
+                log.debug("级联 {} 未启用，忽略其目录查询", fromId);
+                return;
+            }
+            cascadeLinkService.replyCatalogQuery(cascade.getCascadeId(), sn, targetId);
+        });
     }
 
     // ==================== 点播 / 回放 ====================
@@ -335,14 +379,55 @@ public class SipEventBridge implements SipCallback {
 
     // ==================== 级联 ====================
 
+    /**
+     * <b>下级平台</b>注册到本级。
+     *
+     * <p><b>这里绝不能去改 {@code gb_cascade.online}</b>。方向完全不同：
+     * <ul>
+     *   <li>本回调 = 有平台注册<b>进来</b>（它是我们的下级）；</li>
+     *   <li>{@code gb_cascade.online} = 我们注册<b>出去</b>是否成功（那是我们的上级）。</li>
+     * </ul>
+     * 改造前这里调 {@code setOnline(platformId, true)}，按 {@code parentId} 反查配置 ——
+     * 于是一个毫不相干的下级注册进来，只要我们恰好配了同编码的上级，
+     * 界面上就会显示「在线」，而实际上我们到上级的注册可能一直在失败。
+     * 这种<b>虚假在线</b>比不显示更糟：运维会据此判断「级联没问题」，
+     * 然后去别处找原因。
+     *
+     * <p>上行在线状态由 {@link CascadeLinkService} 根据注册结果自己维护。
+     */
     @Override
     public void onCascadePlatformRegister(CascadeEvents.PlatformRegistered event) {
-        asyncExecutor.run("上级平台上线", () -> cascadeService.setOnline(event.getPlatformId(), true));
+        // 只记日志：下级注册进来是「入站」事件，与上行注册状态无关
+        log.info("下级平台注册进来: {} ({})", event.getPlatformId(), event.getAddress());
     }
 
+    /** 下级平台注销（同上：不影响上行注册状态）。 */
     @Override
     public void onCascadePlatformUnregister(CascadeEvents.PlatformUnregistered event) {
-        asyncExecutor.run("上级平台离线", () -> cascadeService.setOnline(event.getPlatformId(), false));
+        log.info("下级平台注销: {}（{}）", event.getPlatformId(), event.getReason());
+    }
+
+    /**
+     * 上级平台点播本级通道（级联上行）：启动本地流并把 RTP 推给上级。
+     *
+     * <p><b>必须异步</b>：启动流要邀请设备、等它推 PS 上来（实测 1~5 秒），
+     * 而本回调运行在 jain-sip 协议栈线程上 —— 在那里等几秒会把整个信令栈拖死，
+     * 表现是所有设备的心跳都超时。
+     */
+    @Override
+    public void onUplinkCascadePlay(CascadeEvents.UplinkPlay event) {
+        if (event == null) {
+            return;
+        }
+        asyncExecutor.run("级联上行推流", () -> {
+            boolean ok = cascadeLinkService.pushToUplink(
+                    event.getChannelId(), event.getDstIp(), event.getDstPort(), event.getSsrc());
+            if (!ok) {
+                log.warn("级联上行推流未完成: 上级={} 通道={} 目标={}:{}",
+                        event.getPlatformId(), event.getChannelId(),
+                        event.getDstIp(), event.getDstPort());
+            }
+        });
     }
 
     // ==================== 内部：XML 取值 ====================

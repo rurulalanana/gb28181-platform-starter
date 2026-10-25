@@ -4,6 +4,7 @@ import io.github.rurulalanana.gb28181.sip.security.CredentialProvider;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.MediaServerProperties;
 import io.github.rurulalanana.starter.service.AccessControlService;
+import io.github.rurulalanana.starter.service.CascadeParentRegistry;
 import io.github.rurulalanana.starter.service.ConfigKeys;
 import io.github.rurulalanana.starter.service.RuntimeConfigService;
 import lombok.RequiredArgsConstructor;
@@ -26,7 +27,8 @@ public class Gb28181PlatformConfiguration {
     @Bean(destroyMethod = "stop")
     public Gb28181MediaPlatform gb28181MediaPlatform(Gb28181Properties props,
                                                      ObjectProvider<RuntimeConfigService> configProvider,
-                                                     ObjectProvider<AccessControlService> aclProvider) {
+                                                     ObjectProvider<AccessControlService> aclProvider,
+                                                     ObjectProvider<CascadeParentRegistry> cascadeParentProvider) {
         MediaServerProperties.MediaServerPropertiesBuilder builder = MediaServerProperties.builder()
                 .platformId(props.getPlatformId())
                 .sipHost(props.getSipHost())
@@ -52,6 +54,14 @@ public class Gb28181PlatformConfiguration {
                  * 完全一致，不会因为配置服务没就绪而把所有设备挡在外面。
                  */
                 .accessControl(aclProvider.getIfAvailable())
+                /*
+                 * 上级平台判定器：让媒体层能分辨「这个 INVITE 来自我的上级」。
+                 *
+                 * 不注入时级联上行点播就退化成「开接收会话等设备推流」——
+                 * 上级永远等不到数据。判据来自配置表，但用无依赖的内存集合承载，
+                 * 避开「媒体平台 ↔ 链路服务」的 bean 循环。
+                 */
+                .uplinkPlatformChecker(lazyUplinkChecker(cascadeParentProvider))
                 .sipTransports(props.getSipTransports())
                 .httpPort(props.getHttpPort())
                 .rtmpPort(props.getRtmpPort())
@@ -135,5 +145,24 @@ public class Gb28181PlatformConfiguration {
         }
         String password = cfg.getString(ConfigKeys.SIP_PASSWORD);
         return password == null ? "" : password;
+    }
+
+    /**
+     * 上级平台判定器（延迟取 bean）。
+     *
+     * <p>传的是 lambda 而不是当时取到的实例：媒体平台 bean 构造得很早，
+     * 那时 {@code CascadeParentRegistry} 可能还没被创建。
+     * 每次 INVITE 才去 {@code getIfAvailable()}，拿不到就返回 {@code false}
+     * （当作普通设备 INVITE 处理，与本功能不存在时一致）。
+     */
+    private static java.util.function.Predicate<String> lazyUplinkChecker(
+            ObjectProvider<CascadeParentRegistry> provider) {
+        return platformId -> {
+            if (platformId == null || platformId.isEmpty()) {
+                return false;
+            }
+            CascadeParentRegistry registry = provider.getIfAvailable();
+            return registry != null && registry.contains(platformId);
+        };
     }
 }

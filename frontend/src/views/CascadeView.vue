@@ -55,9 +55,14 @@
             </el-icon>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" align="center" fixed="right">
+        <el-table-column label="操作" width="186" align="center" fixed="right">
           <template #default="{ row }">
-            <el-tooltip content="推送目录">
+            <el-tooltip content="选择共享通道">
+              <el-button link type="primary" @click="openChannels(row)">
+                <el-icon><Connection /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="推送目录到上级">
               <el-button link type="primary" @click="pushCatalog(row)">
                 <el-icon><Refresh /></el-icon>
               </el-button>
@@ -187,13 +192,89 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- ---------- 选择共享通道 ---------- -->
+    <!--
+      为什么要有这个弹窗：
+      没有它的时候，级联只有一个「共享全部通道」开关 —— 要么全共享，要么一个都不共享。
+      而现场最常见的需求恰恰是「只给上级看这几路」：既满足上级调阅要求，
+      又不把无关通道（比如内部区域、宿舍楼）暴露出去。
+      参考站也有独立的「选择通道」入口，这是级联功能可用性的最低要求。
+    -->
+    <el-dialog
+      v-model="channelDialog"
+      :title="`选择共享通道 · ${channelTarget?.name || ''}`"
+      width="760px"
+      append-to-body
+      @closed="channelRows = []"
+    >
+      <div class="ch-head">
+        <el-input
+          v-model="channelKeyword"
+          placeholder="按通道名称或编码搜索"
+          clearable
+          style="width: 260px"
+          :prefix-icon="Search"
+        />
+        <div class="ch-head-right">
+          <span class="ch-count">已选 {{ channelSelected.size }} 路</span>
+          <el-button size="small" @click="selectAllChannels">全选当前结果</el-button>
+          <el-button size="small" @click="channelSelected.clear()">清空</el-button>
+        </div>
+      </div>
+
+      <el-alert
+        v-if="channelTarget?.shareAllChannel"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="ch-alert"
+        title="当前已开启「共享全部通道」"
+        description="开启时上级能看到本级所有通道，本页的选择不生效。若要只共享部分通道，请先在编辑里关闭「共享全部通道」。"
+      />
+
+      <el-table
+        ref="channelTableRef"
+        :data="filteredChannels"
+        size="small"
+        height="360"
+        row-key="id"
+        @selection-change="onChannelSelect"
+      >
+        <el-table-column type="selection" width="46" reserve-selection />
+        <el-table-column label="通道名称" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.name || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="通道编码" width="180">
+          <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
+        </el-table-column>
+        <el-table-column label="设备编码" width="180">
+          <template #default="{ row }"><span class="mono">{{ row.deviceId }}</span></template>
+        </el-table-column>
+        <el-table-column label="在线" width="76" align="center">
+          <template #default="{ row }">
+            <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
+              {{ row.online ? '在线' : '离线' }}
+            </span>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <template #footer>
+        <el-button @click="channelDialog = false">取消</el-button>
+        <el-button type="primary" :loading="channelSaving" @click="saveChannels">
+          保存（{{ channelSelected.size }} 路）
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { cascadeApi } from '@/api'
+import { Connection, Search } from '@element-plus/icons-vue'
+import { cascadeApi, deviceApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
@@ -299,10 +380,94 @@ async function toggleEnable(row, value) {
 
 async function pushCatalog(row) {
   try {
-    await cascadeApi.pushCatalog({ id: row.id })
-    ElMessage.success('已推送目录')
+    const n = await cascadeApi.pushCatalog({ id: row.id })
+    const count = typeof n === 'number' ? n : (n?.pushed ?? 0)
+    ElMessage.success(`已推送 ${count} 路通道目录到上级`)
   } catch (e) {
+    // 后端会带出具体原因（未注册到上级 / 无共享通道 / 上级不可达）
     ElMessage.error(e.message || '推送失败')
+  }
+}
+
+/* ==================== 共享通道 ==================== */
+
+const channelDialog = ref(false)
+const channelSaving = ref(false)
+const channelTarget = ref(null)
+const channelRows = ref([])
+const channelKeyword = ref('')
+const channelSelected = ref(new Set())
+const channelTableRef = ref(null)
+
+/** 关键字过滤：名称 + 通道编码 + 设备编码，三者都能搜。 */
+const filteredChannels = computed(() => {
+  const k = channelKeyword.value.trim().toLowerCase()
+  if (!k) return channelRows.value
+  return channelRows.value.filter((c) =>
+    `${c.name || ''} ${c.id || ''} ${c.deviceId || ''}`.toLowerCase().includes(k)
+  )
+})
+
+async function openChannels(row) {
+  channelTarget.value = row
+  channelDialog.value = true
+  channelSelected.value = new Set()
+  try {
+    // 同时取「全部通道」与「已共享」两份：前者作为可选项，后者回填勾选状态。
+    // 分两次请求比让后端拼一个混合结构更清楚，且已共享列表很小。
+    const [all, shared] = await Promise.all([
+      deviceApi.channelList({ start: 0, limit: 0 }),
+      cascadeApi.channelList({ id: row.id, related: true, start: 0, limit: 0 })
+    ])
+    channelRows.value = all?.channelList || []
+    const ids = (shared?.channelList || []).map((c) => c.id)
+    channelSelected.value = new Set(ids)
+    // 等表格渲染完再回填勾选，否则 toggleRowSelection 找不到行
+    requestAnimationFrame(() => {
+      const table = channelTableRef.value
+      if (!table) return
+      channelRows.value.forEach((c) => {
+        if (channelSelected.value.has(c.id)) table.toggleRowSelection(c, true)
+      })
+    })
+  } catch (e) {
+    ElMessage.error(e.message || '加载通道失败')
+  }
+}
+
+function onChannelSelect(rows) {
+  channelSelected.value = new Set(rows.map((r) => r.id))
+}
+
+function selectAllChannels() {
+  const table = channelTableRef.value
+  if (!table) return
+  filteredChannels.value.forEach((c) => table.toggleRowSelection(c, true))
+}
+
+async function saveChannels() {
+  if (!channelTarget.value) return
+  channelSaving.value = true
+  try {
+    const ids = [...channelSelected.value]
+    if (ids.length === 0) {
+      ElMessage.warning('未选择任何通道，上级将看不到本级的通道')
+    }
+    /*
+     * 后端契约是全量覆盖（savechannels 传 channels[]），
+     * 所以「取消勾选」也能生效 —— 不需要先删再存。
+     */
+    await cascadeApi.saveChannels({
+      id: channelTarget.value.id,
+      'channels[]': ids
+    })
+    ElMessage.success(`已保存 ${ids.length} 路共享通道，可点「推送目录」通知上级`)
+    channelDialog.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    channelSaving.value = false
   }
 }
 
@@ -407,5 +572,38 @@ onMounted(load)
 
 :deep(.cascade-dialog .el-form-item:last-child) {
   margin-bottom: 0;
+}
+
+/* ==================== 共享通道选择 ==================== */
+
+/*
+ * 顶部工具条：搜索在左、批量操作在右。
+ * 通道数量可能上百，不提供搜索就只能一屏屏翻 —— 而现场往往只记得通道名。
+ */
+.ch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.ch-head-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* 已选数量：等宽数字，勾选时不会因位数变化而左右抖动 */
+.ch-count {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-600, var(--brand-500));
+}
+
+.ch-alert {
+  margin-bottom: var(--sp-3);
 }
 </style>

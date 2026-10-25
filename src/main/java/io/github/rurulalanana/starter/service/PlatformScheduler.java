@@ -34,6 +34,8 @@ public class PlatformScheduler {
 
     private final DeviceService deviceService;
     private final AlarmService alarmService;
+    /** 级联上行链路：注册 / 保活 / 重注册。 */
+    private final CascadeLinkService cascadeLinkService;
     private final OperationLogService operationLogService;
     private final SystemMetricsService systemMetricsService;
     private final RecordService recordService;
@@ -203,6 +205,27 @@ public class PlatformScheduler {
             }
         } catch (Exception e) {
             log.warn("操作日志清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 级联上行链路维护（每个 tick 都跑，内部自己限流）。
+     *
+     * <p><b>为什么不做成 {@code due(...)} 限流</b>：这条链路的状态机是
+     * 「未注册 → 注册」「快过期 → 重注册」「到点 → 心跳」，
+     * 三种状态的判定都依赖当前时刻与上次成功时间，用一个粗粒度的
+     * 「每 N 秒跑一次」会把重注册窗口推后，导致上级眼里出现离线空档。
+     *
+     * <p>{@code CascadeLinkService#tick()} 本身每次只处理一条链路：
+     * 注册是同步阻塞（最长 5 秒等响应），十条不可达的上级会把调度线程
+     * 占住 50 秒。分摊到多个 tick 不影响实时性（tick 间隔 5 秒）。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void maintainCascadeLinks() {
+        try {
+            cascadeLinkService.tick();
+        } catch (Exception e) {
+            log.warn("级联链路维护失败: {}", e.getMessage());
         }
     }
 

@@ -27,4 +27,15 @@ public class Gb28181SipClientProvider {
     public String platformId() {
         return platform.sipServer() == null ? null : platform.sipServer().getConfig().getServerId();
     }
+
+    /**
+     * 媒体平台本体。
+     *
+     * <p>级联上行链路需要 {@code Gb28181SipServer} 本体（而不只是 client）：
+     * 主动注册要直接用 {@code sipProvider().getNewClientTransaction()}，
+     * 而 client 只暴露了「已封装好的业务方法」。
+     */
+    public Gb28181MediaPlatform platform() {
+        return platform;
+    }
 }
