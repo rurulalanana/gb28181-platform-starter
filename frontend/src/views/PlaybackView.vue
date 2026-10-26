@@ -90,9 +90,13 @@
         点色块直接回放，点空白处提示该时刻无录像 —— 比先看列表再找
         「哪一段覆盖 14:30」直观得多，也顺手解决「录像在哪儿」的定位问题。
 
-        <p>没有做拖拽框选：设备回放是「按段」点播的，跨段的连续回放要
-        平台侧负责排队换流，属于另一个量级的工作。当前点哪段播哪段，
-        语义清晰、不会有「拖动后什么都不发生」的空承诺。
+        <p>没有做拖拽「连续回放」：设备回放是按段点播的，跨段连续播放要
+        平台侧排队换流，属于另一个量级的工作。
+
+        <p><b>但拖拽可以用来框选下载区间</b> —— 而且这是当前唯一既能快、
+        又不损失画质的手段：无损下载的耗时由内容时长决定（设备按 1 倍速推流），
+        要快就只能少下。大部分时候用户真正需要的只是几小时里的一小段。
+        拖选距离小于 {@link DRAG_THRESHOLD_PX} 像素仍当作点击（继续回放）。
       -->
       <div v-if="viewMode === 'timeline'" v-loading="searching" class="timeline">
         <div class="timeline-scale">
@@ -105,9 +109,11 @@
         </div>
         <div
           class="timeline-track"
+          :class="{ 'is-dragging': drag.active }"
           @click="onTrackClick"
           @mousemove="onTrackMove"
-          @mouseleave="hoverAt = null"
+          @mouseleave="onTrackLeave"
+          @mousedown="onDragStart"
         >
           <div
             v-for="s in timelineSegments"
@@ -116,8 +122,15 @@
             :class="`seg-${s.type}`"
             :style="{ left: s.left + '%', width: s.width + '%' }"
             :title="segTitle(s)"
-            @click.stop="play(s.row)"
           />
+          <!-- 框选区：下载时只取这一截，选区外变暗，一目了然 -->
+          <div
+            v-if="dragRect"
+            class="timeline-sel"
+            :style="{ left: dragRect.left + '%', width: dragRect.width + '%' }"
+          >
+            <span class="sel-label">{{ dragRect.label }}</span>
+          </div>
           <!--
             悬停提示：刻度只有每 2 小时一根，指针落在哪仍需看具体时刻。
             跟鼠标走而不是固定在轨道底部 —— 固定位置会和刻度条挤在一起，
@@ -150,6 +163,31 @@
             共 {{ timelineSegments.length }} 段 · 当日累计 {{ fmtDuration(timelineTotalSeconds) }}
           </span>
         </div>
+
+        <!--
+          框选后的操作条。
+
+          不直接「框完就下载」：拖拽很容易误触（尤其想点某段播放时手抖），
+          而下载一旦开始就要占一路回放会话。让它停在这里等一次明确的点击，
+          同时把「多长、要等多久」写在同一行，用户能一眼判断值不值得下。
+        -->
+        <div v-if="selection" class="tl-selbar">
+          <el-icon class="selbar-icon"><Scissor /></el-icon>
+          <span class="selbar-range mono">
+            {{ selection.startText }} ~ {{ selection.endText }}
+          </span>
+          <span class="selbar-dur">
+            {{ fmtDuration(selection.seconds) }} · 下载约需 {{ fmtDuration(selection.seconds) }}
+          </span>
+          <span class="tl-spacer" />
+          <el-button size="small" type="primary" @click="downloadSelection">
+            <el-icon><Download /></el-icon> 下载这一区间
+          </el-button>
+          <el-button size="small" text @click="clearSelection">取消</el-button>
+        </div>
+        <p v-else-if="timelineSegments.length" class="tl-draghint">
+          在时间轴上按住拖动可框选区间 —— 只下载需要的那一段，画质不受影响
+        </p>
       </div>
 
       <el-table
@@ -269,7 +307,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CircleCheck, Download, Loading, VideoPlay } from '@element-plus/icons-vue'
+import { CircleCheck, Download, Loading, Scissor, VideoPlay } from '@element-plus/icons-vue'
 import { useRoute } from 'vue-router'
 import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls } from '@/player/resolvePlayUrls'
@@ -454,28 +492,6 @@ function segTitle(s) {
 }
 
 /**
- * 点击时间轴：落在某段录像里就播它，落在空白处给个提示。
- *
- * <p>用 {@code currentTarget} 而不是 {@code target} 取几何信息 ——
- * target 可能是被点到的色块（加了 {@code .stop}，走不到这里）或
- * 空态文字节点，只有绑定的轨道元素宽度才是真实的 24 小时尺度。
- */
-function onTrackClick(ev) {
-  const base = dayStartMs.value
-  if (base === null) return
-  const point = trackPoint(ev)
-  if (!point) return
-  const hit = timelineSegments.value.find(
-    (s) => point.at >= s.clippedStartMs && point.at < s.clippedEndMs
-  )
-  if (!hit) {
-    ElMessage.info('该时刻没有录像')
-    return
-  }
-  play(hit.row)
-}
-
-/**
  * 把鼠标位置换算成「当天第几毫秒 + 百分比」。
  *
  * <p>点击与悬停共用同一套换算，否则两处各自算一遍迟早会算出不同的值 ——
@@ -491,7 +507,7 @@ function trackPoint(ev) {
 }
 
 /**
- * 时间轴悬停：显示鼠标所指的时刻，命中录像段时附带该段的起止与时长。
+ * 悬停状态：显示鼠标所指的时刻，命中录像段时附带该段的起止与时长。
  *
  * <p>只更新一个响应式对象、不做任何查询，因此可以跟着 mousemove 直接跑。
  * {@code percent} 限制在 [0.5, 99.5] 内给 CSS 用于防溢出（tip 有最小宽度，
@@ -499,9 +515,71 @@ function trackPoint(ev) {
  */
 const hoverAt = ref(null)
 
+/**
+ * 时间轴拖拽框选。
+ *
+ * <h3>为什么用拖拽来「选下载区间」</h3>
+ * 无损下载的耗时由内容时长决定 —— 设备是按 1 倍速推流的，2 小时的录像
+ * 就得等 2 小时，这是物理上限，任何平台都改不了。想更快只有两条路：
+ * <ul>
+ *   <li>让设备只推关键帧（现有「快进」模式）—— 快，但画质没了；</li>
+ *   <li><b>少下一部分</b> —— 快得更多，且画质完全不受影响。</li>
+ * </ul>
+ * 用户真正需要的往往只是几小时里那几分钟（事故、异常），
+ * 所以「框选区间」比任何倍速都更贴近实际需求。
+ *
+ * <h3>为什么要区分点击与拖拽</h3>
+ * 「点色块回放」是这一页的主要操作，不能被拖拽抢走。用位移阈值区分：
+ * 按下到抬起位移小于 {@link DRAG_THRESHOLD_PX} 视为点击，照常回放。
+ */
+const DRAG_THRESHOLD_PX = 4
+
+const drag = reactive({ active: false, startX: 0, startAt: 0, moved: false })
+
+/** 框选结果；`null` 表示没有选区。 */
+const selection = ref(null)
+
+/**
+ * 框选区的渲染矩形（百分比 + 标签）。
+ *
+ * <p>宽度下限 0.6%：选 30 秒在 1000px 轨道上不足 1px，看不见自己选了什么。
+ */
+const dragRect = computed(() => {
+  const s = selection.value
+  const base = dayStartMs.value
+  if (!s || base === null) return null
+  const left = ((s.startMs - base) / DAY_MS) * 100
+  const width = ((s.endMs - s.startMs) / DAY_MS) * 100
+  return {
+    left: Math.max(0, left),
+    width: Math.max(width, 0.6),
+    label: fmtDuration(s.seconds)
+  }
+})
+
+function onDragStart(ev) {
+  const point = trackPoint(ev)
+  if (!point) return
+  drag.active = true
+  drag.moved = false
+  drag.startX = ev.clientX
+  drag.startAt = point.at
+  selection.value = null
+}
+
 function onTrackMove(ev) {
   const point = trackPoint(ev)
   if (!point) {
+    hoverAt.value = null
+    return
+  }
+  if (drag.active) {
+    // 位移不足阈值：还没决定是点击还是拖拽，先不画选区
+    if (!drag.moved && Math.abs(ev.clientX - drag.startX) < DRAG_THRESHOLD_PX) {
+      return
+    }
+    drag.moved = true
+    selection.value = buildSelection(drag.startAt, point.at)
     hoverAt.value = null
     return
   }
@@ -516,6 +594,92 @@ function onTrackMove(ev) {
       ? `${fmtClock(hit.startMs)}–${fmtClock(hit.endMs)} · ${fmtDuration((hit.endMs - hit.startMs) / 1000)}`
       : ''
   }
+}
+
+/**
+ * 把拖拽的两个端点整理成选区。
+ *
+ * <p>端点可能左拖也可能右拖，先归一化再交给下游；不足 1 秒的选区直接丢弃，
+ * 避免用户手抖点出「0 秒区间」后点下载拿到空文件。
+ */
+function buildSelection(atA, atB) {
+  const a = Math.min(atA, atB)
+  const b = Math.max(atA, atB)
+  const seconds = Math.round((b - a) / 1000)
+  if (seconds < 1) return null
+  return {
+    startMs: a,
+    endMs: b,
+    seconds,
+    startText: fmtClock(a),
+    endText: fmtClock(b)
+  }
+}
+
+function onTrackLeave() {
+  hoverAt.value = null
+  // 鼠标移出轨道时结束拖拽：否则在轨道外松手收不到 mouseup，选区会一直挂着
+  drag.active = false
+}
+
+/**
+ * 时间轴点击：有选区时先清选区（用户的意图是回到「点播」），
+ * 否则播命中时刻的那一段。
+ *
+ * <p>拖拽结束后浏览器还会补一个 click，用 {@code drag.moved} 把它吞掉 ——
+ * 否则松手瞬间会在选区之外又开始播放一段录像，两个动作打架。
+ */
+function onTrackClick(ev) {
+  if (drag.moved) {
+    drag.moved = false
+    return
+  }
+  if (selection.value) {
+    clearSelection()
+    return
+  }
+  const base = dayStartMs.value
+  if (base === null) return
+  const point = trackPoint(ev)
+  if (!point) return
+  const hit = timelineSegments.value.find(
+    (s) => point.at >= s.clippedStartMs && point.at < s.clippedEndMs
+  )
+  if (!hit) {
+    ElMessage.info('该时刻没有录像')
+    return
+  }
+  play(hit.row)
+}
+
+function clearSelection() {
+  selection.value = null
+  drag.active = false
+  drag.moved = false
+}
+
+/**
+ * 下载框选的区间。
+ *
+ * <p>与「整段下载」走同一套后端流程，只是把时长换成选区秒数：
+ * {@code playback/start} 的 t= 用选区起止，{@code download/start} 的
+ * duration 用选区长度，收尾时按 wall clock 卡住，正好录完这一截。
+ *
+ * <p><b>区间下载必须快进模式之外保持 1 倍速</b>：倍速会掉帧，
+ * 而用户框选区间的目的就是「少下一点、画质别动」，两者不能混。
+ */
+async function downloadSelection() {
+  const s = selection.value
+  if (!s) return
+  const day = day.value
+  const row = {
+    startTime: `${day}T${s.startText}`,
+    endTime: `${day}T${s.endText}`,
+    filePath: '',
+    fileSize: 0
+  }
+  await startDownload(row, { seconds: s.seconds, speed: 1 })
+  clearSelection()
 }
 
 /* ==================== 设备录像状态 ==================== */
@@ -724,12 +888,15 @@ async function search() {
 
 /** 发起回放并播放。 */
 async function play(row) {
-  current.value = row
-  playDialog.value = true
-  // 进度条总长取录像段的起止时间差；位置归零
-  segmentSeconds.value = segmentLengthOf(row)
+  /*
+   * 【先请求、成功后再开窗】
+   *
+   * <p>改造前这里第一步就是 {@code playDialog=true}，于是请求被拒时
+   * （典型场景：该通道正在后台下载，回放会话被锁）用户会看到一个
+   * 空弹窗 + 一条错误提示 —— 弹窗里没有任何内容，关掉还得再点一次。
+   * 先拿到结果再开窗，失败时停在列表页、只留一条说明原因的提示。
+   */
   await ensureMediaPort()
-  await sleep(120)
 
   let info = null
   try {
@@ -745,6 +912,12 @@ async function play(row) {
     ElMessage.error(e.message || '回放启动失败')
     return
   }
+
+  current.value = row
+  playDialog.value = true
+  // 进度条总长取录像段的起止时间差；位置归零
+  segmentSeconds.value = segmentLengthOf(row)
+  await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
   if (!urls.wsFlv && !urls.webrtc) {
@@ -791,14 +964,20 @@ async function play(row) {
  * <p>顺序不能颠倒：必须先有回放流，ZLM 才有东西可录。
  * 若用户此时正在看回放，那段流会被这次 download 复用（同一个会话键），
  * 不会重复向设备发起 INVITE。
+ *
+ * @param row 录像段（起点/终点/大小；框选下载时构造的伪行）
+ * @param override 可选覆盖项：{@code seconds} 指定时长、{@code speed} 指定倍速。
+ *                 框选区间下载用它把「整段」换成「用户选的那一截」并强制 1 倍速 ——
+ *                 框选的目的就是「少下一点、画质别动」，不能再叠加掉帧的倍速。
  */
-async function startDownload(row) {
-  const seconds = segmentLengthOf(row)
+async function startDownload(row, override = {}) {
+  const seconds = override.seconds || segmentLengthOf(row)
   if (!seconds) {
     ElMessage.warning('该录像段缺少起止时间，无法下载')
     return
   }
   if (!(await ensureMediaPort())) return
+  const speed = override.speed || downloadSpeed.value
   const nowKey = rowKeyOf(row)
   downloadingKey.value = nowKey
   try {
@@ -809,18 +988,15 @@ async function startDownload(row) {
       starttime: row.startTime,
       endtime: row.endTime,
       duration: seconds,
-      speed: downloadSpeed.value,
-      // 设备上报的该段大小：后端据此判断「内容已录完」（设备不会按结束时间停推）
-      fileSize: row.fileSize || 0,
+      speed,
+      // 区间下载不知道这一小截的确切大小，传 0 让后端按时长判完成
+      fileSize: override.seconds ? 0 : (row.fileSize || 0),
       name: channelLabel.value
     })
     if (ok) {
-      /*
-       * 不提「N 倍速」：倍速只是请求值，设备普遍不支持（实测现场设备上报
-       * 支持 8 倍速但实际仍按 1 倍速推流）。宣称倍速只会让用户按倍速估算
-       * 完成时间，结果等不到。
-       */
-      ElMessage.success('已提交后台下载，可在右上角「下载任务」查看进度')
+      ElMessage.success(
+        `已提交后台下载（${fmtDuration(seconds)}），可在右上角「下载任务」查看进度`
+      )
     }
   } finally {
     downloadingKey.value = ''
@@ -1215,6 +1391,76 @@ onUnmounted(() => {
 
 .rec-tag.clickable:hover {
   opacity: 0.8;
+}
+
+/*
+ * 框选区。
+ *
+ * 用半透明色块盖在录像色块上（不在下面，否则会被色块盖住看不见），
+ * overflow 不裁切，让两端的小手柄能突出去一点，明确「可再拖」。
+ */
+.timeline-sel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(59, 130, 246, 0.24);
+  border-left: 2px solid var(--accent, #3b82f6);
+  border-right: 2px solid var(--accent, #3b82f6);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 时长标签：贴选区顶部中间，太窄时允许溢出（比看不到好） */
+.sel-label {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+/* 拖拽中：整条轨道用十字光标，暗示「这里可以拖」 */
+.timeline-track.is-dragging,
+.timeline-track:active {
+  cursor: crosshair;
+}
+
+/* 框选后的操作条 */
+.tl-selbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: 6px 10px;
+  border: 1px solid var(--accent, #3b82f6);
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(59, 130, 246, 0.06);
+  font-size: var(--fs-sm);
+}
+
+.selbar-icon {
+  color: var(--accent, #3b82f6);
+}
+
+.selbar-range {
+  font-variant-numeric: tabular-nums;
+}
+
+.selbar-dur {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+.tl-draghint {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
 }
 
 /* 图例 + 汇总：一行放完，汇总靠右 */

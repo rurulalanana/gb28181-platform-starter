@@ -144,27 +144,57 @@ public class PlaybackController {
                 throw BizException.badRequest("缺少 filePath，且未提供 starttime 用于定位录像");
             }
             LocalDateTime wantStart = TimeFormats.parse(req.getStarttime());
+            LocalDateTime wantEnd = TimeFormats.parse(req.getEndtime() == null
+                    ? req.getStarttime() : req.getEndtime());
             // 未给 filePath 时从缓存里挑**覆盖这个起点**的那一段
             List<GbDeviceRecord> records = recordService.deviceRecords(channelId,
-                    wantStart,
-                    TimeFormats.parse(req.getEndtime() == null
-                            ? req.getStarttime() : req.getEndtime()), null);
+                    wantStart, wantEnd, null);
             if (records.isEmpty()) {
                 throw BizException.badRequest(
                         "未找到匹配的录像文件，请先调用 playback/recordlist 获取 FilePath");
             }
             GbDeviceRecord hit = pickRecord(records, wantStart);
+            boolean wholeSegment = isWholeSegment(hit, wantStart, wantEnd);
             /*
              * 只有设备真的给了 FilePath 才填（回放 INVITE 的 u= 用它）。
              * 大量设备（实测 LiveGBS、多数国产摄像机）不填 FilePath，
              * 而是按时间段管理录像 —— 此时必须留空，让媒体层改用
              * StartTime/EndTime 定位。强行把 Name 或路径塞进 u=
              * 会让设备按「文件不存在」直接拒绝。
+             *
+             * <p><b>请求的是段内一小截时不填 FilePath</b>：{@code u=} 一旦给了
+             * 文件路径，设备就按「播放整个文件」处理，{@code t=} 常被忽略 ——
+             * 于是「只要 14:00~14:05」会变成「下整个 2 小时」。这种情况改走
+             * 纯时间区间（{@code u=<通道>:0}），由 {@code t=} 定位。
              */
-            req.setFilePath(hit.getFilePath() == null ? "" : hit.getFilePath());
-            req.setStarttime(TimeFormats.toIso(hit.getStartTime()));
-            if (hit.getEndTime() != null) {
-                req.setEndtime(TimeFormats.toIso(hit.getEndTime()));
+            req.setFilePath(wholeSegment && hit.getFilePath() != null
+                    ? hit.getFilePath() : "");
+            /*
+             * 【必须保留用户请求的区间，不能整段覆盖】
+             *
+             * <p>改造前这里直接 {@code req.setStarttime(hit.getStartTime())}，
+             * 把请求区间换成整段录像的时间 —— 于是「只下载 14:00~14:05」永远
+             * 变成「下载 12:00~14:00」，下载时长恒等于整段。这是「想快点下」
+             * 怎么都快不起来的根因：画质无损时下载耗时由内容时长决定，
+             * 不能收窄区间就只能等满整段。
+             *
+             * <p>现在只做两件必要的事：
+             * <ol>
+             *   <li>把区间<b>收拢</b>到匹配段的边界内（请求可能略微越过段首尾）；</li>
+             *   <li>结束时间缺失时补成该段结束（否则设备会一直推下去）。</li>
+             * </ol>
+             */
+            LocalDateTime start = wantStart;
+            LocalDateTime end = req.getEndtime() == null ? null : wantEnd;
+            if (hit.getStartTime() != null && start.isBefore(hit.getStartTime())) {
+                start = hit.getStartTime();
+            }
+            if (end == null || (hit.getEndTime() != null && end.isAfter(hit.getEndTime()))) {
+                end = hit.getEndTime() == null ? end : hit.getEndTime();
+            }
+            req.setStarttime(TimeFormats.toIso(start));
+            if (end != null) {
+                req.setEndtime(TimeFormats.toIso(end));
             }
         }
         /*
@@ -594,6 +624,32 @@ public class PlaybackController {
             }
         }
         return earliest;
+    }
+
+    /**
+     * 请求区间是否就是这段录像本身（允许 2 秒误差）。
+     *
+     * <p>只有「整段」时才把 {@code FilePath} 传给设备：按文件回放对设备最友好，
+     * 但粒度是「整个文件」。用户只想取段内一小截时必须放弃它 —— 否则设备
+     * 会忽略 {@code t=} 去播整个文件，导致「只要 5 分钟」变成「下 2 小时」。
+     */
+    private static boolean isWholeSegment(GbDeviceRecord hit,
+                                          LocalDateTime start, LocalDateTime end) {
+        if (hit.getStartTime() == null || start == null || end == null) {
+            return false;
+        }
+        long startDiff = Math.abs(java.time.Duration.between(
+                hit.getStartTime(), start).getSeconds());
+        long endDiff = hit.getEndTime() == null
+                ? 0 : Math.abs(java.time.Duration.between(hit.getEndTime(), end).getSeconds());
+        if (startDiff > 2 || endDiff > 2) {
+            return false;
+        }
+        // 区间长度也要基本一致，否则说明请求只覆盖了段内一部分
+        long segSeconds = hit.getEndTime() == null ? 0
+                : java.time.Duration.between(hit.getStartTime(), hit.getEndTime()).getSeconds();
+        long wantSeconds = java.time.Duration.between(start, end).getSeconds();
+        return segSeconds <= 0 || wantSeconds >= segSeconds * 99 / 100;
     }
 
     /** 由 streamid 或 serial/code 定位通道编号（仅用于展示）。 */
