@@ -12,8 +12,12 @@
         <el-radio-button :value="16">16</el-radio-button>
       </el-radio-group>
       <el-select v-model="proto" style="width: 158px" size="small" @change="onProtoChange">
-        <el-option label="WebSocket-FLV" value="wsflv" />
-        <el-option label="WebRTC（低延迟）" value="webrtc" />
+        <el-option
+          v-for="o in LIVE_PROTOCOLS"
+          :key="o.value"
+          :label="o.label"
+          :value="o.value"
+        />
       </el-select>
       <el-button
         size="small"
@@ -242,7 +246,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS } from '@/player/resolvePlayUrls'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
 
@@ -593,13 +597,49 @@ async function playTile(tile) {
   }
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
-  if (!urls.wsFlv && !urls.webrtc) {
+  if (!hasPlayUrl(proto.value, urls)) {
     tile.state = '未获取到播放地址'
     ElMessage.error('未获取到播放地址，请确认设备在线')
     return
   }
 
-  await player.play(streamId, urls, { proto: proto.value })
+  await player.play(streamId, urls, {
+    proto: proto.value,
+    // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
+    onStall: () => rebuildStalled(tile)
+  })
+}
+
+/**
+ * 单格的「有数据但无画面」重建次数上限。
+ *
+ * <p>电视墙是长期开着的，若设备真的坏了，无限重建会把整个墙刷成不停地
+ * INVITE。每个格子最多自动救 2 次，之后只能人工处理。
+ */
+const stallRetryOf = {}
+
+/**
+ * 流是通的、却始终没有视频轨 → 停会话 + 重新点播。
+ *
+ * <p><b>为什么必须停会话</b>：ZLM 等轨就绪超时会把没就绪的视频轨
+ * <b>永久丢弃</b>（{@code Track not ready for a long time, ignored: H264}），
+ * 这个状态绑定在媒体源上，重连播放器没有任何用。只有拆掉会话
+ * （连带清掉媒体源）再 INVITE，才会生成新的媒体源。
+ *
+ * <p>这与用户手动「关掉这一格再播放」等价，只是自动完成。
+ */
+async function rebuildStalled(tile) {
+  const n = stallRetryOf[tile.id] || 0
+  if (n >= 2 || !tile.channelKey) return
+  stallRetryOf[tile.id] = n + 1
+  tile.state = '重新拉流中…'
+  try {
+    await streamApi.stop({ serial: tile.serial, code: tile.code })
+  } catch (e) {
+    // 会话可能已被空闲巡检关掉，继续重播即可
+  }
+  if (!tile.channelKey || !players[tile.id]) return
+  await playTile(tile)
 }
 
 function stopTile(tile) {
@@ -624,6 +664,8 @@ function stopTile(tile) {
  */
 function clearTile(tile) {
   stopTile(tile)
+  // 格子被腾空就是新的一轮，重置卡轨重建计数
+  delete stallRetryOf[tile.id]
   tile.channelKey = ''
   tile.serial = ''
   tile.code = ''
@@ -650,7 +692,8 @@ function clearTile(tile) {
 async function onProtoChange() {
   const active = visibleTiles.value.filter((t) => t.playing && t.channelKey)
   if (!active.length) return
-  ElMessage.info(`正在切换为 ${proto.value === 'wsflv' ? 'WebSocket-FLV' : 'WebRTC'}…`)
+  const label = LIVE_PROTOCOLS.find((o) => o.value === proto.value)?.label || proto.value
+  ElMessage.info(`正在切换为 ${label}…`)
   for (const tile of active) {
     const streamId = `${tile.serial}/${tile.code}`
     const player = playerOf(tile)
@@ -661,7 +704,7 @@ async function onProtoChange() {
     } catch (e) {
       // 流可能已被空闲巡检关闭，下面会重新点播
     }
-    if (!urls || (!urls.wsFlv && !urls.webrtc)) {
+    if (!urls || !hasPlayUrl(proto.value, urls)) {
       // 流不在了：重新完整点播（会重新 INVITE 拉起设备推流）
       tile.state = '重新点播中…'
       await playTile(tile)

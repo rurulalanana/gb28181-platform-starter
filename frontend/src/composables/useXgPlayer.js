@@ -1,15 +1,25 @@
 /**
- * 统一播放器（xgplayer）：直播走自研 ws-flv 引擎，回放直接播 MP4 文件。
+ * 统一播放器（xgplayer）：直播支持四种协议，回放直接播 MP4 文件。
  *
- * <h3>为什么分两条数据通路</h3>
- * <ul>
- *   <li><b>直播 / 实时预览</b>：国标流是 PS + G.711，ZLM 转 FLV 后音频仍是
- *       PCMA/PCMU，MSE 不认。因此用 {@link WsFlvStream} 把视频交给 MSE、
- *       音频交给 Web Audio（见该文件注释）。</li>
- *   <li><b>录像回放</b>：后端提供的是 MP4 文件，直接交给 xgplayer 原生播放。
- *       浏览器靠 HTTP Range 按需拉流，秒开、可任意拖动，进度条是 xgplayer 自带的。</li>
- * </ul>
- * 两条通路共用同一套 UI 与交互，对外只有一个 {@code play/stop}。
+ * <h3>直播的四条数据通路</h3>
+ * <table border="1">
+ *   <tr><th>协议</th><th>延迟</th><th>实现</th><th>适用</th></tr>
+ *   <tr><td>{@code wsflv}</td><td>≈1s</td><td>{@link WsFlvStream}（WebSocket）</td><td>默认，内网 / 同域</td></tr>
+ *   <tr><td>{@code httpflv}</td><td>≈1s</td><td>{@link WsFlvStream}（fetch 流式）</td><td>WebSocket 被代理/防火墙拦掉时</td></tr>
+ *   <tr><td>{@code webrtc}</td><td>≈0.3s</td><td>RTCPeerConnection</td><td>要最低延迟、网络尚可</td></tr>
+ *   <tr><td>{@code hls}</td><td>≈4s</td><td>xgplayer-hls（按需加载）</td><td>只要 80/443 能通就能看</td></tr>
+ * </table>
+ * 前三者共用同一套「视频进 MSE、G.711 进 Web Audio」的拆轨逻辑：
+ * 国标流是 PS + G.711，ZLM 转 FLV 后音频仍是 PCMA/PCMU，
+ * MSE 只认 AAC/MP3/Opus，所以 {@code flv.js} / {@code xgplayer-flv} 这类
+ * 纯 MSE 播放器一律抛 {@code CodecUnsupported}（官方插件也写明只支持
+ * 「AAC 音频编码」）。HLS 的切片由 ZLM 重新封装，能交给 xgplayer-hls。
+ *
+ * <h3>录像回放</h3>
+ * 后端提供的是 MP4 文件，直接交给 xgplayer 原生播放。浏览器靠 HTTP Range
+ * 按需拉流，秒开、可任意拖动，进度条是 xgplayer 自带的。
+ * 回放<b>不开放协议切换</b>：WebRTC 的 MediaStream 没有可推进的
+ * {@code currentTime}（进度条不动），设备侧的 npt 定位也没法跨通路���用。
  *
  * <h3>容器约定</h3>
  * xgplayer 会在传入的容器里自建 {@code <video>} 与控件；本 composable 每次播放
@@ -64,15 +74,27 @@ export function useXgPlayer(containerRef) {
   let currentVod = null
 
   /**
+   * 播放器内「协议选择器」配置；跨重建保留。
+   *
+   * <p>见 {@link attachProtocolSwitch}。
+   */
+  let currentProtoSwitch = null
+
+  /**
    * 播放。
    *
    * @param {string} streamId 流标识 `<设备编码>/<通道编码>`
-   * @param {object} urls     播放地址集合 `{ wsFlv, httpFlv, webrtc }`
-   * @param {object} [opts]   `{ proto: 'wsflv'|'webrtc', vod: {...} }`
+   * @param {object} urls     播放地址集合 `{ wsFlv, httpFlv, webrtc, hls }`
+   * @param {object} [opts]   `{ proto: 'wsflv'|'httpflv'|'webrtc'|'hls', vod: {...} }`
    * @param {function} [opts.onFatal] 播放彻底失败时的回调（解码错误重试耗尽后触发）
    * @param {object} [opts.vod] 录像回放参数，给了就切到「伪点播」模式：
    *   `{ duration, onSeek, onPause, onResume, onRate }`。
    *   见 {@link applyVodControls} 的说明。
+   * @param {object} [opts.protocolSwitch] 把「播放协议」选择器放进播放器控制栏：
+   *   `{ value, options: [{ value, label }], onChange(value) }`。
+   *   见 {@link attachProtocolSwitch} 的说明。
+   * @param {function} [opts.onStall] 流是通的但<b>始终没有视频轨</b>时的回调，
+   *   由调用方重建整路流（停会话 + 重新 INVITE）。见 {@link playFlv} 的说明。
    * @param {boolean} [opts._rebuild] 内部重建标记（重建不清空解码重试计数）
    */
   async function play(streamId, urls, opts = {}) {
@@ -90,20 +112,43 @@ export function useXgPlayer(containerRef) {
     if (!opts._rebuild) decodeRetryCount = 0
     // 回放参数要跨重建保留，否则解码重试后进度条/拖动就失效了
     if (opts.vod !== undefined) currentVod = opts.vod
+    /*
+     * 协议菜单配置也要跨重建保留（否则切到 WebRTC 后就没有切回 FLV 的入口）。
+     * 同时把 value 同步成「本次实际协议」：重建后菜单要显示当前值，
+     * 不能还停在上次的选中项上。
+     */
+    if (opts.protocolSwitch !== undefined) currentProtoSwitch = opts.protocolSwitch
+    if (currentProtoSwitch) currentProtoSwitch = { ...currentProtoSwitch, value: proto }
 
     if (proto === 'webrtc') {
       await playWebrtc(streamId)
+    } else if (proto === 'hls') {
+      await playHls(urls?.hls)
     } else {
-      await playFlv(urls?.wsFlv || urls?.httpFlv, opts.onFatal, currentVod)
+      await playFlv(flvUrlOf(proto, urls), opts.onFatal, currentVod, opts.onStall)
     }
   }
 
   /**
-   * 直播通路：自研 ws-flv。
+   * 取 FLV 地址。
+   *
+   * <p>{@code wsflv} 与 {@code httpflv} 是<b>同一路流</b>的两种承载
+   * （见 {@link WsFlvStream}），任一地址缺失就回退到另一种，
+   * 免得因为后端少拼一个字段就整路播不了。
+   */
+  function flvUrlOf(proto, urls) {
+    if (!urls) return ''
+    if (proto === 'httpflv') return urls.httpFlv || urls.wsFlv
+    return urls.wsFlv || urls.httpFlv
+  }
+
+  /**
+   * 直播通路：自研 ws-flv（视频喂 MSE，G.711 喂 Web Audio）。
    *
    * @param {object|null} vod 录像回放参数；非空时进入「伪点播」模式
+   * @param {function} [onStall] 流通但始终无视频轨时的回调（需调用方重建会话）
    */
-  async function playFlv(url, onFatal, vod) {
+  async function playFlv(url, onFatal, vod, onStall) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -147,11 +192,15 @@ export function useXgPlayer(containerRef) {
 
     const p = player.value
     const media = p.media
+    // 协议选择器放进控制栏（像视频网站的清晰度切换）
+    attachProtocolSwitch(p, currentProtoSwitch)
 
     stream = new WsFlvStream({
       url,
       mediaSource,
       media,
+      // 回放不做音画同步：位置/倍速由设备侧控制（见 WsFlvStream 的 vod 说明）
+      vod: !!vod,
       onError: (msg) => {
         if (disposed) return
         state.value = '播放异常：' + msg
@@ -181,6 +230,35 @@ export function useXgPlayer(containerRef) {
       }
     }, 4000)
     waitTimers.push(waitTimer)
+
+    /*
+     * 「有数据但永远没画面」的看门狗。
+     *
+     * <p>这是现场最常见的怪病：日志里流是通的、播放器一直停在
+     * 「等待设备推流…」，关掉重播就好了。根因在服务端：
+     * ZLM 等各条轨就绪有时间上限，超时就把没就绪的轨<b>永久丢弃</b>
+     * （{@code Track not ready for a long time, ignored: H264}），
+     * 媒体源从此只有音频。而丢的往往正是开头的 SPS/PPS + 首个 I 帧 ——
+     * 设备刚收到 INVITE 时会一口气把攒着的码流倾出来，RTP 收流缓冲装不下
+     * 就丢包。
+     *
+     * <p>这个状态<b>在本播放器内无法自愈</b>：连的是同一个媒体源，
+     * 重连 WebSocket 一万次也还是没有视频轨。必须让服务端重建媒体源
+     * （停会话 + 重新 INVITE），所以只能回调给调用方。
+     *
+     * <p>判定条件要同时满足：①已经收到字节（说明编码器在推、网络通）；
+     * ②始终没拿到关键帧。只满足 ②是「设备还没开始推」，那由上面的
+     * 提示负责，不该触发重建。
+     */
+    const stallTimer = setTimeout(() => {
+      if (disposed || !stream) return
+      if (stream.receivedBytes > 0 && !stream.gotKeyframe) {
+        state.value = '画面未就绪，正在重新拉流…'
+        playing.value = false
+        if (onStall) onStall()
+      }
+    }, 12000)
+    waitTimers.push(stallTimer)
 
     // video 的音量/静音按钮由 xgplayer 操作，Web Audio 这条链路要跟着变
     const syncVolume = () => stream?.setVolume(media.muted ? 0 : media.volume)
@@ -252,9 +330,20 @@ export function useXgPlayer(containerRef) {
       const timer = setTimeout(() => {
         if (disposed) return
         stop()
-        // vod 必须显式回传：stop() 会清空 currentVod，不传就变成直播模式了
-        play(currentStream.value, { wsFlv: url },
-          { proto: 'wsflv', onFatal, _rebuild: true, vod })
+        /*
+         * vod 必须显式回传：stop() 会清空 currentVod，不传就变成直播模式了。
+         *
+         * <p>协议也要沿用本次的：原来写死 {@code proto: 'wsflv'}，
+         * 用户在 HTTP-FLV 下解码失败重建时会被默默换成 WebSocket 通路，
+         * 菜单上的标签与实际通路对不上。两种 FLV 地址都传，
+         * 让 {@link flvUrlOf} 按协议选。
+         */
+        play(currentStream.value, { wsFlv: url, httpFlv: url }, {
+          proto: protocol.value === 'httpflv' ? 'httpflv' : 'wsflv',
+          onFatal,
+          _rebuild: true,
+          vod
+        })
       }, 1200 * decodeRetryCount)
       waitTimers.push(timer)
     })
@@ -266,6 +355,208 @@ export function useXgPlayer(containerRef) {
       // 忽略 AbortError / NotAllowedError
     }
     if (!disposed && state.value === '连接中…') state.value = '缓冲中…'
+  }
+
+  /**
+   * HLS 通路（兼容性最好，延迟约 4~6 秒）。
+   *
+   * <p>ZLM 的 HLS 参数是 {@code segDur=2} + {@code segNum=3}，播放窗口只有
+   * 3 个切片 ≈ 6 秒。比 ws-flv / WebRTC 延迟高，但它是唯一的
+   * <b>纯 HTTP、无长连接</b>通路：只要 80/443 能通就能看，
+   * 适合企业代理 / 防火墙环境。
+   *
+   * <h3>为什么用 xgplayer-hls 而不是 hls.js</h3>
+   * <ul>
+   *   <li><b>同一套内核</b>：xgplayer-hls 是西瓜官方插件，基于
+   *       {@code xgplayer-transmuxer}（本项目已在用），与播放器版本一一对应；
+   *       而 hls.js 是另一套独立实现，两边各管各的 buffer，容易出现
+   *       “插件以为自己在控制 media、实际被别人改了”的怪问题。</li>
+   *   <li><b>直播参数直接可用</b>：{@code targetLatency} / {@code maxLatency} /
+   *       {@code disconnectTime} / {@code retryCount} / {@code loadTimeout}
+   *       都是面向直播的语义；hls.js 对应的是 {@code liveSyncDurationCount}
+   *       这类偏底层的配置。</li>
+   *   <li><b>体积更小</b>：不额外引入 hls.js，插件体量约为它的一半。</li>
+   * </ul>
+   *
+   * <h3>为什么优先用插件，而不是浏览器的原生 HLS</h3>
+   * Chrome 148 起 {@code canPlayType('application/vnd.apple.mpegurl')} 已经返回
+   * {@code "maybe"}，看起来可以省掉一整个内核 —— 但实测它<b>只拿到数据不起播</b>：
+   * {@code readyState=4}、buffer 已冿 10 秒，{@code paused} 却一直是 true，
+   * 手动调 {@code play()} 之后也很快又停住。原生实现既不能控直播延迟
+   * （不能指定 targetLatency），也不管刷新失败重试，而且各版本行为不一。
+   * <p>所以：<b>能加载插件就用插件</b>，只有插件不可用（老浏览器 / 无 MSE）
+   * 时才回退到原生 HLS（Safari / iOS 走这条）。判断必须在
+   * {@code new Player()} <b>之前</b>做 —— 插件要在构造时就注册进
+   * {@code plugins}，事后加不了。
+   *
+   * <p>仅用于直播。录像回放是 MP4 文件（见 {@link playFlv} 的伪点播模式），
+   * 设备侧按 npt 定位，不存在 HLS 切片。
+   */
+  async function playHls(url) {
+    if (!url) {
+      state.value = '缺少播放地址'
+      return
+    }
+    if (!containerRef.value) {
+      state.value = '播放器容器未就绪'
+      return
+    }
+
+    state.value = '加载 HLS 内核…'
+    let HlsPlugin = null
+    let hlsEvent = null
+    try {
+      // 动态加载：不播 HLS 的用户不下这包，首屏不受影响
+      const mod = await import('xgplayer-hls')
+      if (disposed) return
+      HlsPlugin = mod.default || mod
+      hlsEvent = mod.EVENT
+      if (!HlsPlugin.isSupported()) HlsPlugin = null
+    } catch (e) {
+      // 内核加载失败不致命，下面还有原生 HLS 兜底
+      HlsPlugin = null
+    }
+
+    // 连插件都不可用时才看原生能力（Safari / iOS 走这条）
+    const nativeHls = !HlsPlugin && !!document
+      .createElement('video')
+      .canPlayType('application/vnd.apple.mpegurl')
+    if (!HlsPlugin && !nativeHls) {
+      state.value = '当前浏览器不支持 HLS 播放'
+      return
+    }
+
+    const el = createHost()
+    if (!el) return
+    state.value = '连接中…'
+
+    const conf = {
+      el,
+      url,
+      isLive: true,
+      autoplay: true,
+      autoplayMuted: true,
+      lang: 'zh-cn',
+      width: '100%',
+      height: '100%',
+      ...baseUiConfig()
+    }
+    if (HlsPlugin) {
+      conf.plugins = [HlsPlugin]
+      conf.hls = {
+        /*
+         * 延迟必须在「直播窗口」之内才有意义：ZLM 只保留 3 个切片
+         * （实测 EXTINF 3.33s，窗口 ≈ 10 秒）。默认 targetLatency=10
+         * 正好把整个窗口都耗完，播放点被夹到窗口起点、每次刷新重新贴边，
+         * 反而起播慢。设 4 秒既留了抗抖动余量又不浪费窗口。
+         */
+        targetLatency: 4,
+        maxLatency: 8,
+        /*
+         * 默认 3 秒 —— 比本平台的切片时长（3.33s）还短，意味着一但中间
+         * 少一个切片就「跳不过去」，只能原地重试到超时。
+         */
+        maxJumpDistance: 10,
+        // 用户压暂停时不立刻断流（默认 0 = 立刻），避免误触就重连一次
+        disconnectTime: 10,
+        retryCount: 3,
+        retryDelay: 1000,
+        loadTimeout: 10000
+      }
+    }
+
+    /*
+     * HLS 预热。
+     *
+     * <p>ZLM 的 HLS 是<b>按需切片</b>：没人请求 m3u8 时不写 .ts。刚点播时
+     * 第一次拉到的 m3u8 里列的是「激活之前」的切片名，磁盘上根本没有这些文件，
+     * 播放器去取就拿到 404，插件直接判定 fatal 并停在「网络错误」页。
+     *
+     * <p>所以先自己拉一次 m3u8 让 ZLM 开始切片，再交给播放器。
+     */
+    try {
+      await fetch(url, { cache: 'no-store' })
+    } catch (e) {
+      // 拉不到不阻断，交给播放器自己报错（它也有重试）
+    }
+    if (disposed) return
+
+    player.value = new Player(conf)
+
+    const p = player.value
+    attachProtocolSwitch(p, currentProtoSwitch)
+
+    p.on('playing', () => {
+      if (disposed) return
+      playing.value = true
+      state.value = '播放中'
+    })
+
+    /*
+     * 直播不允许「停在那儿」。
+     *
+     * <p>实测插件在某些时序下会把 media 留在 paused 状态：buffer 已经叠了
+     * 10 秒、readyState=4，currentTime 却不再推进（画面定格）。
+     * 这与 WebRTC / ws-flv 直播通路是同一个约束，处理方式也保持一致：
+     * 只要不是我们主动销毁，一旦被暂停就立刻恢复。
+     *
+     * <p>不会死循环：{@code play()} 被浏览器拒绝时是 reject 而不是再触发
+     * pause，所以最多多调一次。
+     */
+    const media = p.media
+    media.addEventListener('pause', () => {
+      if (disposed || p.__closing || !media.src) return
+      media.play().catch(() => {})
+    })
+
+    /** 因「切片不存在」重放过几次（每个播放器实例独立）。 */
+    let hlsRetry = 0
+
+    /*
+     * 解析出错一律走 xgplayer 的 error 事件（插件会把内核错误代理上来）；
+     * 原生 HLS 场景没有插件，只能听 media 自己的 error。
+     *
+     * <p>预热只能减少 404，不能完全消除（比如播放中 HLS 被重启、切片被清理）。
+     * 遇到这种错误直接重放：{@code core.replay()} 会丢弃旧列表、重新拉 m3u8，
+     * 那时指向的都是真实存在的切片，比原地重试同一个已消失的 URL 有用。
+     */
+    p.on('error', (err) => {
+      if (disposed) return
+      if (hlsRetry < 2 && p.plugins?.hls?.core) {
+        hlsRetry++
+        state.value = `HLS 重连中（${hlsRetry}/2）…`
+        const t = setTimeout(() => {
+          if (disposed) return
+          try {
+            p.plugins.hls.core.replay()
+          } catch (e) {
+            stop()
+          }
+        }, 1500)
+        waitTimers.push(t)
+        return
+      }
+      state.value = '播放异常：' + ((err && (err.message || err.errorType)) || 'HLS 加载失败')
+      playing.value = false
+    })
+
+    if (hlsEvent && HlsPlugin) {
+      // 元信息（编码/分辨率）：预览状态栏要显示
+      p.on('core_event', (e) => {
+        if (disposed || !e || e.eventName !== hlsEvent.METADATA_PARSED) return
+        if (e.type !== 'video' || !e.meta) return
+        const info = { codec: e.meta.codec, width: e.meta.width, height: e.meta.height }
+        videoInfo.value = info
+        stats.value = info
+        if (state.value === '连接中…') state.value = '缓冲中…'
+      })
+    } else {
+      // 原生 HLS：没有插件就不会自动拉起播放，需要手动 play 一次
+      media.addEventListener('loadedmetadata', () => {
+        if (disposed) return
+        media.play().catch(() => {})
+      }, { once: true })
+    }
   }
 
   /**
@@ -354,6 +645,8 @@ export function useXgPlayer(containerRef) {
 
       const p = player.value
       const media = p.media
+      // 协议选择器放进控制栏（WebRTC 通路同样需要，否则切回 FLV 就无入口了）
+      attachProtocolSwitch(p, currentProtoSwitch)
 
       // 媒体流挂到 xgplayer 内部的 video 上，控制栏/音量/全屏就都归它管了
       media.srcObject = stream
@@ -388,7 +681,14 @@ export function useXgPlayer(containerRef) {
     }
   }
 
-  /** 切换通路（播放中自动重连）。 */
+  /**
+   * 切换通路（播放中自动重连）。
+   *
+   * <p><b>切换会重建播放器实例</b>（FLV 用 MSE 灌流、WebRTC 用 RTCPeerConnection，
+   * 两种内核无法复用实例）。而重建必然移除旧 DOM，若此时正处于
+   * <b>浏览器全屏</b>，全屏元素消失 → 浏览器自动退出全屏（实测每次切换都掉出全屏）。
+   * 因此这里在重建前记录全屏归属，重建完成后重新申请一次。
+   */
   async function switchProtocol(proto, urls) {
     if (proto === protocol.value && playing.value) return
     /*
@@ -398,7 +698,11 @@ export function useXgPlayer(containerRef) {
      * 查询接口返回 400），播放器就被拆掉了却接不上新的源 ——
      * 用户看到的是「切个协议画面就没了，也不报错」。
      */
-    const target = proto === 'webrtc' ? urls?.webrtc : (urls?.wsFlv || urls?.httpFlv)
+    const target = proto === 'webrtc'
+      ? urls?.webrtc
+      : proto === 'hls'
+        ? urls?.hls
+        : flvUrlOf(proto, urls)
     if (!target) {
       state.value = '缺少播放地址'
       return
@@ -406,15 +710,68 @@ export function useXgPlayer(containerRef) {
     protocol.value = proto
     const streamId = currentStream.value
     const wasPlaying = playing.value
+    // 必须在 stop() 之前取：stop 会 remove 宿主节点，之后 fullscreenElement 就变 null 了
+    const wasFullscreen = !!document.fullscreenElement
+      && !!containerRef.value
+      && containerRef.value.contains(document.fullscreenElement)
     stop()
     if (wasPlaying && streamId) {
       await play(streamId, urls, { proto })
+      if (wasFullscreen) {
+        await restoreFullscreen()
+      }
+    }
+  }
+
+  /**
+   * 重建后恢复全屏。
+   *
+   * <p>切换协议会重建播放器实例，旧的全屏元素被移除后浏览器会自动退出全屏。
+   * 恢复时<b>先用 CSS 全屏</b>而不是 {@code requestFullscreen}：后者要求用户激活态，
+   * 而切换链路里夹着「查播放地址 + WebRTC 协商（最长 8 秒）」，
+   * 实测早已超出激活窗口、调用被浏览器静默拒绝（表现为「切完就掉出全屏」）。
+   * CSS 全屏是纯样式操作，同步生效、不依赖激活态，视觉与全屏一致。
+   */
+  async function restoreFullscreen() {
+    const root = player.value?.root || player.value?.el
+    if (!root) {
+      return
+    }
+    // 先同步加上，保证切换后立刻仍是「满屏」观感
+    root.classList.add('xgproto-css-fullscreen')
+    /*
+     * 再尝试真正的浏览器全屏：成功就撤掉 CSS 类（避免两套全屏叠加），
+     * 失败就算了 —— CSS 全屏已经在生效。
+     */
+    try {
+      await root.requestFullscreen()
+      root.classList.remove('xgproto-css-fullscreen')
+    } catch (e) {
+      // 激活态已过期：保留 CSS 全屏
+    }
+  }
+
+  /** 退出 CSS 全屏兜底（正常全屏不受影响）。 */
+  function exitCssFullscreen() {
+    const root = player.value?.root || player.value?.el
+    if (root) {
+      root.classList.remove('xgproto-css-fullscreen')
     }
   }
 
   /** 停止并释放资源。 */
   function stop() {
     disposed = true
+    // 先标记「正在销毁」：销毁会触发 media 的 pause/ratechange，
+    // 不标记就会被当成用户操作发 SIP 指令（见 applyVodControls 的说明）
+    const prev = player.value
+    if (prev) {
+      prev.__closing = true
+    }
+    if (prev && typeof prev.__protoCleanup === 'function') {
+      prev.__protoCleanup()
+      prev.__protoCleanup = null
+    }
     // 清掉回放参数：否则下一次播直播（不传 vod）会残留上一段的进度条配置
     currentVod = null
     for (const t of waitTimers) clearTimeout(t)
@@ -494,7 +851,9 @@ export function useXgPlayer(containerRef) {
     position,
     play,
     stop,
-    switchProtocol
+    switchProtocol,
+    /** 退出「CSS 全屏」兜底（业务侧关闭弹窗时调用）。 */
+    exitCssFullscreen
   }
 }
 
@@ -599,9 +958,17 @@ function applyVodControls(p, media, vod, positionRef) {
     userReady = true
   })
   p.on('pause', () => {
+    /*
+     * 【关键】播放器被主动销毁时会触发一次 pause，那不是用户操作。
+     * 不拦住就会向设备发 SIP PAUSE —— 设备真的停推，ZLM 收流超时后
+     * 注销媒体源（实测 16~20 秒），紧接着切 WebRTC 就报 stream not found。
+     * 切协议、关弹窗都会走这条销毁路径。
+     */
+    if (p.__closing) return
     if (userReady) vod.onPause?.()
   })
   p.on('play', () => {
+    if (p.__closing) return
     if (userReady) vod.onResume?.()
   })
 
@@ -615,6 +982,7 @@ function applyVodControls(p, media, vod, positionRef) {
   let lastRate = 1
   media.addEventListener('ratechange', () => {
     const rate = media.playbackRate
+    if (p.__closing) return
     if (!Number.isFinite(rate) || rate === lastRate) return
     lastRate = rate
     vod.onRate?.(rate)
@@ -630,6 +998,201 @@ function applyVodControls(p, media, vod, positionRef) {
   }
   p.on('timeupdate', reportTime)
   media.addEventListener('timeupdate', reportTime)
+}
+
+/**
+ * 把「播放协议」选择器挂进播放器控制栏。
+ *
+ * <h3>为什么放在播放器里</h3>
+ * 协议（WebSocket-FLV / WebRTC）是<b>观看方式</b>，不是页面级配置。
+ * 早先它是个悬浮在播放器外面的下拉框：全屏时看不见、录像回放弹窗里
+ * 还得先关掉才能改，和视频网站的「清晰度」完全不是一回事。
+ * 现在挂到控制栏右侧，全屏下也可见可点。
+ *
+ * <h3>为什么自己建 DOM 而不是用 xgplayer 的 definition 插件</h3>
+ * {@code definition} 插件是「同一路流的多档清晰度」，切换时只换 {@code src}、
+ * 播放器实例不重建。而这里 FLV 与 WebRTC 是<b>两种完全不同的内核</b>
+ * （MSE 灌流 vs {@code RTCPeerConnection}），必须重建播放器 ——
+ * 语义对不上，强行套用会得到「切了但还在播老内核」的结果。
+ *
+ * @param {object} p     xgplayer 实例
+ * @param {object} [cfg] `{ value, options: [{ value, label }], onChange(value) }`
+ */
+function attachProtocolSwitch(p, cfg) {
+  if (!p || !cfg || !Array.isArray(cfg.options) || cfg.options.length < 2) {
+    return
+  }
+  const host = p.root || p.el
+  if (!host) {
+    return
+  }
+  // 控制栏在 xgplayer 内部创建，等一帧再挂，避免拿到未渲染的容器
+  const mount = () => {
+    const controls = host.querySelector('.xgplayer-controls')
+    if (!controls) {
+      return false
+    }
+    /*
+     * 菜单的定位祖先必须是<b>播放器真实根节点</b>（{@code .xgplayer}），
+     * 不是外面那个宿主 div。
+     *
+     * <p>踩过的坑：用宿主容器当定位祖先时，它比播放器窄很多（实测仅约 120px），
+     * 菜单右对齐到它就被推到播放器外面，界面上只剩左侧一截黑块。
+     * 从控制栏向上找 {@code .xgplayer} 才能拿到与画面同尺寸的盒子。
+     */
+    const playerRoot = controls.closest('.xgplayer') || host
+    if (getComputedStyle(playerRoot).position === 'static') {
+      playerRoot.style.position = 'relative'
+    }
+    const box = document.createElement('div')
+    box.className = 'xgproto'
+    /*
+     * 阻断事件冒泡到播放器根节点：xgplayer 在根容器上也有点击处理，
+     * 点我们的菜单会连带触发播放/暂停，用户只是想换个协议却把回放暂停了。
+     */
+    for (const evt of ['pointerdown', 'mousedown', 'click', 'dblclick']) {
+      box.addEventListener(evt, (e) => e.stopPropagation())
+    }
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'xgproto-btn'
+    btn.title = '播放协议'
+    const label = document.createElement('span')
+    label.className = 'xgproto-label'
+    btn.appendChild(label)
+    box.appendChild(btn)
+
+    /*
+     * 菜单挂在<b>播放器根节点</b>而不是控制栏里。
+     *
+     * <p>踩过的坑：起初把菜单放在 {@code box} 内部（即控制栏里），
+     * 而控制栏高度只有 40px 左右、且上层容器有裁剪，弹出的菜单被切掉一半 ——
+     * 界面上只能看到「RTC」「FLV」的后半截，选项根本点不到。
+     * 挂到根节点后用绝对定位，不受控制栏尺寸约束。
+     */
+    const menu = document.createElement('div')
+    menu.className = 'xgproto-menu'
+    for (const evt of ['pointerdown', 'mousedown', 'click', 'dblclick']) {
+      menu.addEventListener(evt, (e) => e.stopPropagation())
+    }
+    playerRoot.appendChild(menu)
+
+    const openMenu = () => {
+      /*
+       * 用按钮与控制栏的实际位置定位菜单，而不是写死 right/bottom：
+       * 全屏、不同尺寸下控制栏的图标排布会变，写死会错位。
+       */
+      const rootRect = playerRoot.getBoundingClientRect()
+      const btnRect = btn.getBoundingClientRect()
+      // 菜单右边缘对齐按钮右边缘（不能超出播放器右边界）
+      const right = Math.max(6, Math.round(rootRect.right - btnRect.right))
+      menu.style.right = Math.min(right, Math.max(6, rootRect.width - 108)) + 'px'
+      // 菜单底边贴在按钮上沿上方一点
+      menu.style.bottom = Math.max(6, Math.round(rootRect.bottom - btnRect.top + 6)) + 'px'
+      menu.classList.add('is-open')
+    }
+    const closeMenu = () => menu.classList.remove('is-open')
+
+    const setValue = (v) => {
+      const hit = cfg.options.find((o) => o.value === v) || cfg.options[0]
+      // 控制栏按钮用短名（{@code short}），菜单项用完整名（{@code label}）：
+      // 菜单里需要写清限制（如「HLS（无声音）」），按钮上放不下
+      label.textContent = hit.short || hit.label
+      for (const node of menu.children) {
+        node.classList.toggle('is-active', node.dataset.value === hit.value)
+      }
+      p.__protoValue = hit.value
+    }
+
+    for (const opt of cfg.options) {
+      const item = document.createElement('div')
+      item.className = 'xgproto-item'
+      item.dataset.value = opt.value
+      item.textContent = opt.label
+      item.addEventListener('click', (e) => {
+        e.stopPropagation()
+        closeMenu()
+        if (opt.value === p.__protoValue) {
+          return
+        }
+        setValue(opt.value)
+        cfg.onChange?.(opt.value)
+      })
+      menu.appendChild(item)
+    }
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (menu.classList.contains('is-open')) {
+        closeMenu()
+      } else {
+        openMenu()
+      }
+    })
+    // 点外部关闭菜单（capture 阶段，避免被播放器自身的点击处理吃掉）
+    const onDocDown = (e) => {
+      if (!box.contains(e.target) && !menu.contains(e.target)) {
+        closeMenu()
+      }
+    }
+    document.addEventListener('pointerdown', onDocDown, true)
+    p.__protoCleanup = () => {
+      document.removeEventListener('pointerdown', onDocDown, true)
+      menu.remove()
+    }
+
+    setValue(cfg.value)
+    /*
+     * 插进右侧图标组的<b>第一个位置</b>（音量左侧）。
+     *
+     * <p>踩过的坑：之前 append 到 {@code .xg-inner-controls} 的末尾 ——
+     * 那是 right-grid 的兄弟节点，而 right-grid 自身宽度由内容决定且不靠右，
+     * 结果「FLV」孤零零跑到最右边，把音量/画中画/全屏挤成了中间一坨（截图可见）。
+     * 放进 right-grid 后与原生图标同一行、同一边距，布局完全跟随播放器。
+     */
+    const grouper = controls.querySelector('.xg-right-grid')
+    if (!grouper) {
+      /*
+       * 图标组还没渲染出来时先不挂：插到 controls 上会成为 right-grid 的
+       * 兄弟节点，被挤出图标行（实测落在最右边、把其它图标挤成中间一坨）。
+       * 返回 false 交给下面的重试机制，等图标组出现再挂。
+       */
+      return false
+    }
+    /*
+     * 放在<b>音量图标左边</b>（视觉上）。
+     *
+     * <p><b>关键：{@code .xg-right-grid} 是 {@code flex-direction: row-reverse}</b>，
+     * DOM 顺序与视觉顺序是<b>相反</b>的 ——
+     * 实测 DOM 为 {@code [全屏, 画中画, 音量]}，视觉却是 {@code 音量 画中画 全屏}。
+     * 因此「视觉上更靠左」= 「DOM 里更靠后」。
+     * 早先用 {@code insertBefore(box, volume)} 把按钮插到音量<b>前面</b>，
+     * 在 row-reverse 下反而显示在音量<b>右边</b>（正是用户看到的现象）。
+     * 插到音量之后（DOM 末尾）才会显示在音量左侧。
+     */
+    const volume = grouper.querySelector('.xgplayer-volume')
+    if (volume) {
+      volume.insertAdjacentElement('afterend', box)
+    } else {
+      grouper.appendChild(box)
+    }
+    return true
+  }
+  if (!mount()) {
+    /*
+     * 控制栏由 xgplayer 异步渲染，首次建播放器时可能还没挂上。
+     * 轮询重试（最多约 1 秒）：早先只重试一帧，实测 WebRTC 通路
+     * 重建后就错过了，菜单直接不见了。
+     */
+    let tries = 0
+    const retry = () => {
+      if (mount() || ++tries > 20) {
+        return
+      }
+      setTimeout(retry, 50)
+    }
+    setTimeout(retry, 50)
+  }
 }
 
 /** 等待 ICE 收集完成（最多 2 秒，超时用当前候选继续）。 */

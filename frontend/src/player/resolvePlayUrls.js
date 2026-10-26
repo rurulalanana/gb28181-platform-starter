@@ -139,3 +139,50 @@ function rewriteHost(url) {
     return url
   }
 }
+
+/**
+ * 直播可选的播放协议（统一在这里定义，避免各页面各写一份、改一处漏一处）。
+ *
+ * <p>列在这里的都是<b>浏览器真能播</b>的通路：
+ * <ul>
+ *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，延迟 ≈ 1s（默认）；</li>
+ *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，延迟 ≈ 1s，能穿代理；</li>
+ *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s），但抗丢包最差；</li>
+ *   <li>{@code hls} —— 纯 HTTP、无需长连接，延迟 ≈ 3 个切片（ZLM 配 2s×3）。
+ *       <b>没有声音</b>：HLS/TS 规范要求音频为 AAC，而国标设备推的是
+ *       G.711（PCMA/PCMU），ZLM 不会为 HLS 转码，所以切片里只有视频轨。
+ *       菜单上必须写清楚，否则用户会以为是音频坏了。</li>
+ * </ul>
+ * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
+ */
+export const LIVE_PROTOCOLS = [
+  { value: 'wsflv', label: 'WebSocket-FLV' },
+  { value: 'httpflv', label: 'HTTP-FLV' },
+  { value: 'webrtc', label: 'WebRTC' },
+  { value: 'hls', label: 'HLS（无声音）' }
+]
+
+/** 协议对应的短标签（播放器控制栏空间小，用短名）。 */
+export const LIVE_PROTOCOL_SHORT = {
+  wsflv: 'FLV',
+  httpflv: 'HTTP-FLV',
+  webrtc: 'WebRTC',
+  hls: 'HLS'
+}
+
+/**
+ * 该协议在给定地址集合里是否有可用地址。
+ *
+ * <p>FLV 的两种承载是同一路流，任一存在即可（见 {@code WsFlvStream}），
+ * 所以 {@code wsflv} 与 {@code httpflv} 互相兜底 —— 但只有<b>全都没有</b>才算缺地址。
+ *
+ * @param {string} proto 协议名
+ * @param {object} urls  {@link resolvePlayUrls} 的返回值
+ */
+export function hasPlayUrl(proto, urls) {
+  if (!urls) return false
+  const flv = !!(urls.wsFlv || urls.httpFlv)
+  if (proto === 'webrtc') return !!urls.webrtc
+  if (proto === 'hls') return !!urls.hls
+  return flv
+}

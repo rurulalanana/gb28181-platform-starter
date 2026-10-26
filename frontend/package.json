@@ -18,6 +18,7 @@
     "vue": "^3.5.13",
     "vue-router": "^4.4.5",
     "xgplayer": "^3.0.26",
+    "xgplayer-hls": "^3.0.26",
     "xgplayer-transmuxer": "^3.0.26"
   },
   "devDependencies": {

@@ -83,6 +83,10 @@ export const deviceApi = {
   fetchCatalog: (params) => post('/device/fetchcatalog', params),
   fetchInfo: (params) => post('/device/fetchinfo', params),
   fetchStatus: (params) => post('/device/fetchstatus', params),
+  /** 向设备下发预置位查询（异步；结果用 presetList 取）。 */
+  fetchPreset: (params) => post('/device/fetchpreset', params),
+  /** 读预置位列表；queriedAt 为 null 表示设备还没应答。 */
+  presetList: (serial, code) => get('/device/presetlist', { serial, code }),
   remove: (serial) => post('/device/remove', { serial }),
   setName: (params) => post('/device/setname', params),
   setInfo: (params) => post('/device/setinfo', params),
@@ -123,6 +127,8 @@ export const playbackApi = {
   downloadProgress: (params) => get('/playback/download/progress', params),
   downloadFinish: (params) => post('/playback/download/finish', params),
   downloadCancel: (params) => post('/playback/download/cancel', params),
+  downloadList: () => get('/playback/download/list'),
+  downloadRemove: (params) => post('/playback/download/remove', params),
   streamList: (params) => get('/playback/streamlist', params),
   streamInfo: (streamid) => get('/playback/streaminfo', { streamid })
 }

@@ -1,5 +1,5 @@
 /**
- * ws-flv 拉流引擎：WebSocket 收 FLV，视频走 MSE、G.711 音频走 Web Audio。
+ * FLV 拉流引擎：收 FLV（WebSocket 或 HTTP），视频走 MSE、G.711 音频走 Web Audio。
  *
  * <h3>为什么需要它</h3>
  * 国标设备的直播流是 <b>PS 封装 + G.711 音频</b>，ZLM 转成 FLV 后音频仍是
@@ -15,13 +15,23 @@
  * </ul>
  * 这样既保住硬解画质与性能，又不用 WASM 软解整路流。
  *
+ * <h3>两种承载：WebSocket 与 HTTP</h3>
+ * ZLM 同时提供 {@code ws://…/{流ID}.live.flv} 与 {@code http://…/{流ID}.live.flv}，
+ * 两者是<b>同一路 FLV 字节流</b>，只有传输层不同。既然解封装、重封装、
+ * G.711 解码的代码完全一样，就<b>只保留一套引擎</b>、按 URL 协议分支取数据
+ * （见 {@link WsFlvStream#_connect}）。
+ *
+ * <p>HTTP 通路的价值：企业网络里 WebSocket 常被反向代理 / 防火墙拦掉
+ * （升级握手 101 被改写），而普通 HTTP 长连接几乎总能通过。
+ *
  * <h3>音画同步</h3>
  * 以 <b>音频为主时钟</b>：音频按 PTS 精确排程，视频每 500ms 与音频对齐一次，
  * 偏差小于 200ms 用播放速率微调（不跳帧），超过 500ms 才硬跳。
  *
  * <h3>线程与生命周期</h3>
- * 全部在浏览器主线程，无 Worker。{@link destroy} 会关闭 WebSocket、
- * 停止音频排程、解绑 MSE 并释放 object URL，调用后实例不可复用。
+ * 全部在浏览器主线程，无 Worker。{@link destroy} 会关闭连接（WebSocket 或
+ * fetch 的 AbortController）、停止音频排程、解绑 MSE 并释放 object URL，
+ * 调用后实例不可复用。
  */
 
 import { FlvDemuxer, FMP4Remuxer, AudioCodecType } from 'xgplayer-transmuxer'
@@ -41,21 +51,38 @@ const AUDIO_MAX_LEAD_SECONDS = 3
 export default class WsFlvStream {
   /**
    * @param {object} opts
-   * @param {string} opts.url WebSocket 地址（ZLM: ws://host/rtp/{流ID}.live.flv）
+   * @param {string} opts.url 拉流地址：{@code ws(s)://…} 走 WebSocket，
+   *                          {@code http(s)://…} 或相对路径走 HTTP 长连接
+   *                          （ZLM 两种都是 {@code /rtp/{流ID}.live.flv}）
    * @param {MediaSource} opts.mediaSource 已与 video 元素绑定的 MediaSource
    * @param {HTMLVideoElement} opts.media 播放器持有的 video 元素
    * @param {(msg: string) => void} [opts.onError] 不可恢复的错误回调
    * @param {(info: object) => void} [opts.onStats] 播放信息回调（码率、分辨率等）
+   * @param {boolean} [opts.vod] 是否为录像回放（伪点播）模式
    */
-  constructor({ url, mediaSource, media, onError, onStats }) {
+  constructor({ url, mediaSource, media, onError, onStats, vod }) {
     this.url = url
     this.mediaSource = mediaSource
     this.media = media
     this.onError = onError || (() => {})
     this.onStats = onStats || (() => {})
+    /**
+     * 录像回放模式。
+     *
+     * <p><b>为什么回放必须关掉音画同步</b>：同步逻辑以 Web Audio 时钟为主时钟，
+     * 会直接改 {@code currentTime}（硬跳）与 {@code playbackRate}（软调）。
+     * 但回放里的位置由<b>设备侧的 npt</b> 决定、倍速由<b>设备侧的 Scale</b> 决定，
+     * 本地再按音频时钟去拽视频就会把两者全部推翻：
+     * 实测日志里用户选 2 倍速后出现 {@code Scale 1.0 / 0.9 / 1.1} 乱跳，
+     * 正是因为同步逻辑每 500ms 把 {@code media.playbackRate} 拉回 1 ——
+     * 表现为「改倍速没用」，而且拖动进度条也会被硬跳覆盖。
+     */
+    this.vod = !!vod
 
     this.destroyed = false
     this.ws = null
+    /** HTTP 通路的连接中止器（与 {@code ws} 互斥，同一时刻只有一个生效）。 */
+    this.httpAbort = null
     this.retryCount = 0
     this.retryTimer = null
 
@@ -112,10 +139,36 @@ export default class WsFlvStream {
     this.syncTimer = setInterval(() => this._syncAudioVideo(), 500)
   }
 
-  // ==================== WebSocket ====================
+  // ==================== 连接（WebSocket / HTTP） ====================
 
+  /**
+   * 建立连接。按 URL 协议选传输层：
+   * {@code ws://}、{@code wss://} 走 WebSocket，其余（{@code http(s)://} 与
+   * 相对路径）走 HTTP 长连接。
+   */
   _connect() {
     if (this.destroyed) return
+    if (/^wss?:/i.test(this.url || '')) {
+      this._connectWs()
+    } else {
+      this._connectHttp()
+    }
+  }
+
+  /**
+   * 排一次重连。直播断流很常见（设备重启、网络抖动），指数退避，上限 10 秒。
+   *
+   * <p>两种承载共用：WebSocket 的 {@code onclose} 与 HTTP 的读流结束/异常
+   * 都走这里，保证重连节奏一致。
+   */
+  _scheduleRetry() {
+    if (this.destroyed) return
+    const delay = Math.min(500 * 2 ** this.retryCount, 10000)
+    this.retryCount++
+    this.retryTimer = setTimeout(() => this._connect(), delay)
+  }
+
+  _connectWs() {
     let ws
     try {
       ws = new WebSocket(this.url)
@@ -138,12 +191,72 @@ export default class WsFlvStream {
 
     ws.onclose = () => {
       this.ws = null
-      if (this.destroyed) return
-      // 直播断流很常见（设备重启、网络抖动），指数退避重连，上限 10 秒
-      const delay = Math.min(500 * 2 ** this.retryCount, 10000)
-      this.retryCount++
-      this.retryTimer = setTimeout(() => this._connect(), delay)
+      this._scheduleRetry()
     }
+  }
+
+  /**
+   * HTTP-FLV：用 {@code fetch} 建立长连接，边收边喂给同一个解封装器。
+   *
+   * <p><b>为什么不用 {@code <video src>} 直连</b>：FLV 不是浏览器原生支持的
+   * 容器，{@code video} 元素看到 {@code .flv} 只会报 MEDIA_ERR_SRC_NOT_SUPPORTED；
+   * 而且这路流带 G.711 音频，仍要拆轨走 Web Audio。
+   *
+   * <p>{@code fetch} 相比 {@code XHR} 的关键优势是 {@code response.body} 是
+   * {@link ReadableStream}，可以<b>流式</b>读；XHR 要等整个响应结束才给数据，
+   * 直播这种永不结束的响应会一直拿不到字节。
+   */
+  async _connectHttp() {
+    if (this.destroyed) return
+    const ctrl = new AbortController()
+    this.httpAbort = ctrl
+    let res
+    try {
+      res = await fetch(this.url, { signal: ctrl.signal, cache: 'no-store' })
+    } catch (e) {
+      // 主动 destroy 会 abort，这里不能再抛错或重连
+      if (this.destroyed || ctrl.signal.aborted) return
+      this._scheduleRetry()
+      return
+    }
+    if (this.destroyed || ctrl.signal.aborted) return
+    if (!res.ok || !res.body) {
+      // 404/403 这类多半是流还没起来（设备正在推第一帧），按断流重试
+      this._scheduleRetry()
+      return
+    }
+    const reader = res.body.getReader()
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (this.destroyed) return
+        if (done) break
+        if (value && value.length) {
+          this.retryCount = 0
+          this._push(value)
+        }
+      }
+    } catch (e) {
+      // abort 或网络中断：统一走重连
+    } finally {
+      /*
+       * 释放读端。
+       *
+       * <p>{@code cancel()} 返回的是 Promise：销毁时 abort 已经让底层流进入
+       * “aborted” 状态，这里再 cancel 会以 {@code AbortError: BodyStreamBuffer
+       * was aborted} <b>异步</b> reject —— 外面那层 try/catch 抓不到异步异常，
+       * 浏览器控制台会多出一串 unhandled rejection。必须显式吞掉。
+       */
+      try {
+        const p = reader.cancel()
+        if (p && typeof p.catch === 'function') p.catch(() => {})
+      } catch (e) {
+        // 忽略
+      }
+      if (this.httpAbort === ctrl) this.httpAbort = null
+    }
+    // 直播流不该正常结束（服务端关流 / 源下线），照断流处理
+    this._scheduleRetry()
   }
 
   // ==================== 解封装与分发 ====================
@@ -363,6 +476,25 @@ export default class WsFlvStream {
    */
   _enqueueAudio(pts, data, law) {
     if (!data || !data.length) return
+    /*
+     * 非 1 倍速时不排程音频。
+     *
+     * <p>Web Audio 的排程绝对依赖 PTS：{@code when = audioClockBase + streamTime}。
+     * 设备按 N 倍速推流时 PTS 的增量也是 N 倍，而每个音频块的实际长度不变 ——
+     * 按 PTS 排会得到「一块声音 + 一段空白」的卡顿音。
+     * 与其放噪声，不如在看片时不出声（2 倍速以上用户主要看画面）。
+     */
+    const rate = this.media?.playbackRate
+    if (Number.isFinite(rate) && Math.abs(rate - 1) > 0.01) {
+      /*
+       * 同时把排程基准清零：回到 1 倍速时要以「当前这一块」重新起锚，
+       * 否则 audioClockBase 还停在很久以前，新块的 when 已经在过去，
+       * 会被下面的「迟到丢弃」判定全部丢掉 —— 表现为切回 1x 后一直没有声音。
+       */
+      this.audioClockBase = null
+      this.firstAudioPts = null
+      return
+    }
     const pcm = decodeG711(data, law)
 
     if (!this.audioCtx) {
@@ -421,6 +553,12 @@ export default class WsFlvStream {
 
   /** 以音频为主时钟校正视频：小幅微调速率，大幅直接跳。 */
   _syncAudioVideo() {
+    /*
+     * 回放模式不做音画同步：位置与倍速由设备侧（npt / Scale）控制，
+     * 本地按音频时钟去改 currentTime 或 playbackRate 会直接推翻它们。
+     * 具体症状见构造函数里 vod 字段的说明。
+     */
+    if (this.vod) return
     const ctx = this.audioCtx
     const v = this.media
     if (!ctx || !v || this.audioClockBase === null || this.destroyed) return
@@ -484,6 +622,16 @@ export default class WsFlvStream {
         // 忽略
       }
       this.ws = null
+    }
+
+    // HTTP 通路：abort 会让正在 await 的 reader.read() 立刻以异常返回
+    if (this.httpAbort) {
+      try {
+        this.httpAbort.abort()
+      } catch (e) {
+        // 忽略
+      }
+      this.httpAbort = null
     }
 
     for (const node of this.audioNodes) {

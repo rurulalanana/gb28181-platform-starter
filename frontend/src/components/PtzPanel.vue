@@ -35,20 +35,25 @@
     </div>
 
     <!--
-      变倍与光圈。
+      变倍。
 
-      变倍曾有两处入口：方向盘下方两个放大镜按钮 + 这里的「近焦 / 远焦」。
-      但两者最终下发的 PTZ 指令逐字节相同（都走 PtzEncoder.ZOOM_IN/ZOOM_OUT），
-      且方向盘下那两个按钮的 grid-area 名（zin/zout）在 grid-template-areas
-      里并不存在，被浏览器自动排到 3×3 网格之外，看起来像游离的怪按钮。
-      现合并为一对 +/−，与方向键统一为「按住持续、松开停止」。
+      变倍曾有三处入口：方向盘下方两个放大镜按钮、这里的「近焦 / 远焦」、
+      以及一对「光圈 + / −」。三者最终下发的 PTZ 指令逐字节相同
+      （全走 PtzEncoder.ZOOM_IN/ZOOM_OUT 的 0x10 / 0x20），按下任何一个
+      都是同一个「变焦」动作。现合并为一对 +/−，与方向键统一为
+      「按住持续、松开停止」。
+
+      <p><b>光圈按钮已删除</b>：GB/T 28181 附录 A.3 的指令码里<b>没有光圈位</b>
+      （只有四方向 + 变倍±），它此前被映射到变倍位，所以按「光圈+」画面会
+      放大 —— 那是变焦，不是光圈。真正的光圈只能走厂商私有指令或 ONVIF，
+      保留一对假按钮只会先让用户以为「光圈坏了」，再让运维去查设备。
     -->
     <div class="ptz-row ptz-zoom-row">
       <el-button-group class="zoom-group">
         <el-button
           size="small"
           :disabled="inactive"
-          title="放大"
+          title="放大（变倍+）"
           @pointerdown="beginMove('zoomin', $event)"
         >
           <el-icon><Plus /></el-icon>
@@ -56,18 +61,10 @@
         <el-button
           size="small"
           :disabled="inactive"
-          title="缩小"
+          title="缩小（变倍−）"
           @pointerdown="beginMove('zoomout', $event)"
         >
           <el-icon><Minus /></el-icon>
-        </el-button>
-      </el-button-group>
-      <el-button-group class="zoom-group">
-        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'irisin' })">
-          光圈+
-        </el-button>
-        <el-button size="small" :disabled="inactive" @click="cmd('fi', { command: 'irisout' })">
-          光圈−
         </el-button>
       </el-button-group>
     </div>
@@ -107,6 +104,45 @@
               删除
             </el-button>
           </el-button-group>
+
+          <!--
+            设备侧预置位列表。
+
+            <p>平台早就能下发 PresetQuery，但设备应答此前被丢弃、
+            前端也没有查询入口，所以「设备明明有预置位，界面却什么都看不到」。
+            现在的流程：点「刷新」→ POST fetchpreset → 轮询 GET presetlist
+            等设备应答（SIP 是异步的，一问一答之间必然有间隔）。
+            点列表中的条目直接「调用」，比先在输入框里敲编号高效。
+          -->
+          <div class="preset-head">
+            <span class="preset-label">设备预置位</span>
+            <span v-if="presets.length" class="preset-count">{{ presets.length }} 个</span>
+            <el-button
+              size="small"
+              text
+              :loading="presetLoading"
+              :disabled="!serial"
+              title="向设备查询预置位列表"
+              @click="refreshPresets"
+            >
+              <el-icon><RefreshRight /></el-icon> 刷新
+            </el-button>
+          </div>
+          <div v-if="presets.length" class="preset-list">
+            <div
+              v-for="p in presets"
+              :key="p.presetId"
+              class="preset-item"
+              :title="`调用预置位 ${p.presetId}${p.deviceName ? ' · ' + p.deviceName : ''}`"
+              @click="gotoPreset(p)"
+            >
+              <span class="preset-no">{{ p.presetId }}</span>
+              <span class="preset-name">{{ p.name }}</span>
+              <span v-if="p.status" class="preset-status">{{ p.status }}</span>
+            </div>
+          </div>
+          <p v-else-if="presetQueriedAt" class="preset-empty">设备上没有预置位</p>
+          <p v-else class="preset-empty">点「刷新」向设备查询</p>
         </div>
       </el-tab-pane>
 
@@ -182,9 +218,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { controlApi } from '@/api'
+import { controlApi, deviceApi } from '@/api'
 
 const props = defineProps({
   /** 设备编码 */
@@ -224,6 +260,20 @@ const SPEED = 129
 
 const presetNo = ref(1)
 const talking = ref(false)
+
+/**
+ * 设备侧预置位列表。
+ *
+ * <p>数据结构见后端 {@code PresetListVo}：编号以设备为准，
+ * {@code name} 已由服务端合并了平台自定义名称（有自定义就用自定义的）。
+ */
+const presets = ref([])
+/** 最后一次收到设备应答的时间；`null` 表示从未查到过。 */
+const presetQueriedAt = ref(null)
+/** 查询中（含等待设备应答的轮询阶段）。 */
+const presetLoading = ref(false)
+/** 上一次查询得到的应答时间，用来判断「轮询到的是不是本次的结果」。 */
+let presetBaseline = null
 
 /**
  * 当前选中的运维功能 Tab。
@@ -301,6 +351,86 @@ function endMove() {
   moving.value = false
   send('ptz', { command: 'stop' }, null, true)
 }
+
+/** 把后端返回的应用到界面。 */
+function applyPresetList(vo) {
+  if (!vo) return
+  presets.value = Array.isArray(vo.items) ? vo.items : []
+  presetQueriedAt.value = vo.queriedAt || null
+}
+
+/**
+ * 向设备发起一次预置位查询，并等它的应答。
+ *
+ * <h3>为什么要轮询</h3>
+ * 预置位查询走 SIP {@code MESSAGE}，接口返回只代表<b>查询已发出</b>，
+ * 设备应答要过几百毫秒到几秒才到（还要经平台解析落缓存）。
+ * 所以这里：先 POST 下发 → 再轮询 GET，直到 {@code queriedAt} 相比上一次变化。
+ *
+ * <p><b>基线比较不可省</b>：设备卡住不回应答时，缓存里仍是上一次的结果，
+ * 只看「有没有数据」会立刻拿到旧数据并显示成功 —— 用户点刷新看到的是老列表，
+ * 以为查询生效了。用时间戳判断才能区分「本次的应答」与「上一次的残留」。
+ */
+async function refreshPresets() {
+  if (!props.serial || presetLoading.value) return
+  presetLoading.value = true
+  presetBaseline = presetQueriedAt.value
+  try {
+    await deviceApi.fetchPreset({ serial: props.serial, code: props.code })
+    /*
+     * 15 × 700ms ≈ 10.5 秒。
+     *
+     * 实测该海康球机从收到 PresetQuery 到应答要 3~5 秒（比常见的几百毫秒慢），
+     * 3 秒的等待会误判成「设备未应答」。宁可多等几秒，
+     * 也不要让用户看到「查不到」这种假失败 —— 那会引导他去查设备。
+     */
+    for (let i = 0; i < 15; i++) {
+      await new Promise((r) => setTimeout(r, 700))
+      const vo = await deviceApi.presetList(props.serial, props.code)
+      if (vo && vo.queriedAt && vo.queriedAt !== presetBaseline) {
+        applyPresetList(vo)
+        ElMessage.success(
+          presets.value.length ? `已查到 ${presets.value.length} 个预置位` : '设备上报没有预置位'
+        )
+        return
+      }
+    }
+    // 超时：保留旧数据但明确告知，避免用户以为「设备上就是这些」
+    ElMessage.warning('设备未应答预置位查询（可能不支持该指令或当前不可达）')
+  } catch (e) {
+    ElMessage.error(e.message || '预置位查询失败')
+  } finally {
+    presetLoading.value = false
+  }
+}
+
+/** 点击列表条目：填进编号并直接调用。 */
+async function gotoPreset(p) {
+  presetNo.value = p.presetId
+  await cmd('preset', { command: 'goto', preset: p.presetId }, `已调用预置位 ${p.presetId}`)
+}
+
+/**
+ * 换通道时重新拉一次。
+ *
+ * <p>不做「立即向下发查询」：打开预览时面板已经渲染，
+ * 每次点播都多发一条 SIP 会打扰设备；先用缓存（若有）显示，
+ * 用户想要最新的点一下「刷新」即可。
+ */
+watch(
+  () => [props.serial, props.code],
+  async ([serial, code]) => {
+    presets.value = []
+    presetQueriedAt.value = null
+    if (!serial || props.simple) return
+    try {
+      applyPresetList(await deviceApi.presetList(serial, code))
+    } catch (e) {
+      // 缓存为空时忽略：界面显示「点刷新向设备查询」即可
+    }
+  },
+  { immediate: true }
+)
 
 /** 标签页切到后台时停止：用户此时看不到画面，继续转动没有意义。 */
 function onVisibilityChange() {
@@ -495,11 +625,11 @@ async function toggleTalk() {
 }
 
 /*
- * 变倍 / 光圈：两组按钮平分栏宽。
+ * 变倍：按钮组撑满整栏宽。
  *
- * 原来两个 button-group 是自然宽度，总共约 170px，在 300px 的栏里
- * 左边贴边、右边空一大块，看着像"没排完"。改成各占一半后左右对齐，
- * 和上面的方向盘、下面的折叠面板都能对成一条竖线。
+ * 原来这里是「变倍 + 光圈」两组平分栏宽。光圈按钮删掉后只剩一组，
+ * 若仍按自然宽度（约 85px）排在 300px 的栏里，左边贴边、右边空一大块，
+ * 看着像“没排完”；改成 flex:1 后与上面的方向盘、下面的折叠面板对齐。
  */
 .ptz-zoom-row {
   gap: 8px;
@@ -546,6 +676,86 @@ async function toggleTalk() {
   flex: 1;
   padding-left: 0;
   padding-right: 0;
+}
+
+/*
+ * 设备预置位列表。
+ *
+ * 列表限高 + 内部滚动：设备上可能有几十个预置位（有些球机默认 255 个全开），
+ * 不限高会把整个面板撑到需要滚页面，而用户真正要在意的方向盘会被挤出视口。
+ * 140px ≈ 显示 5 行，再多就滚。
+ */
+.preset-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.preset-head .preset-label {
+  margin-right: auto;
+}
+
+.preset-count {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+.preset-list {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.preset-item + .preset-item {
+  border-top: 1px solid var(--border-color);
+}
+
+.preset-item:hover {
+  background: var(--fill-color-light, rgba(64, 128, 255, 0.08));
+}
+
+/* 编号定宽等宽字体：1 和 128 上下对齐，扫一眼就能找到目标编号 */
+.preset-no {
+  flex: 0 0 28px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.preset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-status {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.preset-empty {
+  margin: 0;
+  padding: 10px 0;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
 }
 
 /*

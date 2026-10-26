@@ -292,10 +292,6 @@
             <el-tag :type="stateType" size="small" effect="dark" class="status-tag">
               {{ state }}
             </el-tag>
-            <el-select v-model="proto" size="small" class="proto-select" @change="switchProto">
-              <el-option label="WebSocket-FLV" value="wsflv" />
-              <el-option label="WebRTC（低延迟）" value="webrtc" />
-            </el-select>
           </div>
           <div class="preview-sep" />
           <!--
@@ -361,7 +357,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_PROTOCOL_SHORT } from '@/player/resolvePlayUrls'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
@@ -535,8 +531,43 @@ function playOnWall(row) {
 async function preview(row) {
   previewTarget.value = row
   previewDialog.value = true
+  // 用户主动点开一个通道才算新的一轮，重置卡轨重建计数
+  stallRetry = 0
   await ensureMediaPort()
   await sleep(120)
+  await startPlay()
+}
+
+/**
+ * 「画面未就绪」自动重建的次数上限（每个通道一轮最多 2 次）。
+ *
+ * <p>重建 = 停会话 + 重新 INVITE，成本不低（设备要重新起推），
+ * 而如果是设备自己坏了，重试多少次都没用。限定次数避免变成死循环。
+ */
+let stallRetry = 0
+
+/**
+ * 流是通的、却始终没有视频轨 → 重建整路流。
+ *
+ * <p><b>为什么必须停会话而不是重连播放器</b>：ZLM 等轨就绪超时后会把视频轨
+ * <b>永久丢弃</b>（{@code Track not ready for a long time, ignored: H264}），
+ * 这个决定绑定在那个媒体源上。重连 FLV 连的还是同一个媒体源，所以永远没画面。
+ * 只有 {@code stream/stop} 把会话拆掉（同时清掉 ZLM 的媒体源），再重新
+ * INVITE 让设备重推，才会生成一个全新的媒体源。
+ *
+ * <p>这也正好对应用户的土办法「关掉重播一下就好了」—— 只是现在由程序自己做。
+ */
+async function rebuildStalled() {
+  const row = previewTarget.value
+  if (!row || stallRetry >= 2) return
+  stallRetry++
+  ElMessage.warning('画面未就绪，正在重新拉流…')
+  try {
+    await streamApi.stop({ serial: row.deviceId, code: row.id })
+  } catch (e) {
+    // 会话可能已被空闲巡检关掉，继续重播即可
+  }
+  if (!previewDialog.value) return
   await startPlay()
 }
 
@@ -557,11 +588,29 @@ async function startPlay() {
     }
   }
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
-  if (!urls.wsFlv && !urls.webrtc) {
+  if (!hasPlayUrl(proto.value, urls)) {
     ElMessage.error('未获取到播放地址')
     return
   }
-  await player.play(streamId, urls, { proto: proto.value })
+  await player.play(streamId, urls, {
+    proto: proto.value,
+    // 通了但始终没视频轨时，重建整路流（见 rebuidStalled 的说明）
+    onStall: () => rebuildStalled(),
+    protocolSwitch: {
+      value: proto.value,
+      // 控制栏按钮放短标签（FLV / HTTP-FLV / WebRTC / HLS），
+      // 菜单项放完整名（含「HLS（无声音）」这类限制说明），像视频网站的清晰度菜单
+      options: LIVE_PROTOCOLS.map((o) => ({
+        value: o.value,
+        label: o.label,
+        short: LIVE_PROTOCOL_SHORT[o.value] || o.label
+      })),
+      onChange: (v) => {
+        proto.value = v
+        switchProto(v)
+      }
+    }
+  })
 }
 
 /**
@@ -577,9 +626,14 @@ async function startPlay() {
  * <p>所以这里一旦发现地址不齐，就重新走完整的 {@link startPlay}
  * （内部会重新 INVITE 拉起设备推流），而不是拿空地址去切。
  */
-async function switchProto() {
+async function switchProto(next) {
   const row = previewTarget.value
-  if (!row || !playing.value) return
+  if (!row) return
+  if (!playing.value) {
+    // 未在播放时只记住选择，下次点播按它走
+    proto.value = next || proto.value
+    return
+  }
   const streamId = `${row.deviceId}/${row.id}`
   let urls = null
   try {
@@ -588,11 +642,11 @@ async function switchProto() {
   } catch (e) {
     // 流可能已被空闲巡检关闭，下面重新点播
   }
-  if (!urls || (!urls.wsFlv && !urls.webrtc)) {
+  if (!urls || !hasPlayUrl(next || proto.value, urls)) {
     await startPlay()
     return
   }
-  await player.switchProtocol(proto.value, urls)
+  await player.switchProtocol(next || proto.value, urls)
 }
 
 /**
@@ -610,6 +664,8 @@ async function switchProto() {
 function closePreview() {
   previewDialog.value = false
   // 立即断流：不要等 300ms 的关闭动画，让 ZLM 早点释放这路拉流
+  // 先退掉「CSS 全屏」兜底（切协议重建播放器时可能用上），否则它固定覆盖整屏
+  player.exitCssFullscreen()
   player.stop()
 }
 

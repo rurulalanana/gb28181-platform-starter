@@ -76,6 +76,9 @@
             </button>
           </el-tooltip>
 
+          <!-- 后台下载任务：任何页面都能看进度、取已完成文件 -->
+          <DownloadTasks />
+
           <div class="divider" />
 
           <el-dropdown trigger="click" @command="onCommand">
@@ -126,12 +129,15 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useDownloadStore } from '@/stores/download'
+import DownloadTasks from '@/components/DownloadTasks.vue'
 
 const auth = useAuthStore()
+const downloads = useDownloadStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -223,7 +229,17 @@ onMounted(async () => {
   if (auth.loggedIn) {
     await auth.loadUser()
     await loadServerInfo()
+    /*
+     * 后台下载轮询挂在布局层（而不是某个页面）：下载任务是全局的，
+     * 用户切到任何页面都应当继续看到进度、并在完成时收到通知。
+     */
+    downloads.startPolling()
   }
+})
+
+onUnmounted(() => {
+  // 退出登录 / 卸载布局时停掉轮询，避免未授权请求刷屏
+  downloads.stopPolling()
 })
 </script>
 

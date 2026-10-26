@@ -30,6 +30,24 @@
       <el-button type="primary" :loading="searching" @click="search">
         <el-icon><Search /></el-icon> 检索
       </el-button>
+      <!--
+        下载倍速：档位来自设备目录应答的 Info/DownloadSpeed（如 1/2/4/8）。
+        标准 9.9.1 b) 规定倍速由请求方在 SDP 里携带（a=downloadspeed:N），
+        设备支持就快进推流 —— 8 倍速下 1 小时录像约 7.5 分钟就能拿完。
+        只对「下载」生效，回放永远是 1 倍速。
+      -->
+      <el-select
+        v-model="downloadSpeed"
+        style="width: 160px"
+        :title="`设备声明支持的下载倍速：${speedOptions.join('/')}（设备若不支持会按 1 倍速推流）`"
+      >
+        <el-option
+          v-for="n in speedOptions"
+          :key="n"
+          :label="n === 1 ? '下载 1x（实时）' : `下载 ${n}x`"
+          :value="n"
+        />
+      </el-select>
     </div>
 
       <el-table v-loading="searching" :data="records" stripe table-layout="fixed">
@@ -60,8 +78,9 @@
             <el-button
               link
               type="primary"
-              :loading="download.rowKey === rowKeyOf(row)"
-              :disabled="!!download.rowKey && download.rowKey !== rowKeyOf(row)"
+              :loading="isDownloadingRow(row)"
+              :disabled="hasTaskOfRow(row)"
+              :title="hasTaskOfRow(row) ? '该段已在后台下载，见右上角「下载任务」' : ''"
               @click="startDownload(row)"
             >
               <el-icon><Download /></el-icon> 下载
@@ -73,43 +92,11 @@
         </template>
       </el-table>
 
-      <div class="table-footer">共 {{ records.length }} 条录像</div>
-    </el-card>
-
-    <!--
-        下载进度条（列表页顶部）。
-        下载会占用一路回放流并持续录制，属于「后台任务」——
-        放在列表页而不是回放弹窗里，用户可以边等边继续检索别的时段，
-        也不必为了下载先去回放。
-    -->
-    <el-card v-if="download.rowKey" class="download-card" shadow="never">
-      <div class="pb-download">
-        <template v-if="download.url">
-          <el-icon class="pb-dl-ok"><CircleCheck /></el-icon>
-          <span>
-            已生成 {{ formatSize(download.fileSize) }}
-            <span class="pb-dl-name mono">{{ download.fileName }}</span>
-          </span>
-          <div class="spacer" />
-          <el-button size="small" type="primary" @click="saveFile">保存到本地</el-button>
-          <el-button size="small" @click="resetDownload">关闭</el-button>
-        </template>
-        <template v-else>
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <!--
-            显示「已生成 / 共」而不是只有百分比：录像按实时速度推流，
-            2 小时的录像要下 2 小时，早期进度永远是 0%，光看百分比会以为卡死了。
-          -->
-          <span>正在生成录像 {{ fmtDuration(download.recordedSecond) }} / {{ fmtDuration(download.totalSecond) }}</span>
-          <el-progress
-            :percentage="download.percent"
-            :stroke-width="8"
-            :show-text="false"
-            class="pb-dl-progress"
-          />
-          <span class="mono pb-dl-pct">{{ download.percent }}%</span>
-          <el-button size="small" @click="cancelDownload">取消</el-button>
-        </template>
+      <div class="table-footer">
+        共 {{ records.length }} 条录像
+        <span v-if="downloads.runningCount" class="dl-hint">
+          · {{ downloads.runningCount }} 个后台下载进行中，可在右上角「下载任务」查看进度
+        </span>
       </div>
     </el-card>
 
@@ -133,11 +120,6 @@
       -->
       <div class="play-bar">
         <el-tag :type="stateType" size="small">{{ state }}</el-tag>
-        <div class="spacer" />
-        <el-select v-model="proto" size="small" style="width: 160px" @change="switchProto">
-          <el-option label="WebSocket-FLV" value="wsflv" />
-          <el-option label="WebRTC（低延迟）" value="webrtc" />
-        </el-select>
       </div>
 
       <template #footer>
@@ -148,7 +130,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CircleCheck, Download, Loading, VideoPlay } from '@element-plus/icons-vue'
 import { useRoute } from 'vue-router'
@@ -156,8 +138,11 @@ import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls } from '@/player/resolvePlayUrls'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
+import { useDownloadStore } from '@/stores/download'
 
 const route = useRoute()
+/** 后台下载任务（全局）：本页只负责发起，进度统一在顶栏面板看。 */
+const downloads = useDownloadStore()
 
 const channels = ref([])
 const records = ref([])
@@ -168,7 +153,6 @@ const query = reactive({ channelKey: '' })
 
 const playDialog = ref(false)
 const current = ref(null)
-const proto = ref('wsflv')
 const mediaHttpPort = ref(null)
 
 /** 播放器容器（xgplayer 在内部创建 video 元素）。 */
@@ -180,6 +164,40 @@ const stateType = usePlayerStateType(state)
 
 const serial = computed(() => query.channelKey.split('/')[0] || '')
 const code = computed(() => query.channelKey.split('/')[1] || '')
+
+/**
+ * 当前通道设备声明支持的下载倍速档位。
+ *
+ * <p>来源是设备目录应答里的 {@code Info/DownloadSpeed}（本现场实测全部为
+ * {@code 1/2/4/8}）。设备没报时只给 1 倍速，界面不会出现选不了的值。
+ */
+const speedOptions = computed(() => {
+  const ch = channels.value.find((c) => `${c.deviceId}/${c.id}` === query.channelKey)
+  const list = String(ch?.downloadSpeed || '')
+    .split('/')
+    .map((s) => Number.parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n >= 1)
+  return list.length ? [...new Set(list)].sort((a, b) => a - b) : [1]
+})
+
+/** 下载倍速（只影响下载，不影响回放播放速度）。 */
+const downloadSpeed = ref(1)
+
+/** 当前通道的展示名（下载任务列表用）。 */
+const channelLabel = computed(() => {
+  const ch = channels.value.find((c) => `${c.deviceId}/${c.id}` === query.channelKey)
+  return ch ? (ch.customName || ch.name || ch.id) : code.value
+})
+
+/** 表格行唯一键：同一通道可能有多个录像段，必须带上起止时间。 */
+function rowKeyOf(row) {
+  return `${row?.startTime || ''}|${row?.endTime || ''}`
+}
+
+/* 换通道后默认取该设备支持的最高档：下载要的是快，用户一般不会主动选低档 */
+watch(speedOptions, (list) => {
+  downloadSpeed.value = list[list.length - 1] || 1
+}, { immediate: true })
 
 async function loadChannels() {
   try {
@@ -256,11 +274,9 @@ async function play(row) {
   playDialog.value = true
   // 进度条总长取录像段的起止时间差；位置归零
   segmentSeconds.value = segmentLengthOf(row)
-  resetDownload()
   await ensureMediaPort()
   await sleep(120)
 
-  const streamId = `${serial.value}/${code.value}`
   let info = null
   try {
     // 回放响应已包含全部播放地址
@@ -282,11 +298,16 @@ async function play(row) {
     return
   }
   /*
-   * vod 参数让播放器切成「伪点播」：进度条 / 暂停 / 倍速 都用 xgplayer 自带的，
-   * 但底层动作全部转成设备信令。见 useXgPlayer#applyVodControls。
+   * 回放只走 WebSocket-FLV。
+   *
+   * <p><b>为什么回放不提供 WebRTC</b>（虽然直播预览提供）：回放是「伪点播」——
+   * 进度条/拖动/倍速靠 {@code media.currentTime} + 设备信令实现。而 WebRTC 通路
+   * 拿到的是 <b>MediaStream</b>，实测其 {@code currentTime} 不推进（恒定值），
+   * 进度条会卡死；且设备停推时 RTC 连接会直接断开（实测 ~20 秒）。
+   * 与其给一个看着能选、选了就报错的选项，不如不提供。
    */
-  await player.play(streamId, urls, {
-    proto: proto.value,
+  await player.play(playbackKey.value, urls, {
+    proto: 'wsflv',
     vod: {
       duration: segmentSeconds.value,
       onSeek: (sec) => control('seek', { range: String(Math.floor(sec)) }),
@@ -304,52 +325,14 @@ async function play(row) {
  * 所以「下载」= 用回放把这段录像拉下来，同时让 ZLM 录成本地 MP4，
  * 录完再给浏览器一个标准 MP4 链接（支持 Range，断点续传）。
  *
- * 入口放在列表操作列而不是回放弹窗里：下载会占一路流并持续几十秒到几分钟，
- * 属于后台任务，用户不该为了下个文件被迫先点开回放。
+ * 【后台任务】任务由服务端持有多份状态（DownloadService），进度与结果
+ * 统一在顶栏的「下载任务」面板里看。本页只负责「发起」，不再自己轮询——
+ * 早先进度存在本组件里，用户切走页面就丢了，而且离开时的 playback/stop
+ * 还会把下载中的流停掉（下载直接中断）。
  */
 
-/** 当前下载任务所属的行（`设备:通道:起始时间`）；空表示无任务。 */
-const download = reactive({
-  rowKey: '',
-  recordedSecond: 0,
-  totalSecond: 0,
-  percent: 0,
-  fileName: '',
-  fileSize: 0,
-  url: ''
-})
-let downloadTimer = null
-
-/** 表格行唯一键：同一通道可能有多个录像段，必须带上起始时间。 */
-function rowKeyOf(row) {
-  return `${row?.startTime || ''}|${row?.endTime || ''}`
-}
-
-function resetDownload() {
-  stopDownloadPolling()
-  download.rowKey = ''
-  download.recordedSecond = 0
-  download.totalSecond = 0
-  download.percent = 0
-  download.fileName = ''
-  download.fileSize = 0
-  download.url = ''
-}
-
-function stopDownloadPolling() {
-  if (downloadTimer) {
-    clearInterval(downloadTimer)
-    downloadTimer = null
-  }
-}
-
-/** 录像段在设备侧的流名（回放会话键）。 */
-function playbackKeyOf() {
-  return `${serial.value}/${code.value}_playback`
-}
-
 /**
- * 开始下载某段录像。
+ * 开始下载某段录像（后台执行，可离开本页）。
  *
  * <p>顺序不能颠倒：必须先有回放流，ZLM 才有东西可录。
  * 若用户此时正在看回放，那段流会被这次 download 复用（同一个会话键），
@@ -362,118 +345,50 @@ async function startDownload(row) {
     return
   }
   if (!(await ensureMediaPort())) return
-  resetDownload()
-  download.rowKey = rowKeyOf(row)
-  download.totalSecond = seconds
-
+  const nowKey = rowKeyOf(row)
+  downloadingKey.value = nowKey
   try {
-    // 1) 起回放（已有则复用），拿到流
-    await playbackApi.start({
+    const ok = await downloads.start({
       serial: serial.value,
       code: code.value,
       filePath: row.filePath,
       starttime: row.startTime,
-      endtime: row.endTime
+      endtime: row.endTime,
+      duration: seconds,
+      speed: downloadSpeed.value,
+      // 设备上报的该段大小：后端据此判断「内容已录完」（设备不会按结束时间停推）
+      fileSize: row.fileSize || 0,
+      name: channelLabel.value
     })
-    // 2) 让 ZLM 对该流开录；片长给足，避免长录像被切成多个文件
-    await playbackApi.downloadStart({
-      streamid: playbackKeyOf(),
-      duration: seconds
-    })
-    ElMessage.success('已开始生成录像文件')
-    pollDownload()
-  } catch (e) {
-    resetDownload()
-    ElMessage.error(e.message || '下载失败')
-  }
-}
-
-/**
- * 轮询下载进度。
- *
- * <p>每秒一次：录制时长以秒计，更密的轮询没有意义还会压后端。
- * 进度到 100% 自动收尾 —— 用户点完下载通常会去干别的，
- * 让他回来手动点「完成」不符合预期。
- */
-function pollDownload() {
-  stopDownloadPolling()
-  downloadTimer = setInterval(async () => {
-    try {
-      const p = await playbackApi.downloadProgress({ streamid: playbackKeyOf() })
-      download.recordedSecond = p.recordedSecond || 0
-      download.totalSecond = p.totalSecond || download.totalSecond
+    if (ok) {
       /*
-       * 百分比保留一位小数。
-       * 整数百分比在下载长录像时几乎不动（2 小时的段，前 72 秒都是 0%），
-       * 用户会以为任务卡死而反复点取消。后端返回的是整数，
-       * 这里用「已录秒数 / 总秒数」自己算更细的值。
+       * 不提「N 倍速」：倍速只是请求值，设备普遍不支持（实测现场设备上报
+       * 支持 8 倍速但实际仍按 1 倍速推流）。宣称倍速只会让用户按倍速估算
+       * 完成时间，结果等不到。
        */
-      download.percent = download.totalSecond > 0
-        ? Math.min(100, Math.round(download.recordedSecond * 1000 / download.totalSecond) / 10)
-        : 0
-      if (p.finished) {
-        stopDownloadPolling()
-        await finishDownload()
-      }
-    } catch (e) {
-      // 任务可能已被取消或超时清理，停止轮询避免刷屏
-      stopDownloadPolling()
-      resetDownload()
+      ElMessage.success('已提交后台下载，可在右上角「下载任务」查看进度')
     }
-  }, 1000)
-}
-
-/** 收尾：停录制、取文件地址。 */
-async function finishDownload() {
-  try {
-    const res = await playbackApi.downloadFinish({ streamid: playbackKeyOf() })
-    if (!res?.ok) {
-      resetDownload()
-      ElMessage.error(res?.message || '录制未产出文件')
-      return
-    }
-    download.url = res.url || ''
-    download.fileName = res.fileName || 'record.mp4'
-    download.fileSize = res.fileSize || 0
-    download.percent = 100
-    ElMessage.success('录像文件已生成，点「保存到本地」下载')
-  } catch (e) {
-    resetDownload()
-    ElMessage.error(e.message || '生成下载文件失败')
+  } finally {
+    downloadingKey.value = ''
   }
 }
 
-async function cancelDownload() {
-  stopDownloadPolling()
-  try {
-    await playbackApi.downloadCancel({ streamid: playbackKeyOf() })
-  } catch (e) {
-    // 取消失败不影响界面复位
-  }
-  resetDownload()
+/** 正在发起下载的行（防重复点击 / 按钮 loading）。 */
+const downloadingKey = ref('')
+
+/** 该行是否正在发起下载（按钮 loading 用）。 */
+function isDownloadingRow(row) {
+  return !!downloadingKey.value && downloadingKey.value === rowKeyOf(row)
 }
 
-/** 保存到本地（用临时 <a> 触发浏览器下载，保证带上文件名）。 */
-function saveFile() {
-  if (!download.url) return
-  const a = document.createElement('a')
-  a.href = download.url
-  a.download = download.fileName
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-}
-
-async function switchProto() {
-  if (!playing.value) return
-  let urls = {}
-  try {
-    const info = await playbackApi.streamInfo(`${serial.value}/${code.value}`)
-    urls = resolvePlayUrls(info, mediaHttpPort.value)
-  } catch (e) {
-    // 忽略
-  }
-  await player.switchProtocol(proto.value, urls)
+/** 该行是否已有后台任务（按钮禁用/改文案用）。 */
+function hasTaskOfRow(row) {
+  const key = rowKeyOf(row)
+  return downloads.tasks.some((t) => {
+    // 后端任务的 startAt/endAt 用 ISO，与表格的 startTime/endTime 一致
+    const range = `${t.startAt || ''}|${t.endAt || ''}`
+    return range === key && (!t.finished || t.ok)
+  })
 }
 
 /** 回放控制：暂停 / 继续 / 倍速 / 拖动。 */
@@ -504,6 +419,16 @@ async function control(command, extra = {}) {
 const segmentSeconds = ref(0)
 /** 播放位置（相对录像段起点的秒数）；由播放器的 timeupdate 驱动。 */
 const playPosition = computed(() => player.position.value)
+
+/**
+ * 回放会话键。
+ *
+ * <p><b>必须带 {@code _playback} 后缀</b>：直播与回放是两个独立会话
+ * （见 {@code RtpSession#getSessionKey}）。用裸的 {@code 设备/通道} 会命中
+ * <b>直播</b>会话 —— 自动云端录像会让通道长期有直播流在跑，于是回放弹窗里
+ * 播的是实时画面（OSD 显示今天），切 WebRTC 也会拿到直播的地址/或直接 404。
+ */
+const playbackKey = computed(() => `${serial.value}/${code.value}_playback`)
 
 /**
  * 回放弹窗标题。
@@ -564,14 +489,12 @@ function closePlay() {
   // 立即停播并通知设备停止回放：别等 300ms 的关闭动画
   player.stop()
   /*
-   * 正在下载时不能停流：下载与回放共用同一路回放流（同一个会话键），
-   * 停掉它就等于把正在录制的源掐了，用户拿到的 MP4 会是半截。
-   * 录制结束后由 finishDownload 自己停流。
+   * 正在下载时不要主动停流：下载与回放共用同一路回放流（同一个会话键），
+   * 停掉它等于把正在录制的源掐了，用户拿到的 MP4 会是半截。
+   * 与后端一致：{@code playback/stop} 在下载中也会返回 ok=false 并跳过停流，
+   * 这里少发一次请求只是省一个无用调用；真正的保护在服务端。
    */
-  if (download.rowKey && !download.url) {
-    return
-  }
-  if (current.value) {
+  if (current.value && !downloads.runningCount) {
     playbackApi.stop({ serial: serial.value, code: code.value }).catch(() => {})
   }
 }
@@ -579,7 +502,6 @@ function closePlay() {
 /** 弹窗完全关闭（动画结束、DOM 销毁后）再清数据。 */
 function onPlayClosed() {
   current.value = null
-  resetDownload()
   segmentSeconds.value = 0
 }
 
@@ -627,7 +549,6 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   player.stop()
-  stopDownloadPolling()
 })
 </script>
 
@@ -644,35 +565,12 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* 进度条：左右时间用等宽字体，数值变化时不抖 */
-/* 下载进度条 */
-.pb-download {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 8px 12px;
-  background: var(--fill-2, #f5f7fa);
-  border-radius: 6px;
-  font-size: var(--fs-sm);
-}
-
-.pb-download .spacer {
-  flex: 1;
-}
-
-.pb-dl-progress {
-  flex: 1;
-  min-width: 120px;
-}
-
-/* 百分比等宽：0.4% → 12.3% 变化时右侧按钮不会左右跳 */
-.pb-dl-pct {
-  min-width: 48px;
-  text-align: right;
-}
-
-.pb-dl-ok {
-  color: var(--success-600, #16a34a);
+/*
+ * 后台下载提示。下载进度已改到顶栏的「下载任务」面板（全局、跨页面），
+ * 本页只在表格底部提一句「有几个任务在跑」，避免用户以为点了没反应。
+ */
+.dl-hint {
+  margin-left: 6px;
+  color: var(--accent-ink, #2563eb);
 }
 </style>
