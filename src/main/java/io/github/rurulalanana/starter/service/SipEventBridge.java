@@ -46,6 +46,8 @@ public class SipEventBridge implements SipCallback {
     private final PlatformAsyncExecutor asyncExecutor;
     /** 目录分页聚合（下级平台按 SumNum 一帧一页上报）。 */
     private final CatalogPager catalogPager;
+    /** 预置位查询应答的落缓存与回显。 */
+    private final PresetService presetService;
 
     /** 平台启动后把本对象挂为信令回调委派。 */
     @PostConstruct
@@ -106,8 +108,26 @@ public class SipEventBridge implements SipCallback {
                     () -> alarmService.onAlarmReset(msg.getDeviceId(), msg));
             case "MobilePosition" -> asyncExecutor.run("移动位置落库",
                     () -> deviceService.savePosition(msg.getDeviceId(), msg.getDeviceId(), msg));
+            /*
+             * 预置位查询应答（A.2.4.8）。
+             *
+             * <p><b>这里此前是空的</b>：能下发查询（ControlService#queryPresets），
+             * 但设备的应答落到 default 分支被静默丢弃，
+             * 表现为「点了查询预置位，什么都没发生」。数据解析与缓存见 PresetService。
+             *
+             * <p>用 items() 而不是自己遍历：它会按容器名精确定位
+             * {@code <PresetList>} 再取其中的 {@code <Item>}，
+             * 不会被别的同名字段干扰。
+             */
+            case "PresetQuery" -> asyncExecutor.run("预置位落缓存",
+                    () -> presetService.onPresetList(msg.getDeviceId(),
+                            msg.items("PresetList")));
             default -> {
-                // DeviceStatus / RecordInfo / ConfigDownload 等由各自的服务同步等待处理
+                // DeviceStatus / RecordInfo / ConfigDownload 等由各自的服务同步等待处理。
+                // 打一条 DEBUG：设备私有/未适配的命令能在这里被看见，
+                // 不然「设备明明回了、平台却说没有」这类问题只能靠抓包。
+                log.debug("未处理的 MANSCDP 应答: cmd={} device={} 子元素={}",
+                        cmdType, msg.getDeviceId(), msg.childNames());
             }
         }
     }

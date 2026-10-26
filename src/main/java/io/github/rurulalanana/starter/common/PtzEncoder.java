@@ -49,6 +49,12 @@ package io.github.rurulalanana.starter.common;
  * {@code pan==1(右) → 1<<0}、{@code tilt==0(上) → 1<<3}、{@code tilt==1(下) → 1<<2}）。
  *
  * <p>标准约束：Bit2/Bit1、Bit4/Bit3、Bit6/Bit5 不可同时为 1。
+ *
+ * <p><b>没有光圈位、也没有聚焦位</b>：{@code 0x10} / {@code 0x20} 只表示
+ * <b>变倍</b>放大/缩小。早期实现把「光圈 +/-」映射到这两个位，
+ * 下发出去的字节与变倍完全相同，设备按标准当变焦执行 ——
+ * 现场表现就是「按光圈，画面缩放」。不用在这里补位定义，
+ * 标准本身就没有，只能走厂商私有指令或 ONVIF。
  */
 public final class PtzEncoder {
 

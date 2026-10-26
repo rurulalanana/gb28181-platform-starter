@@ -133,19 +133,35 @@ public class ControlService {
     /**
      * 焦点光圈控制。
      *
-     * <p>标准 A.3 中焦点与光圈复用「变倍」位（Bit5/Bit4），
-     * 由设备侧按镜头模式解释，故指令结构与变倍一致。
+     * <h3>为什么现在只支持 {@code stop}</h3>
+     * GB/T 28181 附录 A.3 的<b>指令码里没有光圈位</b>，也没有聚焦位 ——
+     * 那一字节只有：{@code 0x01} 右、{@code 0x02} 左、{@code 0x04} 下、
+     * {@code 0x08} 上、{@code 0x10} 变倍放大、{@code 0x20} 变倍缩小，
+     * 以及 {@code 0x40} 起的预置位/巡航模式。
+     *
+     * <p>此前这里把 {@code irisin}/{@code focusfar} 映射到 {@link PtzEncoder#ZOOM_IN}、
+     * {@code irisout}/{@code focusnear} 映射到 {@link PtzEncoder#ZOOM_OUT}，
+     * 注释还写着「标准中焦点与光圈复用变倍位」—— 那是错的。
+     * 下发出去的字节与「变倍放大/缩小」<b>逐字节相同</b>，
+     * 设备当然按标准当变倍执行，现场表现就是「按光圈，画面缩放」。
+     *
+     * <p>现在改为明确报错：留一个静默走错动作的接口，比没有这个功能更危险 ——
+     * 用户会反复重试、运维会去查设备光圈模块。
+     *
+     * <p><b>确实需要光圈的场景</b>：只能走厂商私有 PTZ 指令（每个品牌不同，
+     * 与设备型号强相关），或给平台接一套 ONVIF 客户端。两条路都不属于
+     * GB/T 28181 范畴，不在本方法里硬编码。
+     *
+     * @throws BizException {@code command} 不是 {@code stop} 时
      */
     public void focusIris(String channelId, String command, Integer speed) {
         String cmd = normalize(command);
-        int sp = speed == null ? 129 : Math.max(0, Math.min(255, speed));
-        int bits = switch (cmd) {
-            case "focusfar", "irisin" -> PtzEncoder.ZOOM_IN;
-            case "focusnear", "irisout" -> PtzEncoder.ZOOM_OUT;
-            case "stop" -> 0;
-            default -> throw BizException.badRequest("不支持的焦点光圈指令：" + command);
-        };
-        sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
+        if (!"stop".equals(cmd)) {
+            throw BizException.badRequest(
+                    "GB/T 28181 的 PTZ 指令码不含光圈/聚焦位，无法下发「" + command
+                            + "」。光圈只能通过厂商私有指令或 ONVIF 控制。");
+        }
+        sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
     }
 
     /** 精确云台控制（2022）：角度 + 变焦倍数。 */

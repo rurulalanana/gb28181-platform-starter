@@ -20,6 +20,7 @@ import io.github.rurulalanana.starter.service.ChannelRecordPolicy;
 import io.github.rurulalanana.starter.service.ControlService;
 import io.github.rurulalanana.starter.service.DeviceCollectService;
 import io.github.rurulalanana.starter.service.DeviceService;
+import io.github.rurulalanana.starter.service.PresetService;
 import io.github.rurulalanana.starter.service.RecordService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.ChannelListVo;
@@ -31,6 +32,7 @@ import io.github.rurulalanana.starter.vo.FetchResultVo;
 import io.github.rurulalanana.starter.vo.OnlineStatsVo;
 import io.github.rurulalanana.starter.vo.PositionLogListVo;
 import io.github.rurulalanana.starter.vo.PositionLogVo;
+import io.github.rurulalanana.starter.vo.PresetListVo;
 import io.github.rurulalanana.starter.vo.SetPasswordVo;
 import io.github.rurulalanana.starter.vo.StatusLogListVo;
 import io.github.rurulalanana.starter.vo.StatusLogVo;
@@ -85,6 +87,7 @@ public class DeviceController {
     private final StreamService streamService;
     private final ControlService controlService;
     private final DeviceCollectService collectService;
+    private final PresetService presetService;
     private final ChannelRecordPolicy recordPolicy;
     private final GbDeviceGroupMapper groupMapper;
     private final Gb28181Properties props;
@@ -314,8 +317,28 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchPreset(@RequestParam String serial,
                                                   @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.queryPresets(code == null || code.isBlank() ? serial : code);
-        return ApiResponse.ok(FetchResultVo.ok(serial));
+        String channelId = code == null || code.isBlank() ? serial : code;
+        controlService.queryPresets(channelId);
+        return ApiResponse.ok(FetchResultVo.ok(channelId));
+    }
+
+    /**
+     * 读取通道的预置位列表。
+     *
+     * <p>数据来自设备对 {@code PresetQuery} 的应答（见 {@code PresetService}）。
+     * <b>必须配合 {@link #fetchPreset} 使用</b>：先 POST fetchpreset 下发查询，
+     * 等设备应答后再 GET 本接口取结果 —— 这是 SIP 链路的固有时序，
+     * 单靠 GET 拿不到「刚查的」数据。
+     *
+     * <p>{@code queriedAt} 为 {@code null} 表示还没收到过设备应答，
+     * 前端据此继续轮询或提示「设备未响应」。
+     */
+    @GetMapping("/presetlist")
+    public ApiResponse<PresetListVo> presetList(@RequestParam String serial,
+                                                @RequestParam(required = false) String code) {
+        StpUtil.checkLogin();
+        String channelId = code == null || code.isBlank() ? serial : code;
+        return ApiResponse.ok(presetService.list(channelId));
     }
 
     /** 抓取看守位信息。 */
