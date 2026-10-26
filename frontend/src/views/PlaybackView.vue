@@ -18,6 +18,30 @@
           :value="c.deviceId + '/' + c.id"
         />
       </el-select>
+      <!--
+        设备录像状态。
+
+        <p><b>为什么值得占一个位置</b>：改造前界面上只有「查出来的录像段」，
+        用户点一个空日期什么都看不到，无从区分「设备没在录」与
+        「在录，但今天确实没内容」—— 后者只会在有录像之后才变得可见。
+
+        <p><b>判据</b>：向设备查【当前-15 分钟, 当前】，若返回的段中有
+        {@code endTime >= 当前-3 分钟}，则这个时刻被某段录像覆盖，即正在录。
+        不能只看「查到了段」：设备 2 小时一段，停止录像后 15 分钟内仍会
+        查到与区间有交集的旧段。
+      -->
+      <el-tooltip :content="recStateHint" placement="bottom">
+        <el-tag
+          :type="recStateType"
+          size="default"
+          effect="plain"
+          class="rec-tag"
+          :class="{ clickable: !!query.channelKey }"
+          @click="refreshRecState"
+        >
+          {{ recStateText }}
+        </el-tag>
+      </el-tooltip>
       <el-date-picker
         v-model="day"
         type="date"
@@ -79,7 +103,12 @@
             :style="{ left: (i / (TICK_LABELS.length - 1)) * 100 + '%' }"
           >{{ t }}</span>
         </div>
-        <div class="timeline-track" @click="onTrackClick">
+        <div
+          class="timeline-track"
+          @click="onTrackClick"
+          @mousemove="onTrackMove"
+          @mouseleave="hoverAt = null"
+        >
           <div
             v-for="s in timelineSegments"
             :key="s.startMs + '-' + s.endMs"
@@ -89,6 +118,20 @@
             :title="segTitle(s)"
             @click.stop="play(s.row)"
           />
+          <!--
+            悬停提示：刻度只有每 2 小时一根，指针落在哪仍需看具体时刻。
+            跟鼠标走而不是固定在轨道底部 —— 固定位置会和刻度条挤在一起，
+            跟着走时视线不用在轨道与刻度之间来回跳。
+          -->
+          <div
+            v-if="hoverAt"
+            class="timeline-tip"
+            :style="{ left: hoverAt.percent + '%' }"
+            :class="{ 'tip-hit': hoverAt.hit }"
+          >
+            <span class="tip-clock">{{ hoverAt.clock }}</span>
+            <span v-if="hoverAt.hit" class="tip-seg">{{ hoverAt.segText }}</span>
+          </div>
           <!--
             不画「当前播放位置」指针：回放用的是模态弹窗，遮罩会把整条时间轴盖住，
             指针即使算了也永远看不到。真要跟随进度，得先把播放器改成非模态浮层
@@ -116,7 +159,7 @@
         stripe
         table-layout="fixed"
       >
-        <el-table-column label="文件名" min-width="240">
+        <el-table-column v-if="!allNoFileName" label="文件名" min-width="240">
           <template #default="{ row }">
             <span class="mono">{{ shortName(row.filePath) }}</span>
           </template>
@@ -145,7 +188,7 @@
               type="primary"
               :loading="isDownloadingRow(row)"
               :disabled="hasTaskOfRow(row)"
-              :title="hasTaskOfRow(row) ? '该段已在后台下载，见右上角「下载任务」' : ''"
+              :title="downloadHint(row)"
               @click="startDownload(row)"
             >
               <el-icon><Download /></el-icon> 下载
@@ -175,18 +218,19 @@
           一个只能影响下载的设置摆在那里，既占位置又容易让人以为改了会影响回放。
         -->
         <template v-if="speedOptions.length > 1">
-          <span class="lf-label">下载倍速</span>
+          <span class="lf-label">下载方式</span>
           <el-select
             v-model="downloadSpeed"
             size="small"
-            style="width: 108px"
-            :title="`设备声明支持的下载倍速：${speedOptions.join('/')}（设备若不支持会按 1 倍速推流）`"
+            style="width: 132px"
+            title="完整：原始码率，时长与画面都准确（推荐存档）／快进：设备只推关键帧，画面会跳"
           >
+            <el-option :value="1" label="完整（1x）" />
             <el-option
-              v-for="n in speedOptions"
+              v-for="n in speedOptions.filter((x) => x > 1)"
               :key="n"
-              :label="`${n}x`"
               :value="n"
+              :label="`快进 ${n}x`"
             />
           </el-select>
         </template>
@@ -289,7 +333,16 @@ const speedOptions = computed(() => {
   return list.length ? [...new Set(list)].sort((a, b) => a - b) : [1]
 })
 
-/** 下载倍速（只影响下载，不影响回放播放速度）。 */
+/**
+ * 下载倍速（只影响下载，不影响回放播放速度）。
+ *
+ * <p><b>默认 1 且不自动选最高档</b>：早先这里会「自动取设备声明的最高档」，
+ * 实测后果很坑 —— 设备对 {@code a=downloadspeed:8} 的响应是
+ * <b>只推关键帧</b>（同一个 3 分钟段：1 倍速产出 ≈360MB 的完整流，
+ * 8 倍速产出 14MB 且媒体时间跨 851 秒），拿到的是一份快进片，
+ * 而且因为推得快、平台又按墙钟计时，录到的内容范围完全控制不住。
+ * 存档下载必须默认完整模式。
+ */
 const downloadSpeed = ref(1)
 
 /** 当前通道的展示名（下载任务列表用）。 */
@@ -302,6 +355,17 @@ const channelLabel = computed(() => {
 function rowKeyOf(row) {
   return `${row?.startTime || ''}|${row?.endTime || ''}`
 }
+
+/**
+ * 本页结果里是否一条都没有 FilePath。
+ *
+ * <p>大量设备（LiveGBS、多数国产摄像机）按时间段管理录像、根本不填 FilePath，
+ * 于是那一列每条都是破折号 —— 240px 的空白加上后面几列，直接把表格撑出
+ * 横向滚动，“大小”这种有用信息反而要拖动才能看到。这种情况下整列隐藏。
+ */
+const allNoFileName = computed(
+  () => records.value.length > 0 && records.value.every((r) => !r.filePath)
+)
 
 /* ==================== 时间轴 ==================== */
 
@@ -399,16 +463,135 @@ function segTitle(s) {
 function onTrackClick(ev) {
   const base = dayStartMs.value
   if (base === null) return
-  const rect = ev.currentTarget.getBoundingClientRect()
-  if (!rect.width) return
-  const ratio = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width))
-  const at = base + ratio * DAY_MS
-  const hit = timelineSegments.value.find((s) => at >= s.clippedStartMs && at < s.clippedEndMs)
+  const point = trackPoint(ev)
+  if (!point) return
+  const hit = timelineSegments.value.find(
+    (s) => point.at >= s.clippedStartMs && point.at < s.clippedEndMs
+  )
   if (!hit) {
     ElMessage.info('该时刻没有录像')
     return
   }
   play(hit.row)
+}
+
+/**
+ * 把鼠标位置换算成「当天第几毫秒 + 百分比」。
+ *
+ * <p>点击与悬停共用同一套换算，否则两处各自算一遍迟早会算出不同的值 ——
+ * 用户看到 tip 显示有录像，点下去却提示没有，是最难排查的那类 bug。
+ */
+function trackPoint(ev) {
+  const base = dayStartMs.value
+  if (base === null) return null
+  const rect = ev.currentTarget.getBoundingClientRect()
+  if (!rect.width) return null
+  const ratio = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width))
+  return { at: base + ratio * DAY_MS, percent: ratio * 100 }
+}
+
+/**
+ * 时间轴悬停：显示鼠标所指的时刻，命中录像段时附带该段的起止与时长。
+ *
+ * <p>只更新一个响应式对象、不做任何查询，因此可以跟着 mousemove 直接跑。
+ * {@code percent} 限制在 [0.5, 99.5] 内给 CSS 用于防溢出（tip 有最小宽度，
+ * 贴边时会被裁掉一半）。
+ */
+const hoverAt = ref(null)
+
+function onTrackMove(ev) {
+  const point = trackPoint(ev)
+  if (!point) {
+    hoverAt.value = null
+    return
+  }
+  const hit = timelineSegments.value.find(
+    (s) => point.at >= s.clippedStartMs && point.at < s.clippedEndMs
+  )
+  hoverAt.value = {
+    percent: Math.min(99.5, Math.max(0.5, point.percent)),
+    clock: fmtClock(point.at),
+    hit: !!hit,
+    segText: hit
+      ? `${fmtClock(hit.startMs)}–${fmtClock(hit.endMs)} · ${fmtDuration((hit.endMs - hit.startMs) / 1000)}`
+      : ''
+  }
+}
+
+/* ==================== 设备录像状态 ==================== */
+
+/**
+ * 设备当前是否在录像：`null` 未知 / `true` 在录 / `false` 未录。
+ *
+ * <p>用「最近一段时间有没有覆盖到当前时刻的录像段」来判断，是当前
+ * GB/T 28181 下唯一通用的办法 —— 设备不会主动上报「我要开始录像了」，
+ * 目录应答里也没有录像状态字段。
+ */
+const recordingNow = ref(null)
+const recChecking = ref(false)
+
+/** 判为「正在录」的容差：段尾距当前不超过这么久就算在录（秒）。 */
+const REC_TOLERANCE_SECOND = 180
+
+/** 状态查询区间：往回看 15 分钟。计划录像常见 2 小时一段，够覆盖。 */
+const REC_LOOKBACK_MS = 15 * 60 * 1000
+
+const recStateText = computed(() => {
+  if (!query.channelKey) return '录像状态 —'
+  if (recChecking.value) return '状态查询中…'
+  if (recordingNow.value === null) return '录像状态 —'
+  return recordingNow.value ? '● 正在录像' : '○ 当前未录像'
+})
+
+const recStateType = computed(() => {
+  if (recordingNow.value === true) return 'success'
+  if (recordingNow.value === false) return 'info'
+  return ''
+})
+
+const recStateHint = computed(() => {
+  if (!query.channelKey) return '先选择通道'
+  if (recChecking.value) return '正在向设备查询最近 15 分钟有无录像'
+  if (recordingNow.value === null) return '点一下重新查询设备录像状态'
+  return recordingNow.value
+    ? '设备最近 15 分钟有录像覆盖到当前时刻（点击重新查询）'
+    : '设备最近 15 分钟没有覆盖到当前时刻的录像（点击重新查询）'
+})
+
+/**
+ * 查询设备当前录像状态。
+ *
+ * <p>刻意<b>不</b>用当天的检索结果判断：那查的是「用户选中的日期」，
+ * 用户翻到上周三时，看的是上周三有没有录像，与「现在是否在录」无关。
+ * 必须单独问一次设备「最近 15 分钟」。
+ *
+ * <p>查询失败一律记为「未知」而不是「未录像」：设备离线、SIP 超时都会
+ * 走到异常分支，把它们显示成「未录像」会变成误报 —— 用户可能据此去
+ * 现场检查一台其实在正常录像的设备。
+ */
+async function refreshRecState() {
+  if (!query.channelKey || recChecking.value) return
+  recChecking.value = true
+  recordingNow.value = null
+  try {
+    const now = Date.now()
+    const data = await playbackApi.recordList({
+      serial: serial.value,
+      code: code.value,
+      starttime: fmtFull(new Date(now - REC_LOOKBACK_MS)),
+      endtime: fmtFull(new Date(now))
+    })
+    const list = data?.recordList || []
+    const deadline = now - REC_TOLERANCE_SECOND * 1000
+    recordingNow.value = list.some((r) => {
+      const end = parseWall(r.endTime)
+      return Number.isFinite(end) && end >= deadline
+    })
+  } catch (e) {
+    recordingNow.value = null
+  } finally {
+    recChecking.value = false
+  }
 }
 
 /** 设备侧的录像类型 → 中文（与时间轴图例保持一致）。 */
@@ -425,10 +608,11 @@ function prettyTime(v) {
 
 
 
-/* 换通道后默认取该设备支持的最高档：下载要的是快，用户一般不会主动选低档 */
-watch(speedOptions, (list) => {
-  downloadSpeed.value = list[list.length - 1] || 1
-}, { immediate: true })
+/*
+ * 不再自动选最高档：见 downloadSpeed 上的说明 —— 倍速产物是「快进片」，
+ * 只适合快速翻看，不能当存档。默认完整模式，仅在设备确实声明多档时才
+ * 提供快进选项供用户主动选择。
+ */
 
 async function loadChannels() {
   try {
@@ -459,6 +643,9 @@ async function ensureMediaPort() {
 function onChannelChange() {
   records.value = []
   searched.value = false
+  hoverAt.value = null
+  // 录像状态与日期无关，跟通道走；失败不打断主流程
+  refreshRecState()
   search()
 }
 
@@ -466,6 +653,12 @@ function onChannelChange() {
 function fmtDate(d) {
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 时间 → `YYYY-MM-DD HH:mm:ss`（设备侧检索入参的格式）。 */
+function fmtFull(d) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${fmtDate(d)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 function todayStr() {
@@ -637,6 +830,26 @@ async function startDownload(row) {
 /** 正在发起下载的行（防重复点击 / 按钮 loading）。 */
 const downloadingKey = ref('')
 
+/**
+ * 下载按钮的悬浮提示：把「要等多久」提前说清楚。
+ *
+ * <p>完整模式（默认）耗时 ≈ 段长本身，下载在后台跑，用户可以去干别的事。
+ * 快进模式会快一些，但产物是跳帧画面 —— 这个差别必须在点之前说明，
+ * 否则用户拿到文件才发现画面一跳一跳，只会认为平台坏了。
+ */
+function downloadHint(row) {
+  if (hasTaskOfRow(row)) return '该段已在后台下载，见右上角「下载任务」'
+  const sec = segmentLengthOf(row)
+  if (!sec) return '下载该段录像'
+  const real = fmtDuration(sec)
+  const speed = downloadSpeed.value
+  if (speed > 1) {
+    return `快进下载 ${real} 的录像：设备只推关键帧，画面会跳，`
+      + `约需 ${fmtDuration(sec / speed)}（仅适合快速翻看，存档请选「完整」）`
+  }
+  return `下载 ${real} 的完整录像，约需 ${real}（后台运行，可继续浏览其它页面）`
+}
+
 /** 该行是否正在发起下载（按钮 loading 用）。 */
 function isDownloadingRow(row) {
   return !!downloadingKey.value && downloadingKey.value === rowKeyOf(row)
@@ -806,6 +1019,12 @@ onMounted(async () => {
   const code = String(route.query.code || '').trim()
   if (serial && code) {
     query.channelKey = `${serial}/${code}`
+    /*
+     * 预填走的是 query 参数，不会经过 onChannelChange，
+     * 所以这里要显式查一次录像状态 —— 否则从通道列表跳进来时
+     * 徽标一直停在「录像状态 —」，而用户正是为了确认状态才点进来的。
+     */
+    refreshRecState()
   }
 })
 onUnmounted(() => {
@@ -944,6 +1163,58 @@ onUnmounted(() => {
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
   pointer-events: none;
+}
+
+/*
+ * 悬停提示。
+ *
+ * 定位在轨道上方（bottom:100%），不遮住色块 —— 提示里会显示所在段的
+ * 起止时间，恰好是用户想拿它去对照的东西，挡住比不显示更糟。
+ * pointer-events:none 避免提示本身吃 mousemove 导致抖动。
+ */
+.timeline-tip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--bg-elevated, #1f2937);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* 命中录像段时左侧加一条与色块同色的竖线，视线不用二次确认 */
+.timeline-tip.tip-hit::before {
+  content: '';
+  width: 3px;
+  align-self: stretch;
+  border-radius: 1px;
+  background: var(--accent, #3b82f6);
+}
+
+.tip-clock {
+  font-weight: 600;
+}
+
+.tip-seg {
+  opacity: 0.8;
+}
+
+/* 录像状态标签：可点击重查，要给出手型光标 */
+.rec-tag.clickable {
+  cursor: pointer;
+}
+
+.rec-tag.clickable:hover {
+  opacity: 0.8;
 }
 
 /* 图例 + 汇总：一行放完，汇总靠右 */

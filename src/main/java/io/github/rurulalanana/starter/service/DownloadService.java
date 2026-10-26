@@ -73,17 +73,32 @@ public class DownloadService {
     /**
      * 收尾宽限（秒）：在「已耗时 ≥ 段长」之后再多等这么久。
      *
-     * <p><b>为什么以墙钟为主信号</b>：实测设备不认 SDP 里的
-     * {@code a=downloadspeed}（上报支持 1/2/4/8，实际仍按 1 倍速推），
-     * 也不总是理会回放 INVITE 的 {@code t=} 结束时间（会一直往后推）。
-     * 因此「墙钟走完段长」就等于「内容已录完」，这是当前唯一稳定可靠的判据。
+     * <p><b>为什么不能给 30 秒</b>：实测设备<b>不理会</b>回放 INVITE 里
+     * {@code t=} 的结束时间 —— 把 180 秒的段推完之后它不停，接着推下一段录像。
+     * 宽限给多了，产物尾部就会混进几十秒与请求时段无关的画面
+     * （用户拖到片尾会看到时间戳跳到别的时段）。
      *
-     * <p>多给 30 秒是为了让最后几个 GOP 落盘，不把尾巴截掉。
+     * <p>10 秒足够：ZLM 在 {@code mk_recorder_stop} 时会主动 flush 并写 moov，
+     * 不需要靠宽限等落盘；这点余量只是为了兜住公网推流最后几个包的乱序到达。
      */
-    private static final long GRACE_SECONDS = 30L;
+    private static final long GRACE_SECONDS = 10L;
 
-    /** 判定「设备已停推」前至少先跑这么久，避免起播瞬间会话空缺被误判（秒）。 */
+        /** 判定「设备已停推」前至少先跑这么久，避免起播瞬间会话空缺被误判（秒）。 */
     private static final long MIN_RUN_SECONDS = 15L;
+
+    /**
+     * 「已落盘字节不再增长」持续这么久，就认为设备已经推完（秒）。
+     *
+     * <p><b>为什么需要这个判据</b>：设备把 {@code t=} 对应的内容推完之后
+     * 就不再发 RTP，但会话本身往往还挂着（设备不一定发 BYE）。
+     * 此时只能等「墙钟走完段长 + 宽限」，于是：
+     * <ul>
+     *   <li>设备支持倍速时，早就在 1/N 的时间推完了，用户白等到段长；</li>
+     *   <li>用户看到进度条「卡住不动」却不到 100%，会怀疑下载坏了。</li>
+     * </ul>
+     * 30 秒是能让公网推流的正常抖动不被误判的值（实测丢包重传造成的最长空窗约 8 秒）。
+     */
+    private static final long STALL_SECONDS = 30L;
 
     /** 已完成任务的持久化文件名（放在录像根目录下，重启不丢）。 */
     private static final String PERSIST_FILE = ".download-tasks.json";
@@ -134,6 +149,9 @@ public class DownloadService {
         volatile long fileSize;
         /** 已完成任务的冻结进度（重启恢复时用）；0 = 未冻结。 */
         volatile long frozenSecond;
+        /** 上一次观察到的已落盘字节数与时刻（停滞判据用）。 */
+        volatile long lastBytes;
+        volatile long lastBytesAt;
 
         Task(String sessionKey, String recordKey, String deviceId, String channelId,
              String channelName, String startAt, String endAt, long totalSecond, int speed,
@@ -261,6 +279,15 @@ public class DownloadService {
                 req.channelName(), req.startAt(), req.endAt(), req.totalSecond(),
                 req.speed(), req.expectedBytes());
         active.put(sessionKey, task);
+        /*
+         * 锁定该通道的回放会话。
+         *
+         * <p>不锁的后果是真实的：用户开着下载又去点另一段回放，
+         * 同键的新会话会把下载那一路顶掉，ZLM 侧录制随之重置 ——
+         * 最终产物只有开头几十秒。日志里没有任何异常，
+         * 用户只能看到「下载时长不够」。
+         */
+        streamService.lockForDownload(sessionKey);
         log.info("开始下载录制: session={} source={}/{} 通道={} 时长={}s 期望大小={}MB 请求倍速={}x",
                 sessionKey, session.getZlmApp(), session.getStream(), task.channelName,
                 req.totalSecond(), req.expectedBytes() / 1048576, task.speed);
@@ -391,12 +418,37 @@ public class DownloadService {
         if (task.totalSecond > 0 && elapsed >= task.totalSecond + GRACE_SECONDS) {
             return true;
         }
-        /* 字节判据只用来「提前结束」，且需已录过四分之一，避开上报值离谱的情况 */
-        if (task.expectedBytes > 0 && task.totalSecond > 0
-                && elapsed >= Math.max(MIN_RUN_SECONDS, task.totalSecond / 4)) {
-            return dirBytes(task.sessionKey) >= task.expectedBytes * 98L / 100L;
+        // 设备推完就停、但会话还挂着：靠文件增长停滞来发现
+        return isStalled(task, now);
+    }
+
+    /**
+     * 停滞判据：已落盘字节连续 {@link #STALL_SECONDS} 秒没增长，且已经录了
+     * 「按倍速折算后的一半时长」，就认为设备推完了。
+     *
+     * <p><b>不能拿设备上报的 FileSize 直接比</b>：那是设备侧原始 PS 文件的大小，
+     * 而我们录的是转封装后的 MP4 —— 实测同一段内容 MP4 比 PS 小约 31%
+     * （PS 头开销 + 音频重编码差异），所以
+     * {@code dirBytes >= expectedBytes * 98%} 这类判据<b>永远不会成立</b>，
+     * 等于写了也不生效。改成「增长停滞」后与封装格式无关，倍速是否生效都适用。
+     */
+    private boolean isStalled(Task task, long now) {
+        if (task.totalSecond <= 0) {
+            return false;
         }
-        return false;
+        long half = task.totalSecond / 2 / Math.max(1, task.speed);
+        if (task.elapsedSecond(now) < Math.max(MIN_RUN_SECONDS, half)) {
+            return false;
+        }
+        long bytes = dirBytes(task.sessionKey);
+        if (bytes > task.lastBytes) {
+            task.lastBytes = bytes;
+            task.lastBytesAt = now;
+            return false;
+        }
+        return task.lastBytesAt > 0
+                && task.lastBytes > 0
+                && now - task.lastBytesAt >= STALL_SECONDS * 1000L;
     }
 
     /**
@@ -408,8 +460,7 @@ public class DownloadService {
      */
     private long dirBytes(String sessionKey) {
         try {
-            java.nio.file.Path dir = java.nio.file.Path.of(
-                    props.resolvedRecordRoot(), sessionKey);
+            java.nio.file.Path dir = sessionDir(sessionKey);
             if (!java.nio.file.Files.isDirectory(dir)) {
                 return 0L;
             }
@@ -458,6 +509,8 @@ public class DownloadService {
                 task.frozenSecond = task.recordedSecond(System.currentTimeMillis());
                 active.remove(task.sessionKey);
                 finished.put(task.taskId, task);
+                // 无论成败都要解锁，否则这个通道的回放会被永久拒绝
+                streamService.unlockDownload(task.sessionKey);
                 trimFinished();
                 persist();
             }
@@ -592,6 +645,21 @@ public class DownloadService {
     }
 
     /**
+     * 会话的录像目录。
+     *
+     * <p><b>必须把 {@code /} 换成 {@code _}</b>：录像目录由
+     * {@code RecordingService} 用 {@code safeDir(recordKey)} 创建，
+     * 而会话键是 {@code 设备/通道_playback} 这种带斜杠的形式。
+     * 早先这里直接 {@code Path.of(root, sessionKey)}，斜杠被当成目录分隔符，
+     * 拼出 {@code root/设备/通道_playback} —— 这个目录永远不存在，
+     * 于是「已落盘字节」恒为 0、字节判据永不成立（倍速下载时只能白等墙钟）。
+     */
+    private java.nio.file.Path sessionDir(String sessionKey) {
+        return java.nio.file.Path.of(props.resolvedRecordRoot(),
+                String.valueOf(sessionKey).replace('/', '_').replace('\\', '_'));
+    }
+
+    /**
      * 磁盘兵底：取该会话目录下最大的 mp4。
      *
      * <p>只取「非 {@code .} 前缀」的正式文件：临时文件还没写 moov，
@@ -599,8 +667,7 @@ public class DownloadService {
      */
     private String newestFile(String sessionKey) {
         try {
-            java.nio.file.Path dir = java.nio.file.Path.of(
-                    props.resolvedRecordRoot(), sessionKey);
+            java.nio.file.Path dir = sessionDir(sessionKey);
             if (!java.nio.file.Files.isDirectory(dir)) {
                 return null;
             }
@@ -632,6 +699,7 @@ public class DownloadService {
             return;
         }
         task.finishing.set(true);
+        streamService.unlockDownload(sessionKey);
         RecordingService recorder = streamService.recordingService();
         if (recorder != null) {
             recorder.stopRecording(task.recordKey);
@@ -665,6 +733,18 @@ public class DownloadService {
         int percent = t.totalSecond > 0
                 ? (int) Math.min(100, recorded * 100 / t.totalSecond)
                 : 0;
+        /*
+         * 已成功完成的任务一律显示 100%。
+         *
+         * <p>进度是按<b>墙钟</b>估的，而设备支持的推流时长可能短于请求时长
+         * （t= 对应内容推完就停），于是任务正常收尾时 recorded 往往停在
+         * 60%~95%。给用户看一个「已完成但只有 72%」的条目，等于让他以为
+         * 下载被截断了。
+         */
+        if (t.finished && t.ok) {
+            percent = 100;
+            recorded = t.totalSecond > 0 ? t.totalSecond : recorded;
+        }
         return new View(t.taskId, t.deviceId, t.channelId, t.channelName,
                 t.startAt, t.endAt, recorded, t.totalSecond, percent, t.speed,
                 t.finished, t.ok, t.fileName, t.filePath, t.fileSize, t.url, t.message,

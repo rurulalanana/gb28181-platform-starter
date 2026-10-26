@@ -252,12 +252,34 @@ public class StreamService {
              */
             String want = recordIdentity(item);
             String have = existing.getMediaUri();
-            if (downloadSpeed <= 1 && want != null && want.equals(have)) {
+            boolean same = want != null && want.equals(have);
+            if (same && downloadSpeed <= 1) {
                 return toStream(existing, GbStream.TYPE_PLAYBACK);
             }
-            if (downloadSpeed > 1 && want != null && want.equals(have)) {
+            if (same) {
                 // 同一段但要求更高倍速：先停旧会话，避免同通道两路回放把设备打满
                 log.info("回放需提速到 {}x，重建会话: {} {}", downloadSpeed, deviceId, channel);
+                stop(deviceId, channel, MediaType.PLAYBACK);
+            } else {
+                /*
+                 * 请求的是**另一段**录像。
+                 *
+                 * <p><b>必须显式停掉旧会话</b>。会话键是
+                 * {@code 设备/通道_playback}（同通道只允许一个回放会话），
+                 * 直接往下走会让 {@code sessionManager.open} 用新会话顶掉旧的 ——
+                 * 旧会话对应的 ZLM 媒体源与录制随之重置，正在跑的下载就
+                 * 得到一段只有开头几十秒的文件。用户看到的现象是
+                 * 「下载时长严重不足」，而日志里一点异常都没有。
+                 *
+                 * <p>下载中的通道在上一步已被拦住（见 {@link #isDownloadLocked}），
+                 * 能走到这里的都是纯回放，停掉是安全的。
+                 */
+                if (isDownloadLocked(playbackKey(deviceId, channel))) {
+                    throw BizException.badRequest(
+                            "该通道正在后台下载，无法同时回放其它时段；"
+                                    + "请等下载完成，或先在「下载任务」里取消");
+                }
+                log.info("回放切换录像段，关闭旧会话: {} {} → {}", deviceId, channel, want);
                 stop(deviceId, channel, MediaType.PLAYBACK);
             }
         }
@@ -266,6 +288,45 @@ public class StreamService {
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;
+    }
+
+    /**
+     * 回放会话键（与 {@code RtpSession#getSessionKey} 的规则一致）。
+     *
+     * <p>单独抽出来是因为「下载占用」的锁必须和真实会话用同一个键，
+     * 用别的拼法拼错了会得到一个永远锁不住的锁。
+     */
+    private static String playbackKey(String deviceId, String channel) {
+        return deviceId + "/" + channel + "_playback";
+    }
+
+    /**
+     * 被后台下载占用的回放会话键。
+     *
+     * <p>下载与回放共用一路回放流，而回放会话同通道只有一个。若允许
+     * 用户此时点开另一段回放，那个会话会被顶掉、下载随之断流，
+     * 产物只有开头一小段（这是「下载时长不够」最主要的原因）。
+     * 因此下载期间锁定该通道的回放会话，从源头拒绝而不是事后补救。
+     */
+    private final java.util.Set<String> downloadLocks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** 标记该会话正被下载占用（重复调用无副作用）。 */
+    public void lockForDownload(String sessionKey) {
+        if (sessionKey != null && !sessionKey.isBlank()) {
+            downloadLocks.add(sessionKey);
+        }
+    }
+
+    /** 解除下载占用（下载收尾/取消/失败都要调用，否则该通道回放会被长期拒之门外）。 */
+    public void unlockDownload(String sessionKey) {
+        if (sessionKey != null) {
+            downloadLocks.remove(sessionKey);
+        }
+    }
+
+    /** 该会话是否正被下载占用。 */
+    public boolean isDownloadLocked(String sessionKey) {
+        return sessionKey != null && downloadLocks.contains(sessionKey);
     }
 
     /** 开始历史回放（设备直连：设备编码即通道编码）。 */
