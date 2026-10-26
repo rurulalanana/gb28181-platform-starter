@@ -70,6 +70,10 @@ public class Gb28181PlatformConfiguration {
                 .app(props.getApp())
                 .rtpSinglePort(props.isRtpSinglePort())
                 .rtpSinglePortNumber(props.getRtpSinglePortNumber())
+                // RTP 收流缓冲：不显式传就用 MediaServerProperties 的 8MB 默认值。
+                // 只在配置了正数时覆盖，避免有人把 yml 写成 0 反而把缓冲清零。
+                .udpRecvSocketBuffer(props.getUdpRecvSocketBuffer() > 0
+                        ? props.getUdpRecvSocketBuffer() : 8 * 1024 * 1024)
                 .autoRecord(props.isAutoRecord())
                 .recordMaxSecond(props.getRecordMaxSecond())
                 .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())

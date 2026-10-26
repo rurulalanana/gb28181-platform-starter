@@ -86,6 +86,28 @@ public class Gb28181Properties {
     /** 单端口模式下的收流端口（UDP 与 TCP 被动共用）。 */
     private int rtpSinglePortNumber = 24560;
 
+    /**
+     * RTP 收流 socket 的接收缓冲（字节），对应 ZLM 的
+     * {@code [rtp_proxy] udp_recv_socket_buffer}。
+     *
+     * <p><b>为什么不能留默认值</b>：国标摄像机收到 INVITE 后会把编码器里攒的
+     * 码流<b>一次性倾出</b>（实测首秒包量约为稳态的 2.4 倍）。缓冲不够时内核
+     * 直接丢包，而丢的往往正是开头的 SPS/PPS + 首个 I 帧 —— ZLM 等轨就绪超时后
+     * 会把视频轨<b>永久丢弃</b>（日志 {@code Track not ready for a long time,
+     * ignored: H264}），媒体源从此只剩音频，浏览器永远是黑屏。
+     * 现场表现就是「重启后第一次播放不出画面，关掉重播才行」。
+     *
+     * <p><b>宿主机还要配套改内核参数</b>，否则本值会被 {@code net.core.rmem_max}
+     * 静默夹小（默认常为 208KB）：
+     * <pre>sysctl -w net.core.rmem_max=16777216</pre>
+     * 持久化写 {@code /etc/sysctl.d/99-gb28181-rtp.conf}，详见 {@code docs/部署说明.md}。
+     *
+     * <p><b>容量估算</b>：单路 1080p 约 2Mbps，单端口模式下所有通道共用一个
+     * socket、共享这块缓冲。8MB ≈ 32 秒单路码流，或 13 路并发时约 2.5 秒 ——
+     * 通道数越多、突发越集中，越应该加大（32MB 可覆盖 50 路级别的重启风暴）。
+     */
+    private int udpRecvSocketBuffer = 8 * 1024 * 1024;
+
     /** 是否随流上下线自动录像。 */
     private boolean autoRecord = false;
 
