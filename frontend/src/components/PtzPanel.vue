@@ -35,18 +35,15 @@
     </div>
 
     <!--
-      变倍。
+      变倍 / 光圈 / 聚焦。
 
-      变倍曾有三处入口：方向盘下方两个放大镜按钮、这里的「近焦 / 远焦」、
-      以及一对「光圈 + / −」。三者最终下发的 PTZ 指令逐字节相同
-      （全走 PtzEncoder.ZOOM_IN/ZOOM_OUT 的 0x10 / 0x20），按下任何一个
-      都是同一个「变焦」动作。现合并为一对 +/−，与方向键统一为
-      「按住持续、松开停止」。
+      <p>三者是<b>互不相同</b>的指令：变倍 0x10/0x20、光圈 0x44/0x48、聚焦 0x41/0x42
+      （标准附录 A.3.1）。早先版本误以为「光圈复用变倍位」，把光圈映射到变倍，
+      按下光圈画面会缩放；同一误判也让「近焦/远焦」被并进了变倍按钮。
+      指令码修正后三者必须分开暴露。
 
-      <p><b>光圈按钮已删除</b>：GB/T 28181 附录 A.3 的指令码里<b>没有光圈位</b>
-      （只有四方向 + 变倍±），它此前被映射到变倍位，所以按「光圈+」画面会
-      放大 —— 那是变焦，不是光圈。真正的光圈只能走厂商私有指令或 ONVIF，
-      保留一对假按钮只会先让用户以为「光圈坏了」，再让运维去查设备。
+      <p>变倍要求「按住持续、松开停止」，所以用 pointerdown 而不是 click；
+      光圈/聚焦是单步动作，一次点击下发一次即可。
     -->
     <div class="ptz-row ptz-zoom-row">
       <el-button-group class="zoom-group">
@@ -65,6 +62,24 @@
           @pointerdown="beginMove('zoomout', $event)"
         >
           <el-icon><Minus /></el-icon>
+        </el-button>
+      </el-button-group>
+    </div>
+    <div class="ptz-row ptz-zoom-row">
+      <el-button-group class="zoom-group">
+        <el-button size="small" :disabled="inactive" title="光圈放大" @click="cmd('fi', { command: 'irisin' }, '光圈 +')">
+          光圈+
+        </el-button>
+        <el-button size="small" :disabled="inactive" title="光圈缩小" @click="cmd('fi', { command: 'irisout' }, '光圈 −')">
+          光圈−
+        </el-button>
+      </el-button-group>
+      <el-button-group class="zoom-group">
+        <el-button size="small" :disabled="inactive" title="聚焦近" @click="cmd('fi', { command: 'focusnear' }, '聚焦近')">
+          聚焦+
+        </el-button>
+        <el-button size="small" :disabled="inactive" title="聚焦远" @click="cmd('fi', { command: 'focusfar' }, '聚焦远')">
+          聚焦−
         </el-button>
       </el-button-group>
     </div>

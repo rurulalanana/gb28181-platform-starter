@@ -29,6 +29,8 @@ public class ControlService {
 
     /** 直连设备的默认云台地址。 */
     private static final int DEFAULT_ADDRESS = 1;
+    /** 辅助开关编号：雨刷固定为 1（标准未定义，业界惯例）。 */
+    private static final int WIPER_SWITCH_ID = 1;
 
     private final Gb28181SipClientProvider clientProvider;
     private final DeviceService deviceService;
@@ -105,6 +107,13 @@ public class ControlService {
     /**
      * 云台方向控制。
      *
+     * <p>{@code speed} 语义随指令不同：
+     * <ul>
+     *   <li>方向：水平/垂直速度，0~255（字节5、字节6）</li>
+     *   <li>变倍：<b>0~15</b>（字节7 高 4 位），所以 0~255 的入参要折算过去 ——
+     *       直接把 129 塞进去会被夹成 15，永远最大速，用户调不出慢速变倍</li>
+     * </ul>
+     *
      * @param speed 速度 0~255，默认 129
      */
     public void ptz(String channelId, String command, Integer speed) {
@@ -114,6 +123,8 @@ public class ControlService {
             sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
             return;
         }
+        // 变倍速度是 0~15 的独立字段，与方向速度不同量纲
+        int zoomSpeed = Math.max(1, sp * 15 / 255);
         int bits = switch (cmd) {
             case "left" -> PtzEncoder.LEFT;
             case "right" -> PtzEncoder.RIGHT;
@@ -127,41 +138,48 @@ public class ControlService {
             case "zoomout" -> PtzEncoder.ZOOM_OUT;
             default -> throw BizException.badRequest("不支持的云台指令：" + command);
         };
-        sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
+        boolean zooming = bits == PtzEncoder.ZOOM_IN || bits == PtzEncoder.ZOOM_OUT;
+        // 只变倍时方向速度填 0（填了会让某些设备同时开始转）
+        if (zooming) {
+            sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, 0, zoomSpeed));
+        } else {
+            sendPtz(channelId, PtzEncoder.direction(DEFAULT_ADDRESS, bits, sp));
+        }
     }
 
     /**
      * 焦点光圈控制。
      *
-     * <h3>为什么现在只支持 {@code stop}</h3>
-     * GB/T 28181 附录 A.3 的<b>指令码里没有光圈位</b>，也没有聚焦位 ——
-     * 那一字节只有：{@code 0x01} 右、{@code 0x02} 左、{@code 0x04} 下、
-     * {@code 0x08} 上、{@code 0x10} 变倍放大、{@code 0x20} 变倍缩小，
-     * 以及 {@code 0x40} 起的预置位/巡航模式。
+     * <p>GB/T 28181 附录 A.3.1 里<b>聚焦与光圈是独立指令码</b>（以 {@code 0x40} 为基）：
+     * <ul>
+     *   <li>{@code 0x42} 聚焦近（数据1 = 聚焦速度）</li>
+     *   <li>{@code 0x41} 聚焦远（数据1 = 聚焦速度）</li>
+     *   <li>{@code 0x44} 光圈放大（数据2 = 光圈速度）</li>
+     *   <li>{@code 0x48} 光圈缩小（数据2 = 光圈速度）</li>
+     * </ul>
      *
-     * <p>此前这里把 {@code irisin}/{@code focusfar} 映射到 {@link PtzEncoder#ZOOM_IN}、
-     * {@code irisout}/{@code focusnear} 映射到 {@link PtzEncoder#ZOOM_OUT}，
-     * 注释还写着「标准中焦点与光圈复用变倍位」—— 那是错的。
-     * 下发出去的字节与「变倍放大/缩小」<b>逐字节相同</b>，
-     * 设备当然按标准当变倍执行，现场表现就是「按光圈，画面缩放」。
+     * <p><b>曾经的错误</b>：早期把 {@code irisin}/{@code focusfar} 映射到
+     * {@link PtzEncoder#ZOOM_IN}、{@code irisout}/{@code focusnear} 映射到
+     * {@link PtzEncoder#ZOOM_OUT}，下发字节与变倍<b>逐字节相同</b>，
+     * 现场表现就是「按光圈，画面缩放」。
      *
-     * <p>现在改为明确报错：留一个静默走错动作的接口，比没有这个功能更危险 ——
-     * 用户会反复重试、运维会去查设备光圈模块。
-     *
-     * <p><b>确实需要光圈的场景</b>：只能走厂商私有 PTZ 指令（每个品牌不同，
-     * 与设备型号强相关），或给平台接一套 ONVIF 客户端。两条路都不属于
-     * GB/T 28181 范畴，不在本方法里硬编码。
-     *
-     * @throws BizException {@code command} 不是 {@code stop} 时
+     * @throws BizException 指令不支持时
      */
     public void focusIris(String channelId, String command, Integer speed) {
         String cmd = normalize(command);
-        if (!"stop".equals(cmd)) {
-            throw BizException.badRequest(
-                    "GB/T 28181 的 PTZ 指令码不含光圈/聚焦位，无法下发「" + command
-                            + "」。光圈只能通过厂商私有指令或 ONVIF 控制。");
+        int sp = speed == null ? 129 : Math.max(0, Math.min(255, speed));
+        switch (cmd) {
+            case "stop" -> sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
+            case "irisin" -> sendPtz(channelId,
+                    PtzEncoder.fi(DEFAULT_ADDRESS, PtzEncoder.IRIS_IN, 0, sp));
+            case "irisout" -> sendPtz(channelId,
+                    PtzEncoder.fi(DEFAULT_ADDRESS, PtzEncoder.IRIS_OUT, 0, sp));
+            case "focusnear" -> sendPtz(channelId,
+                    PtzEncoder.fi(DEFAULT_ADDRESS, PtzEncoder.FOCUS_NEAR, sp, 0));
+            case "focusfar" -> sendPtz(channelId,
+                    PtzEncoder.fi(DEFAULT_ADDRESS, PtzEncoder.FOCUS_FAR, sp, 0));
+            default -> throw BizException.badRequest("不支持的焦点光圈指令：" + command);
         }
-        sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
     }
 
     /** 精确云台控制（2022）：角度 + 变焦倍数。 */
@@ -202,9 +220,12 @@ public class ControlService {
     /**
      * 巡航控制。
      *
-     * <p>{@code query} 只下发查询（结果走 MANSCDP 应答）；
-     * {@code add}/{@code remove} 用 {@code CRUISE_SET} 指令携带组号与预置位；
-     * {@code setspeed}/{@code setstay} 把参数写入数据位。
+     * <p>{@code query} 只下发查询（结果走 MANSCDP 应答）；{@code add}/{@code remove}
+     * 用 {@code 0x84}/{@code 0x85} 携带组号与预置位；{@code setspeed}/{@code setstay}
+     * 用 {@code 0x86}/{@code 0x87}（值占两字节）；{@code start} 用 {@code 0x88}；
+     * <b>{@code stop} 没有专属指令码，就是普通的停止（字节4 全 0）</b>。
+     *
+     * <p>早期全部用 {@code 0x40|…} 拼出来，设备一律忽略。
      */
     public void navigate(String channelId, String command, Integer groupId, Integer preset,
                          Integer speed, Integer stay, String name) {
@@ -213,17 +234,16 @@ public class ControlService {
         switch (cmd) {
             case "query" -> sendControl(channelId,
                     deviceId -> ManscdpBuilder.cruiseTrackListQuery(client().nextSn(), deviceId));
-            case "add", "remove" -> sendPtz(channelId,
-                    PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group,
-                            preset == null ? 0 : preset));
+            case "add" -> sendPtz(channelId, PtzEncoder.cruisePoint(
+                    DEFAULT_ADDRESS, true, group, preset == null ? 0 : preset));
+            case "remove" -> sendPtz(channelId, PtzEncoder.cruisePoint(
+                    DEFAULT_ADDRESS, false, group, preset == null ? 0 : preset));
             case "setspeed" -> sendPtz(channelId, PtzEncoder.cruiseParam(
-                    DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group, speed == null ? 1 : speed));
+                    DEFAULT_ADDRESS, PtzEncoder.CRUISE_SPEED, group, speed == null ? 1 : speed));
             case "setstay" -> sendPtz(channelId, PtzEncoder.cruiseParam(
-                    DEFAULT_ADDRESS, PtzEncoder.CRUISE_SET, group, stay == null ? 1 : stay));
-            case "start" -> sendPtz(channelId,
-                    PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_START, group, 0));
-            case "stop" -> sendPtz(channelId,
-                    PtzEncoder.cruise(DEFAULT_ADDRESS, PtzEncoder.CRUISE_STOP, group, 0));
+                    DEFAULT_ADDRESS, PtzEncoder.CRUISE_TIME, group, stay == null ? 1 : stay));
+            case "start" -> sendPtz(channelId, PtzEncoder.cruiseStart(DEFAULT_ADDRESS, group));
+            case "stop" -> sendPtz(channelId, PtzEncoder.stop(DEFAULT_ADDRESS));
             default -> throw BizException.badRequest("不支持的巡航指令：" + command);
         }
         log.info("巡航控制: channel={} command={} group={} preset={} speed={} stay={} name={}",
@@ -242,27 +262,41 @@ public class ControlService {
                 deviceId -> ManscdpBuilder.homePositionQuery(client().nextSn(), deviceId));
     }
 
-    /** 看守位控制。 */
+    /**
+     * 看守位控制。
+     *
+     * <p><b>看守位不是 PTZCmd</b>：它在 {@code <Control>} 下有自己的
+     * {@code <HomePosition>} 元素（{@code <Enabled>/<ResetTime>/<PresetIndex>}）。
+     * 早期把它当成 PTZCmd 发（还借着 {@code 0x40|0x04} 这个不存在的指令码），
+     * 设备自然不理。
+     */
     public void homePosition(String channelId, Boolean enabled, Integer resetTime, Integer presetIndex) {
-        sendPtz(channelId, PtzEncoder.watchdog(DEFAULT_ADDRESS,
-                Boolean.TRUE.equals(enabled),
-                resetTime == null ? 0 : resetTime,
-                presetIndex == null ? 1 : presetIndex));
+        boolean on = Boolean.TRUE.equals(enabled);
+        int reset = resetTime == null ? 0 : resetTime;
+        int preset = presetIndex == null ? 1 : presetIndex;
+        sendControl(channelId, deviceId -> "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                + "<Control><CmdType>DeviceControl</CmdType>"
+                + "<SN>" + client().nextSn() + "</SN>"
+                + "<DeviceID>" + deviceId + "</DeviceID>"
+                + "<HomePosition><Enabled>" + (on ? 1 : 0) + "</Enabled>"
+                + (on ? "<ResetTime>" + reset + "</ResetTime>"
+                        + "<PresetIndex>" + preset + "</PresetIndex>" : "")
+                + "</HomePosition></Control>");
     }
 
     // ==================== 辅助开关 ====================
 
-    /** 雨刷开关。 */
+    /** 雨刷开关（开关编号固定 1，见标准与 wvp 实现）。 */
     public void wiper(String channelId, String command) {
         boolean on = "on".equals(normalize(command));
-        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, 0, on));
+        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, WIPER_SWITCH_ID, on));
     }
 
-    /** 补光灯开关。 */
+    /** 补光灯开关（编号由设备定义，默认 2）。 */
     public void fillLight(String channelId, String command, Integer index) {
         boolean on = "on".equals(normalize(command));
         sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS,
-                index == null ? 1 : index, on));
+                index == null ? 2 : index, on));
     }
 
     // ==================== 设备控制 ====================

@@ -51,7 +51,7 @@ class PtzEncoderAndCharsetFixTest {
     }
 
     /**
-     * 报文结构：{@code A5 0F 01 <cmd> <水平速度> <垂直速度> <数据3<<4|地址高4> <校验和>}，
+     * 报文结构：{@code A5 0F 01 <cmd> <数据1> <数据2> <数据3<<4|地址高4> <校验和>}，
      * 校验和 = 前 7 字节算术和对 256 取模。
      */
     @Test
@@ -62,6 +62,66 @@ class PtzEncoderAndCharsetFixTest {
         assertEquals("A50F0101818100B8", PtzEncoder.direction(1, PtzEncoder.RIGHT, 129));
         assertEquals("A50F0108818100BF", PtzEncoder.direction(1, PtzEncoder.UP, 129));
         assertEquals("A50F0104818100BB", PtzEncoder.direction(1, PtzEncoder.DOWN, 129));
+    }
+
+    /**
+     * 扩展指令码必须与标准 A.3.1 / wvp 一致。
+     *
+     * <p><b>这组断言来自一次真实故障</b>：早期实现按「Bit7=1 进入扩展模式」自行推导，
+     * 把预置位写成 {@code 0x60/0x50/0x48}，并把编号放进字节5。
+     * 设备收到后在 SIP 层回 200 OK，但镜头一动不动 ——
+     * 因为 {@code 0x50} 在标准里根本不是预置位指令。报文本身合法，抓包看不出问题。
+     *
+     * <p>正确值：预置位 {@code 0x81/0x82/0x83}，<b>编号在字节6</b>；
+     * 字节5 固定填 1（与 wvp 的 {@code frontEndCommand(..., 0x82, 1, presetId, 0)} 一致）。
+     */
+    @Test
+    @DisplayName("预置位指令码 0x81/0x82/0x83，编号在字节6")
+    void presetCodesMatchStandard() {
+        assertEquals(0x81, PtzEncoder.PRESET_SET, "设置预置位");
+        assertEquals(0x82, PtzEncoder.PRESET_CALL, "调用预置位");
+        assertEquals(0x83, PtzEncoder.PRESET_REMOVE, "删除预置位");
+
+        // 调用预置位 2：A5 0F 01 82 01 02 00 3A
+        assertEquals("A50F01820102003A", PtzEncoder.preset(1, PtzEncoder.PRESET_CALL, 2));
+        // 设置预置位 255
+        assertEquals("A50F018101FF0036", PtzEncoder.preset(1, PtzEncoder.PRESET_SET, 255));
+    }
+
+    /** 聚焦 0x41/0x42、光圈 0x44/0x48，与变倍 0x10/0x20 完全无关。 */
+    @Test
+    @DisplayName("聚焦/光圈指令码独立于变倍")
+    void focusIrisCodes() {
+        assertEquals(0x42, PtzEncoder.FOCUS_NEAR);
+        assertEquals(0x41, PtzEncoder.FOCUS_FAR);
+        assertEquals(0x44, PtzEncoder.IRIS_IN);
+        assertEquals(0x48, PtzEncoder.IRIS_OUT);
+
+        // 光圈放大、速度 129：字节4 = 0x44，速度在字节6
+        assertEquals("A50F01440081007A", PtzEncoder.fi(1, PtzEncoder.IRIS_IN, 0, 129));
+        // 聚焦近、速度 129：字节4 = 0x42，速度在字节5
+        assertEquals("A50F014281000078", PtzEncoder.fi(1, PtzEncoder.FOCUS_NEAR, 129, 0));
+        // 变倍放大、变倍速度 8：字节4 = 0x10，速度在字节7 高 4 位 —— 与前两者毫无重叠
+        assertEquals("A50F011000008045",
+                PtzEncoder.direction(1, PtzEncoder.ZOOM_IN, 0, 8));
+    }
+
+    /** 巡航 / 辅助开关指令码。 */
+    @Test
+    @DisplayName("巡航与辅助开关指令码")
+    void cruiseAndAuxCodes() {
+        assertEquals(0x84, PtzEncoder.CRUISE_POINT_ADD);
+        assertEquals(0x85, PtzEncoder.CRUISE_POINT_DEL);
+        assertEquals(0x86, PtzEncoder.CRUISE_SPEED);
+        assertEquals(0x87, PtzEncoder.CRUISE_TIME);
+        assertEquals(0x88, PtzEncoder.CRUISE_START);
+        assertEquals(0x8C, PtzEncoder.AUX_ON);
+        assertEquals(0x8D, PtzEncoder.AUX_OFF);
+
+        // 加入巡航点：组 1、预置位 2
+        assertEquals("A50F01840102003C", PtzEncoder.cruisePoint(1, true, 1, 2));
+        // 雨刷开：开关编号固定 1，在字节5
+        assertEquals("A50F018C01000042", PtzEncoder.auxiliary(1, 1, true));
     }
 
     // ==================== GBK 乱码修复 ====================
