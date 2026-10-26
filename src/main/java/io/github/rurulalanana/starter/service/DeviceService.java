@@ -865,10 +865,29 @@ public class DeviceService {
         log.info("已删除设备及其通道: device={}", device.getDeviceId());
     }
 
-    /** 保存预置位自定义名称。 */
+    /**
+     * 保存预置位自定义名称。
+     *
+     * @param name 名称；<b>空或 {@code null} 表示清除</b>（删除预置位时用）
+     */
     @Transactional
     public void savePresetName(String channelId, Integer presetId, String name) {
         if (channelId == null || presetId == null) {
+            return;
+        }
+        /*
+         * 清除走 delete 而不是「把 name 更新成 null」。
+         *
+         * <p>MyBatis-Plus 默认 FieldStrategy.NOT_NULL，{@code updateById} 会
+         * <b>跳过 null 字段</b> —— 写 null 根本不会进 SQL，记录仍是旧名字。
+         * 这与「清空自定义通道编号」踩的是同一个坑（见
+         * DeviceService#setChannelCustomId 的注释）。
+         * 名称表本来就是「有自定义名才有行」，删掉比留一行空值更干净。
+         */
+        if (name == null || name.isBlank()) {
+            presetMapper.delete(Wrappers.<GbPreset>lambdaQuery()
+                    .eq(GbPreset::getChannelId, channelId)
+                    .eq(GbPreset::getPresetId, presetId));
             return;
         }
         GbPreset existing = presetMapper.selectOne(Wrappers.<GbPreset>lambdaQuery()

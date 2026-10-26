@@ -85,6 +85,8 @@ export const deviceApi = {
   fetchStatus: (params) => post('/device/fetchstatus', params),
   /** 向设备下发预置位查询（异步；结果用 presetList 取）。 */
   fetchPreset: (params) => post('/device/fetchpreset', params),
+  /** 保存预置位自定义名称（备注）；name 传空表示清除。 */
+  setPresetName: (params) => post('/device/setpresetname', params),
   /** 读预置位列表；queriedAt 为 null 表示设备还没应答。 */
   presetList: (serial, code) => get('/device/presetlist', { serial, code }),
   remove: (serial) => post('/device/remove', { serial }),

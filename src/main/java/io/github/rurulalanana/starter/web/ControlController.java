@@ -61,6 +61,8 @@ public class ControlController {
 
     private final ControlService controlService;
     private final Gb28181Properties props;
+    /** 预置位自定义名称落库用（设备只存编号，名字是平台侧数据）。 */
+    private final io.github.rurulalanana.starter.service.DeviceService deviceService;
 
     // ==================== 云台 ====================
 
@@ -132,7 +134,15 @@ public class ControlController {
 
     // ==================== 预置位 / 巡航 / 看守位 ====================
 
-    /** 预置位控制。 */
+    /**
+     * 预置位控制。
+     *
+     * @param command {@code set} 设置 / {@code goto} 调用 / {@code remove} 删除
+     * @param preset  预置位编号 1~255
+     * @param name    备注名称（可选）。<b>只有 {@code set} 时生效</b>，
+     *                且只存平台侧（{@code gb_preset}）—— 设备只存编号，
+     *                各厂商对 {@code PresetName} 的支持程度差异很大。
+     */
     @PostMapping("/preset")
     public ApiResponse<Void> preset(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
@@ -142,9 +152,24 @@ public class ControlController {
         StpUtil.checkLogin();
         String channelId = channel(serial, code);
         controlService.preset(channelId, command, preset);
+        /*
+         * 名称必须真的落库。
+         *
+         * <p>改造前这里只有一行 log.info("预置位名称由本域保存…")，
+         * 注释写着「由本域保存」但实际没调任何持久化 —— 用户设置了备注，
+         * 刷新后名字又变回「预置位 N」，看起来像保存失败。
+         */
         if (name != null && !name.isBlank() && "set".equalsIgnoreCase(command)) {
-            // 名称是本域数据，设备侧只存编号
-            log.info("预置位名称由本域保存: channel={} preset={} name={}", channelId, preset, name);
+            deviceService.savePresetName(channelId, preset, name.trim());
+        }
+        /*
+         * 删除预置位时一并清掉平台侧的自定义名称。
+         *
+         * <p>不清的话会留下「幽灵备注」：设备上这个槽位已经空了，
+         * 但界面上列出的空槽位若按名称表渲染，会显示一个已经不存在的名字。
+         */
+        if ("remove".equalsIgnoreCase(command) || "delete".equalsIgnoreCase(command)) {
+            deviceService.savePresetName(channelId, preset, null);
         }
         return ApiResponse.ok();
     }

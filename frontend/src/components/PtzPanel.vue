@@ -97,41 +97,18 @@
       <!-- 预置位 -->
       <el-tab-pane label="预置位" name="preset">
         <div class="ptz-preset">
-          <div class="ptz-row">
-            <span class="preset-label">编号</span>
-            <el-input-number
-              v-model="presetNo"
-              :min="1"
-              :max="255"
-              size="small"
-              controls-position="right"
-              class="preset-input"
-            />
-          </div>
-          <el-button-group class="preset-actions">
-            <el-button size="small" type="primary" :disabled="inactive" @click="cmd('preset', { command: 'set', preset: presetNo })">
-              设置
-            </el-button>
-            <el-button size="small" :disabled="inactive" @click="cmd('preset', { command: 'goto', preset: presetNo })">
-              调用
-            </el-button>
-            <el-button size="small" type="danger" plain :disabled="inactive" @click="cmd('preset', { command: 'remove', preset: presetNo })">
-              删除
-            </el-button>
-          </el-button-group>
-
           <!--
-            设备侧预置位列表。
+            预置位面板：<b>列出全部槽位</b>而只列「设备上已有的」。
 
-            <p>平台早就能下发 PresetQuery，但设备应答此前被丢弃、
-            前端也没有查询入口，所以「设备明明有预置位，界面却什么都看不到」。
-            现在的流程：点「刷新」→ POST fetchpreset → 轮询 GET presetlist
-            等设备应答（SIP 是异步的，一问一答之间必然有间隔）。
-            点列表中的条目直接「调用」，比先在输入框里敲编号高效。
+            为什么这样设计：只列已有的话，用户想「把当前位置存到 6 号」
+            还得先记住设备上没用到哪个编号，再在输入框里敲；
+            而列出全部槽位后，空槽位就是「还能往哪儿存」的直观答案。
+            有预置位的行给「调用/设置/删除」，空槽位只给「设置」——
+            按钮本身就是能力边界，不需要额外说明文字。
           -->
           <div class="preset-head">
-            <span class="preset-label">设备预置位</span>
-            <span v-if="presets.length" class="preset-count">{{ presets.length }} 个</span>
+            <span class="preset-label">预置位</span>
+            <span v-if="usedCount" class="preset-count">已用 {{ usedCount }}</span>
             <el-button
               size="small"
               text
@@ -143,21 +120,82 @@
               <el-icon><RefreshRight /></el-icon> 刷新
             </el-button>
           </div>
-          <div v-if="presets.length" class="preset-list">
-            <div
-              v-for="p in presets"
-              :key="p.presetId"
-              class="preset-item"
-              :title="`调用预置位 ${p.presetId}${p.deviceName ? ' · ' + p.deviceName : ''}`"
-              @click="gotoPreset(p)"
-            >
-              <span class="preset-no">{{ p.presetId }}</span>
-              <span class="preset-name">{{ p.name }}</span>
-              <span v-if="p.status" class="preset-status">{{ p.status }}</span>
-            </div>
-          </div>
-          <p v-else-if="presetQueriedAt" class="preset-empty">设备上没有预置位</p>
-          <p v-else class="preset-empty">点「刷新」向设备查询</p>
+
+          <el-table
+            :data="presetSlots"
+            size="small"
+            height="248"
+            class="preset-table"
+            :row-class-name="presetRowClass"
+          >
+            <el-table-column label="序号" width="64" align="center">
+              <template #default="{ row }">
+                <span class="mono">{{ row.presetId }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="110">
+              <template #default="{ row }">
+                <!-- 只有「设备上存在」的槽位才有名字可改 -->
+                <el-input
+                  v-if="editingPreset.no === row.presetId"
+                  ref="presetNameInput"
+                  v-model="editingPreset.value"
+                  size="small"
+                  placeholder="留空=默认名称"
+                  :disabled="editingPreset.saving"
+                  @keydown.enter.prevent="commitPresetName(row)"
+                  @keydown.esc.stop.prevent="cancelPresetName"
+                  @blur="commitPresetName(row)"
+                />
+                <el-button
+                  v-else-if="row.used"
+                  link
+                  type="primary"
+                  class="preset-name-btn"
+                  title="点击修改备注"
+                  @click="startRenamePreset(row)"
+                >
+                  {{ row.name }}
+                </el-button>
+                <span v-else class="preset-name-empty">预置位 {{ row.presetId }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="158" align="center">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.used"
+                  link
+                  type="primary"
+                  :disabled="inactive"
+                  @click="callPreset(row)"
+                >
+                  调用
+                </el-button>
+                <el-button
+                  link
+                  type="primary"
+                  :disabled="inactive"
+                  :title="row.used ? '用当前位置覆盖该预置位' : '把当前位置存到该编号'"
+                  @click="savePreset(row)"
+                >
+                  设置
+                </el-button>
+                <el-button
+                  v-if="row.used"
+                  link
+                  type="danger"
+                  :disabled="inactive"
+                  @click="removePreset(row)"
+                >
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <p v-if="!presetQueriedAt" class="preset-hint">
+            点「刷新」向设备查询；空槽位可直接「设置」
+          </p>
         </div>
       </el-tab-pane>
 
@@ -233,8 +271,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { controlApi, deviceApi } from '@/api'
 
 const props = defineProps({
@@ -273,11 +311,10 @@ const inactive = computed(() => props.disabled || !props.serial)
  */
 const SPEED = 129
 
-const presetNo = ref(1)
 const talking = ref(false)
 
 /**
- * 设备侧预置位列表。
+ * 设备侧预置位列表（只含设备上真实存在的）。
  *
  * <p>数据结构见后端 {@code PresetListVo}：编号以设备为准，
  * {@code name} 已由服务端合并了平台自定义名称（有自定义就用自定义的）。
@@ -289,6 +326,157 @@ const presetQueriedAt = ref(null)
 const presetLoading = ref(false)
 /** 上一次查询得到的应答时间，用来判断「轮询到的是不是本次的结果」。 */
 let presetBaseline = null
+
+/** 设备上已用的预置位个数。 */
+const usedCount = computed(() => presets.value.length)
+
+/**
+ * 全部预置位槽位（固定 1~255，含未使用的空槽）。
+ *
+ * <p><b>为什么要补齐空槽</b>：只渲染设备上已有的预置位时，
+ * 用户想「把当前位置存到 6 号」，得先自己去猜哪个编号没被占用，
+ * 再在输入框里敲数字。补成连续槽位后，「还能存哪儿」一眼可见，
+ * 空槽位只有一个「设置」按钮，能力边界自明。
+ *
+ * <p><b>为什么固定 255 而不是跟着已用编号动</b>：国标给预置位编号的上限
+ * 就是 255（1 字节），设备实际支持多少个是设备自己的事，平台无法事先知道。
+ * 早期的「max(8, 最大已用+1)」写法看着整齐，但有两个坑：
+ * <ul>
+ *   <li>设备若只支持 8 个，用户看到第 9 行会以为能存，点了才失败 —— 平台无权替设备作答；</li>
+ *   <li>用户想把机位存在 100 号（跨设备统一的巡检编号）时，行还得等设置完才出现。</li>
+ * </ul>
+ * 固定 255 + 表内滚动，既不用猜设备能力，也保证任何编号都能直接点。
+ */
+const PRESET_MAX = 255
+
+const presetSlots = computed(() => {
+  const used = new Map()
+  for (const p of presets.value) {
+    if (!p || !Number.isFinite(p.presetId)) continue
+    used.set(p.presetId, p)
+  }
+  const rows = []
+  for (let i = 1; i <= PRESET_MAX; i++) {
+    const p = used.get(i)
+    rows.push({
+      presetId: i,
+      used: !!p,
+      // 已用：优先平台自定义名，否则设备名，再否则默认名（后端已合并好）
+      name: p ? p.name || `预置位 ${i}` : '',
+      status: p?.status || ''
+    })
+  }
+  return rows
+})
+
+/** 空槽位行加淡色底，扫一眼就能看出哪些还能存。 */
+function presetRowClass({ row }) {
+  return row.used ? '' : 'preset-row-empty'
+}
+
+/* ---------- 备注（自定义名称）行内编辑 ---------- */
+const editingPreset = reactive({ no: 0, value: '', saving: false })
+const presetNameInput = ref(null)
+
+async function startRenamePreset(row) {
+  if (editingPreset.saving) return
+  editingPreset.no = row.presetId
+  // 用「默认名」作为空值：用户看到的就是当前显示的那个名字
+  editingPreset.value = row.name === `预置位 ${row.presetId}` ? '' : row.name
+  await nextTick()
+  const el = presetNameInput.value
+  const target = Array.isArray(el) ? el[0] : el
+  target?.focus?.()
+  target?.select?.()
+}
+
+function cancelPresetName() {
+  editingPreset.no = 0
+  editingPreset.value = ''
+}
+
+/**
+ * 提交备注。
+ *
+ * <p>回车与失焦都会走到这里，必须幂等 —— 回车后输入框被移除，
+ * 若同时触发 blur 会重复提交。
+ */
+async function commitPresetName(row) {
+  if (editingPreset.no !== row.presetId || editingPreset.saving) return
+  const value = (editingPreset.value || '').trim()
+  const original = row.name === `预置位 ${row.presetId}` ? '' : row.name
+  if (value === original) {
+    cancelPresetName()
+    return
+  }
+  editingPreset.saving = true
+  try {
+    // 传空字符串 = 清除自定义名，回落到设备名或默认名
+    await deviceApi.setPresetName({
+      serial: props.serial,
+      code: props.code || props.serial,
+      preset: row.presetId,
+      name: value
+    })
+    // 本地同步，避免为了一个名字去重新走一遍 10 秒的 SIP 查询
+    const hit = presets.value.find((p) => p.presetId === row.presetId)
+    if (hit) {
+      hit.name = value || `预置位 ${row.presetId}`
+      hit.customName = !!value
+    }
+    ElMessage.success('备注已保存')
+    cancelPresetName()
+  } catch (e) {
+    ElMessage.error(e.message || '保存备注失败')
+  } finally {
+    editingPreset.saving = false
+  }
+}
+
+/* ---------- 三个动作 ---------- */
+
+/** 调用预置位。 */
+async function callPreset(row) {
+  await cmd('preset', { command: 'goto', preset: row.presetId },
+    `已调用预置位 ${row.presetId}`)
+}
+
+/**
+ * 设置预置位（把当前位置存到该编号）。
+ *
+ * <p>空槽位设置成功后要本地补一条记录：设备侧确实多了一个预置位，
+ * 不补的话这一行仍是「空槽、只有设置按钮」，用户会以为没成功。
+ * 名称先按默认名占位，点「刷新」可从设备拉回真实名称。
+ */
+async function savePreset(row) {
+  const ok = await cmd('preset', { command: 'set', preset: row.presetId },
+    row.used ? `已更新预置位 ${row.presetId}` : `已设置预置位 ${row.presetId}`)
+  if (!ok) return
+  if (!row.used) {
+    presets.value = [
+      ...presets.value,
+      { presetId: row.presetId, name: `预置位 ${row.presetId}`, customName: false }
+    ].sort((a, b) => a.presetId - b.presetId)
+  }
+}
+
+/** 删除预置位（需确认：删了要重新去现场调机位才能恢复）。 */
+async function removePreset(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除预置位 ${row.presetId}？删除后需要重新调整机位才能恢复。`,
+      '删除预置位',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return
+  }
+  const ok = await cmd('preset', { command: 'remove', preset: row.presetId },
+    `已删除预置位 ${row.presetId}`)
+  if (ok) {
+    presets.value = presets.value.filter((p) => p.presetId !== row.presetId)
+  }
+}
 
 /**
  * 当前选中的运维功能 Tab。
@@ -431,12 +619,6 @@ async function refreshPresets() {
   }
 }
 
-/** 点击列表条目：填进编号并直接调用。 */
-async function gotoPreset(p) {
-  presetNo.value = p.presetId
-  await cmd('preset', { command: 'goto', preset: p.presetId }, `已调用预置位 ${p.presetId}`)
-}
-
 /**
  * 换通道时重新拉一次。
  *
@@ -449,6 +631,7 @@ watch(
   async ([serial, code]) => {
     presets.value = []
     presetQueriedAt.value = null
+    cancelPresetName()
     if (!serial || props.simple) return
     try {
       applyPresetList(await deviceApi.presetList(serial, code))
@@ -500,18 +683,20 @@ async function cmd(action, extra = {}, okMsg = '指令已下发', silent = false
 async function send(action, extra = {}, okMsg = '指令已下发', silent = false) {
   if (!props.serial) {
     if (!silent) ElMessage.warning('请先选择通道')
-    return
+    return false
   }
   const fn = ACTIONS[action]
   if (!fn) {
     if (!silent) ElMessage.error('未实现的控制指令：' + action)
-    return
+    return false
   }
   try {
     await fn({ serial: props.serial, code: props.code, ...extra })
     if (okMsg && !silent) ElMessage.success(okMsg)
+    return true
   } catch (e) {
     if (!silent) ElMessage.error(e.message || '控制指令下发失败')
+    return false
   }
 }
 
@@ -678,46 +863,25 @@ async function toggleTalk() {
 .ptz-preset {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
-/* 编号标签固定宽度，让输入框左边界与下方按钮左边界对齐 */
 .preset-label {
   flex: 0 0 auto;
   font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
-/* 输入框吃掉剩余宽度（原固定 100px，右侧会空一截，与按钮行对不齐） */
-.preset-input {
-  flex: 1;
-  min-width: 0;
-}
-
-/* 三个按钮等分整行宽度，与上面的输入框左右边界对齐 */
-.preset-actions {
-  display: flex !important;
-}
-
-.preset-actions :deep(.el-button) {
-  flex: 1;
-  padding-left: 0;
-  padding-right: 0;
-}
-
 /*
- * 设备预置位列表。
+ * 预置位表头。
  *
- * 列表限高 + 内部滚动：设备上可能有几十个预置位（有些球机默认 255 个全开），
- * 不限高会把整个面板撑到需要滚页面，而用户真正要在意的方向盘会被挤出视口。
- * 140px ≈ 显示 5 行，再多就滚。
+ * 「已用 N」这个计数比「共 N 个」有用：用户真正想知道的是
+ * 「还有多少空位可以存机位」，总数是固定的，不值得占版面。
  */
 .preset-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-top: 2px;
-  border-top: 1px dashed var(--border-color);
 }
 
 .preset-head .preset-label {
@@ -729,60 +893,73 @@ async function toggleTalk() {
   color: var(--text-secondary);
 }
 
-.preset-list {
-  max-height: 140px;
-  overflow-y: auto;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
+/*
+ * 预置位表。
+ *
+ * 限高 248px（≈ 8 行）后内部滚动：球机常见 8~255 个预置位，
+ * 全展开会把方向盘挤出视口，而方向盘才是这个面板的主要用途。
+ * 表头固定（el-table 自带）—— 滚到 100 号时还能看见列名。
+ */
+.preset-table {
+  width: 100%;
 }
 
-.preset-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: background-color 0.15s;
+.preset-table :deep(.el-table__cell) {
+  padding: 4px 0;
 }
 
-.preset-item + .preset-item {
-  border-top: 1px solid var(--border-color);
-}
-
-.preset-item:hover {
-  background: var(--fill-color-light, rgba(64, 128, 255, 0.08));
-}
-
-/* 编号定宽等宽字体：1 和 128 上下对齐，扫一眼就能找到目标编号 */
-.preset-no {
-  flex: 0 0 28px;
+/* 序号用等宽数字：1 和 128 右对齐后竖排扫读不会跳 */
+.preset-table .mono {
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
-  text-align: right;
 }
 
-.preset-name {
-  flex: 1;
-  min-width: 0;
+/* 空槽位淡底：一眼区分「能存」和「已存」 */
+.preset-table :deep(.preset-row-empty) {
+  background: var(--fill-color-lighter, rgba(128, 128, 128, 0.04));
+}
+
+/* 备注做成按钮样式（可点即改），但视觉上要像普通文字，别抢操作列的注意力 */
+.preset-name-btn {
+  justify-content: flex-start !important;
+  width: 100%;
+  padding: 0 !important;
+  font-weight: normal !important;
+  overflow: hidden;
+}
+
+.preset-name-btn :deep(span) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.preset-status {
-  flex: 0 0 auto;
+.preset-name-empty {
+  display: block;
+  padding: 0 2px;
   font-size: var(--fs-xs);
   color: var(--text-secondary);
-  opacity: 0.8;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.preset-empty {
+/* 操作列三个链接按钮：默认间距偏大，窄边栏里会换行 */
+.preset-table :deep(.el-button + .el-button) {
+  margin-left: 6px;
+}
+
+/* 按钮文字绝不折行：折了就变两行，行高忽大忽小，扫读很难受 */
+.preset-table :deep(.el-button > span) {
+  white-space: nowrap;
+}
+
+.preset-hint {
   margin: 0;
-  padding: 10px 0;
-  text-align: center;
   font-size: var(--fs-xs);
   color: var(--text-secondary);
+  text-align: center;
 }
 
 /*
