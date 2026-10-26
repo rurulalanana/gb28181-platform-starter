@@ -177,10 +177,33 @@ public class PlaybackController {
                         TimeFormats.toDate(TimeFormats.parse(req.getEndtime() == null
                                 ? req.getStarttime() : req.getEndtime())), null)
                 : RecordItem.ofFilePath(channelId, req.getFilePath());
-        GbStream stream = streamService.startPlayback(deviceId, channelId, item);
-        StreamVo base = streamService.describe(streamService.session(deviceId, channelId));
+        /*
+         * 倍速只在「下载」时生效：普通回放必须是 1 倍速，否则用户点开回放
+         * 看到的是快进画面。这是 {@code PlaybackStartRequest.downloadSpeed}
+         * 默认 4 却必须配合 {@code download=true} 的原因。
+         */
+        int downloadSpeed = Boolean.TRUE.equals(req.getDownload())
+                ? Math.max(1, req.getDownloadSpeed() == null ? 1 : req.getDownloadSpeed())
+                : 1;
+        GbStream stream = streamService.startPlayback(deviceId, channelId, item, downloadSpeed);
+        /*
+         * 【必须按回放会话取播放地址】
+         *
+         * <p>不能用 {@code streamService.session(deviceId, channelId)}：那是
+         * <b>直播</b>会话（键不带类型后缀）。云端录像自动开录后，通道上长期
+         * 有一路直播流在跑，于是这里会拿到<b>直播流的播放地址</b> ——
+         * 用户点「回放 2026-10-25 00:00~02:00」，画面里却是当下的实时画面
+         * （OSD 时间显示今天）。
+         *
+         * <p>回放会话的键是 {@code <设备>/<通道>_playback}（见 RtpSession#getSessionKey），
+         * {@code GbStream#getStreamKey()} 保存的正是它。
+         */
+        RtpSession playbackSession = streamService.sessionByKey(stream.getStreamKey());
         PlaybackVo vo = new PlaybackVo();
-        BeanUtils.copyProperties(base, vo);
+        if (playbackSession != null) {
+            BeanUtils.copyProperties(streamService.describe(playbackSession), vo);
+        }
+        // describe 拿不到时退回入库的流信息（至少保证地址不为空）
         if (vo.getStreamId() == null) {
             vo.setStreamId(stream.getStreamKey());
             vo.setWebrtc(stream.getWebrtc());
@@ -189,15 +212,24 @@ public class PlaybackController {
         }
         vo.setPlaybackStartTime(req.getStarttime());
         vo.setPlaybackEndTime(req.getEndtime());
-        vo.setPlaybackSpeed(1);
+        vo.setPlaybackSpeed(downloadSpeed);
         vo.setPlaybackPaused(false);
         vo.setDownload(Boolean.TRUE.equals(req.getDownload()));
         return ApiResponse.ok(vo);
     }
 
-    /** 停止回放。 */
+    /**
+     * 停止回放。
+     *
+     * <p><b>下载中的通道不会被停掉</b>：后台下载依赖这路回放流。
+     * 用户关掉回放弹窗、切换页面时前端都会调本接口，若照常停流，
+     * 下载会直接中断（这正是「后台下载」改造前的问题）。
+     * 此时返回 {@code ok=false} 并说明原因，由界面提示
+     * 「后台下载中，完成后自动释放」。
+     */
     @PostMapping("/stop")
-    public ApiResponse<StreamStopVo> stop(@RequestParam(required = false) String streamid,                                          @RequestParam(required = false) String serial,
+    public ApiResponse<StreamStopVo> stop(@RequestParam(required = false) String streamid,
+                                          @RequestParam(required = false) String serial,
                                           @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
         RtpSession session = resolveSession(streamid, serial, code);
@@ -207,15 +239,22 @@ public class PlaybackController {
         // 下载模式下文件已由 ZLM 落盘，停止前先取出路径
         String mediaUri = session.getMediaUri();
         String channelId = session.getChannelId();
-        // 必须按类型停：回放与直播是独立会话，用 stop(device, channel) 只会去关直播
-        boolean stopped = streamService.stop(session.getDeviceId(), channelId,
-                io.github.rurulalanana.gb28181.sip.zlm.MediaType.PLAYBACK);
         StreamStopVo vo = new StreamStopVo();
-        vo.setOk(stopped);
         vo.setChannelId(channelId);
         if (mediaUri != null) {
             vo.setFilePath(mediaUri);
         }
+        if (downloadService.isDownloading(session.getDeviceId(), channelId)) {
+            log.info("回放通道正在后台下载，跳过停流: device={} channel={}",
+                    session.getDeviceId(), channelId);
+            vo.setOk(false);
+            vo.setMessage("该通道正在后台下载，完成后自动释放");
+            return ApiResponse.ok(vo);
+        }
+        // 必须按类型停：回放与直播是独立会话，用 stop(device, channel) 只会去关直播
+        boolean stopped = streamService.stop(session.getDeviceId(), channelId,
+                io.github.rurulalanana.gb28181.sip.zlm.MediaType.PLAYBACK);
+        vo.setOk(stopped);
         return ApiResponse.ok(vo);
     }
 
@@ -289,22 +328,45 @@ public class PlaybackController {
     // ==================== 录像下载 ====================
 
     /**
-     * 开始下载：对当前回放流开始录制成本地 MP4。
+     * 开始下载：对当前回放流开始录制成本地 MP4（后台任务）。
      *
      * <p>必须先有回放流（先调 {@code playback/start}）—— 这样「边看边下」
      * 共用一路流，不会为下载重复向设备发起 INVITE 而占掉一路带宽。
      *
+     * <p><b>任务不随页面消失</b>：录满后由服务端自动收尾，
+     * 前端通过 {@code download/list} 在任何页面查看与取文件。
+     *
      * @param streamid 回放会话键
      * @param duration 录像段总时长（秒），用于计算进度；{@code 0} 表示未知
+     * @param speed    请求的设备推流倍速（多数设备忽略，仅作日志）
+     * @param expectedBytes 该段在设备侧的文件大小（录像检索的 FileSize）；
+     *                它是「内容已录完」的主判据 —— 设备不会按请求的结束时间停推，
+     *                只能靠大小判断。{@code 0} 表示未知
+     * @param name     通道名（仅用于任务列表展示）
      */
     @PostMapping("/download/start")
-    public ApiResponse<PlaybackDownloadVo.Start> downloadStart(@RequestParam String streamid,
-                                                       @RequestParam(defaultValue = "0") long duration) {
+    public ApiResponse<PlaybackDownloadVo.Progress> downloadStart(
+            @RequestParam String streamid,
+            @RequestParam(defaultValue = "0") long duration,
+            @RequestParam(defaultValue = "1") int speed,
+            @RequestParam(defaultValue = "0") long expectedBytes,
+            @RequestParam(required = false) String name,
+            @RequestParam(required = false) String starttime,
+            @RequestParam(required = false) String endtime) {
         StpUtil.checkLogin();
-        String key = downloadService.start(streamid, duration);
-        PlaybackDownloadVo.Start vo = new PlaybackDownloadVo.Start();
-        vo.setStreamId(key);
-        vo.setTotalSecond(duration);
+        RtpSession session = resolveSession(streamid, null, null);
+        DownloadService.View task = downloadService.start(new DownloadService.Request(
+                streamid,
+                session == null ? null : session.getDeviceId(),
+                session == null ? null : session.getChannelId(),
+                name, starttime, endtime, duration, speed, expectedBytes));
+        PlaybackDownloadVo.Progress vo = new PlaybackDownloadVo.Progress();
+        vo.setStreamId(task.taskId());
+        vo.setRecordedSecond(task.recordedSecond());
+        vo.setTotalSecond(task.totalSecond());
+        vo.setPercent(task.percent());
+        vo.setFinished(task.finished());
+        vo.setFileSize(task.fileSize());
         return ApiResponse.ok(vo);
     }
 
@@ -314,13 +376,59 @@ public class PlaybackController {
         StpUtil.checkLogin();
         var p = downloadService.progress(streamid);
         PlaybackDownloadVo.Progress vo = new PlaybackDownloadVo.Progress();
+        vo.setStreamId(streamid);
         vo.setRecordedSecond(p.recordedSecond());
         vo.setTotalSecond(p.totalSecond());
         vo.setFinished(p.finished());
         vo.setFileSize(p.fileSize());
         vo.setPercent(p.totalSecond() > 0
-                ? Math.min(100, (int) (p.recordedSecond() * 100 / p.totalSecond())) : 0);
+                ? (int) Math.min(100, p.recordedSecond() * 100 / p.totalSecond()) : 0);
         return ApiResponse.ok(vo);
+    }
+
+    /**
+     * 全局下载任务列表（进行中 + 最近已完成）。
+     *
+     * <p>后台下载的关键接口：任意页面都能拉到全部任务，所以用户切走页面、
+     * 甚至刷新浏览器之后依然能看到进度、并取回已完成的文件。
+     */
+    @GetMapping("/download/list")
+    public ApiResponse<List<PlaybackDownloadVo.Task>> downloadList() {
+        StpUtil.checkLogin();
+        List<PlaybackDownloadVo.Task> out = new ArrayList<>();
+        for (DownloadService.View v : downloadService.list()) {
+            PlaybackDownloadVo.Task vo = new PlaybackDownloadVo.Task();
+            vo.setTaskId(v.taskId());
+            vo.setDeviceId(v.deviceId());
+            vo.setChannelId(v.channelId());
+            vo.setChannelName(v.channelName() == null || v.channelName().isBlank()
+                    ? v.channelId() : v.channelName());
+            vo.setStartAt(v.startAt());
+            vo.setEndAt(v.endAt());
+            vo.setRecordedSecond(v.recordedSecond());
+            vo.setTotalSecond(v.totalSecond());
+            vo.setPercent(v.percent());
+            vo.setSpeed(v.speed());
+            vo.setFinished(v.finished());
+            vo.setOk(v.ok());
+            vo.setFileName(v.fileName());
+            vo.setFileSize(v.fileSize());
+            // 完成任务把磁盘路径换成带签名的静态地址，前端直接交给浏览器下载
+            vo.setUrl(v.filePath() == null || v.filePath().isBlank()
+                    ? v.url() : spaWebConfiguration.toStaticUrl(v.filePath()));
+            vo.setMessage(v.message());
+            vo.setElapsedSecond(v.elapsedSecond());
+            out.add(vo);
+        }
+        return ApiResponse.ok(out);
+    }
+
+    /** 从任务列表移除一条已完成/已取消的记录（不删磁盘文件）。 */
+    @PostMapping("/download/remove")
+    public ApiResponse<Void> downloadRemove(@RequestParam String taskid) {
+        StpUtil.checkLogin();
+        downloadService.remove(taskid);
+        return ApiResponse.ok();
     }
 
     /**
@@ -332,8 +440,21 @@ public class PlaybackController {
     @PostMapping("/download/finish")
     public ApiResponse<PlaybackDownloadVo.Finish> downloadFinish(@RequestParam String streamid) {
         StpUtil.checkLogin();
-        String path = downloadService.finish(streamid);
         PlaybackDownloadVo.Finish vo = new PlaybackDownloadVo.Finish();
+        // 已被后台自动收尾：直接把结果还给前端
+        for (DownloadService.View v : downloadService.list()) {
+            if (!streamid.equals(v.taskId()) || !v.finished()) {
+                continue;
+            }
+            vo.setOk(v.ok());
+            vo.setMessage(v.message());
+            vo.setFileName(v.fileName());
+            vo.setFileSize(v.fileSize());
+            vo.setFilePath(v.filePath());
+            vo.setUrl(v.url());
+            return ApiResponse.ok(vo);
+        }
+        String path = downloadService.finish(streamid);
         if (path == null) {
             vo.setOk(false);
             vo.setMessage("录制未产出文件，请确认录像时段内设备确实有数据");

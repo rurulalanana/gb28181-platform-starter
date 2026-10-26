@@ -515,6 +515,17 @@ public class RecordService {
         Set<String> known = loadKnownFilePaths();
         for (File channelDir : channelDirs) {
             String channelId = channelDir.getName();
+            /*
+             * 跳过「回放/下载」目录。
+             *
+             * <p>这些目录名形如 {@code <设备编码>/<通道编码>_playback}，是
+             * "设备录像下载"把回放流录成本地 MP4 时的产物目录，不是设备的
+             * 云端录像。对账若把它们当通道登记，云端录像列表里会凭空多出
+             * 一串叫「xxx_playback」的假通道，而且会与下载任务重复计数。
+             */
+            if (isTransientDir(channelId)) {
+                continue;
+            }
             List<File> files = new ArrayList<>();
             collectMp4s(channelDir, files);
             for (File f : files) {
@@ -541,6 +552,14 @@ public class RecordService {
             }
         }
         return count;
+    }
+
+    /** 该目录名是否是「回放/下载」这类临时产物目录（不参与云端录像对账）。 */
+    private static boolean isTransientDir(String name) {
+        if (name == null) {
+            return true;
+        }
+        return name.endsWith("_playback") || name.endsWith("_download");
     }
 
     /**

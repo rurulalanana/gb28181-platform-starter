@@ -29,6 +29,8 @@ public final class PlaybackDownloadVo {
     @Data
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class Progress {
+        /** 任务 ID（= 回放会话键）。 */
+        private String streamId;
         /** 已录制秒数。 */
         private Long recordedSecond;
         /** 录像段总时长（秒）。 */
@@ -39,6 +41,43 @@ public final class PlaybackDownloadVo {
         private Boolean finished;
         /** 已产出文件大小（字节）；未落盘为 0。 */
         private Long fileSize;
+    }
+
+    /**
+     * 一个后台下载任务（任务列表项）。
+     *
+     * <p>比 {@link Progress} 多出「哪个通道、哪一段、倍速、结果地址」——
+     * 因为任务列表是<b>跨页面、跨通道</b>的，光有进度无法区分是哪一路。
+     */
+    @Data
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class Task {
+        /** 任务 ID（= 回放会话键，全局唯一）。 */
+        private String taskId;
+        private String deviceId;
+        private String channelId;
+        /** 通道名（取不到时为通道编码）。 */
+        private String channelName;
+        /** 录像段起止（展示用）。 */
+        private String startAt;
+        private String endAt;
+        private Long recordedSecond;
+        private Long totalSecond;
+        private Integer percent;
+        /** 设备推流倍速。 */
+        private Integer speed;
+        /** 任务是否已结束（成功或失败）。 */
+        private Boolean finished;
+        /** 是否成功产出文件。 */
+        private Boolean ok;
+        private String fileName;
+        private Long fileSize;
+        /** 带签名的下载地址；未完成时为空。 */
+        private String url;
+        /** 失败/取消原因。 */
+        private String message;
+        /** 已耗时（秒）。 */
+        private Long elapsedSecond;
     }
 
     /** 下载完成的返回。 */

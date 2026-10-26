@@ -88,16 +88,36 @@ public class WebRtcController {
             deviceId = stream;
             channelId = stream;
         }
-        // 若流尚未建立，自动点播（避免浏览器拿到空流）
-        RtpSession session = platform.sessionManager().getByChannel(deviceId, channelId);
-        if (session == null) {
-            try {
-                streamService.startLive(deviceId, channelId);
-            } catch (Exception e) {
-                log.warn("WebRTC 播放前自动点播失败: device={} channel={} err={}",
-                        deviceId, channelId, e.getMessage());
-            }
+        /*
+         * 先按<b>会话键</b>精确匹配（同时覆盖直播、回放、下载三种会话）。
+         *
+         * <p>回放的会话键是 {@code <设备>/<通道>_playback}，若只按通道查，
+         * 要么查不到、要么命中同通道的<b>直播</b>会话 —— 后者会让浏览器
+         * 播到实时画面而不是选中的那段录像。
+         */
+        RtpSession session = platform.sessionManager().getByKey(deviceId + "/" + channelId);
+        boolean playback = channelId.endsWith("_playback");
+        if (session == null && !playback) {
             session = platform.sessionManager().getByChannel(deviceId, channelId);
+            // 流尚未建立时自动点播（避免浏览器拿到空流）
+            if (session == null) {
+                try {
+                    streamService.startLive(deviceId, channelId);
+                } catch (Exception e) {
+                    log.warn("WebRTC 播放前自动点播失败: device={} channel={} err={}",
+                            deviceId, channelId, e.getMessage());
+                }
+                session = platform.sessionManager().getByChannel(deviceId, channelId);
+            }
+        }
+        if (playback && (session == null || RtpSession.CLOSED.equals(session.getState()))) {
+            /*
+             * 回放流不在了就直说，不要回落到 startLive：
+             * 那会拉起一路直播，用户以为「切协议」却看到实时画面。
+             * 前端拿到这句提示会提示用户重新点播该段。
+             */
+            throw BizException.badRequest(
+                    "回放流已关闭，无法切换协议，请重新点播该段录像");
         }
         // 用 ZLM 的实际 app/stream 协商；会话还没建好时退回业务坐标
         // （此时 ZLM 侧也还没有源，报错信息更贴近实际）

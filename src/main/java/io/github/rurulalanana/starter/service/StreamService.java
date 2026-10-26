@@ -219,6 +219,26 @@ public class StreamService {
      * @param item      录像段（{@link RecordItem#ofFilePath} 可只带 filePath）
      */
     public GbStream startPlayback(String deviceId, String channelId, RecordItem item) {
+        return startPlayback(deviceId, channelId, item, 1);
+    }
+
+    /**
+     * 开始历史回放，可指定下载倍速。
+     *
+     * <p><b>倍速为什么走回放</b>：标准 9.9 的 {@code s=Download} 设备支持度很差，
+     * 本平台的「下载」复用回放链路 + 本地录制；而 9.9.1 b) 规定倍速由请求方
+     * 在 SDP 里携带（{@code a=downloadspeed:N}），与 {@code s=} 取值无关。
+     *
+     * <p><b>倍速大于 1 时不复用已有会话</b>：会话的推流速率由<b>上一次 INVITE
+     * 的 SDP</b> 决定，复用会让 8 倍速静默退化成 1 倍速 ——
+     * 用户等满一小时后才发觉得到的文件更慢，且无从判断是设备不支持还是代码没生效。
+     * 因此明确停掉旧会话后重建，并在日志里留下倍速值。
+     *
+     * @param downloadSpeed 倍速档位（设备 {@code Info/DownloadSpeed} 声明的值）；
+     *                      {@code 1} 表示按实时速度推流
+     */
+    public GbStream startPlayback(String deviceId, String channelId, RecordItem item,
+                                  int downloadSpeed) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
         RtpSession existing = platform.sessionManager()
                 .getByChannel(deviceId, channel, MediaType.PLAYBACK);
@@ -232,11 +252,17 @@ public class StreamService {
              */
             String want = recordIdentity(item);
             String have = existing.getMediaUri();
-            if (want != null && want.equals(have)) {
+            if (downloadSpeed <= 1 && want != null && want.equals(have)) {
                 return toStream(existing, GbStream.TYPE_PLAYBACK);
             }
+            if (downloadSpeed > 1 && want != null && want.equals(have)) {
+                // 同一段但要求更高倍速：先停旧会话，避免同通道两路回放把设备打满
+                log.info("回放需提速到 {}x，重建会话: {} {}", downloadSpeed, deviceId, channel);
+                stop(deviceId, channel, MediaType.PLAYBACK);
+            }
         }
-        RtpSession session = platform.mediaService().playback(deviceId, channel, item);
+        RtpSession session = platform.mediaService()
+                .playback(deviceId, channel, item, downloadSpeed);
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;

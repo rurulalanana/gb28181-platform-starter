@@ -19,4 +19,7 @@ public class StreamStopVo {
 
     /** 下载模式下 ZLM 落盘的文件路径。 */
     private String filePath;
+
+    /** 未停止的原因（{@code ok=false} 时，如「后台下载中」）。 */
+    private String message;
 }

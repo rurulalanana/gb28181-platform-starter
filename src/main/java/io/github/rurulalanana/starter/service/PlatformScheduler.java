@@ -39,6 +39,7 @@ public class PlatformScheduler {
     private final OperationLogService operationLogService;
     private final SystemMetricsService systemMetricsService;
     private final RecordService recordService;
+    private final DownloadService downloadService;
     private final ChannelRecordPolicy recordPolicy;
     private final StreamService streamService;
     private final CatalogPager catalogPager;
@@ -432,6 +433,25 @@ public class PlatformScheduler {
         }
         // 退出的通道由 keepCloudRecordStreams 的「停录对账」收尾：
         // 那边统一按「应录集合」比对，避免两处都去停录造成竞态。
+    }
+
+    /**
+     * 后台下载收尾巡检（每 5 秒）。
+     *
+     * <p><b>为什么必须由服务端扫</b>：用户点完下载通常会关掉页面去干别的，
+     * 此时没有任何前端在轮询 {@code download/progress}。若收尾只发生在
+     * 轮询里，ZLM 会一直录到 {@code max_second} 上限，任务永远拿不到文件路径。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void finishDownloads() {
+        if (!due("download-finish", 5_000L)) {
+            return;
+        }
+        try {
+            downloadService.tick();
+        } catch (Exception e) {
+            log.warn("后台下载收尾巡检失败: {}", e.getMessage());
+        }
     }
 
     /**
