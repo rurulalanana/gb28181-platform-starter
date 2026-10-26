@@ -7,7 +7,7 @@
 # application-local.yml 已被 .gitignore 忽略，不会进仓库。
 # 启动时用它覆盖默认配置：
 #
-#   java -jar gb28181-platform-starter-1.0.1.jar \
+#   java -jar gb28181-platform-starter-1.0.2.jar \
 #        --spring.profiles.active=server,local
 #
 # 也可以直接用环境变量（优先级高于配置文件）：
@@ -15,7 +15,7 @@
 #   export GB_DB_URL=jdbc:postgresql://127.0.0.1:5432/gb28181
 #   export GB_DB_USERNAME=postgres
 #   export GB_DB_PASSWORD=你的密码
-#   java -jar gb28181-platform-starter-1.0.1.jar --spring.profiles.active=server
+#   java -jar gb28181-platform-starter-1.0.2.jar --spring.profiles.active=server
 #
 # 【不要把真实口令写进 application.yml】
 # 该文件会被打进 jar 并提交到 Git 仓库，写死等于公开凭据。

@@ -24,7 +24,7 @@ cd ../gb28181-platform-starter
 mvn clean package
 
 # 启动（设备注册后自动拉取目录并入库）
-java -jar target/gb28181-platform-starter-1.0.1.jar \
+java -jar target/gb28181-platform-starter-1.0.2.jar \
      --gb28181.starter.self-check=true
 
 # 浏览器打开管理前端（默认账号 admin / admin123）

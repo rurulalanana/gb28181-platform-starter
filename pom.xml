@@ -13,7 +13,7 @@
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-platform-starter</artifactId>
-  <version>1.0.1</version>
+  <version>1.0.2</version>
   <name>gb28181-platform-starter</name>
   <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
 
