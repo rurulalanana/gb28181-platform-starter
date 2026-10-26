@@ -2,7 +2,7 @@
 # ======================================================================
 # gb28181 平台服务管理脚本（守护模式）
 # ======================================================================
-# 用法： ./gb.sh {start|stop|restart|status|log}
+# 用法： ./gb.sh {start|stop|restart|status|jar|log}
 #
 # 说明：
 #   - start 通过 setsid 启动「守护循环」（guard 内部模式），脱离 SSH 会话
@@ -11,15 +11,56 @@
 #   - ExitOnOutOfMemoryError：OOM 时直接退出，交给守护循环重启，
 #     而不是留在半死不活的状态继续处理信令
 #   - stop 会先停守护循环再停 JVM（顺序不可颠倒，否则 JVM 会被重新拉起）
+#   - jar 打印实际在跑的 jar（路径/大小/MD5），升级后用它确认没跑成旧版
+#   - jar 文件名**不固定**：按 gb28181-platform-starter-*.jar 找最新的那个，
+#     升级换版本号不需要改本脚本
 # ----------------------------------------------------------------------
 
 APP_NAME="gb28181-platform"
 APP_DIR="/opt/gb28181"
-JAR="$APP_DIR/gb28181-platform-starter-1.0.0.jar"
 LOG="$APP_DIR/logs/console.log"
 PID_FILE="$APP_DIR/$APP_NAME.pid"
 GUARD_PID_FILE="$APP_DIR/$APP_NAME-guard.pid"
 GB_SH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+# ----------------------------------------------------------------------
+# 定位要启动的 jar。
+#
+# 【为什么不再写死文件名】原来这里是
+#     JAR="$APP_DIR/gb28181-platform-starter-1.0.0.jar"
+# 于是每升一次版本号就得同步改服务器上的本脚本 —— 忘了改就是
+# 「部署明明成功，重启后跑的还是旧版本」，而且 status 显示一切正常，
+# 极难发现。现在按 glob 找，并排除备份/临时/文档包。
+#
+# 命中多个时取**最新修改时间**的那个：部署流程是「先落 .new 再 mv 成正式名」，
+# 正式包的 mtime 一定最新，正好是刚部署的那一个。
+# 想强制指定（例如回滚到 .bak）用环境变量：JAR=/opt/gb28181/xxx.jar ./gb.sh start
+# ----------------------------------------------------------------------
+resolve_jar() {
+    if [ -n "$JAR" ] && [ -f "$JAR" ]; then
+        return 0
+    fi
+    local newest=""
+    local f
+    for f in "$APP_DIR"/gb28181-platform-starter-*.jar; do
+        [ -f "$f" ] || continue
+        # 排除 sources/javadoc 包与 .bak/.new/.old 之类的备份
+        case "$f" in
+            *-sources.jar|*-javadoc.jar|*-tests.jar) continue ;;
+            *.bak*|*.new|*.old|*.tmp) continue ;;
+        esac
+        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+            newest="$f"
+        fi
+    done
+    JAR="$newest"
+    [ -n "$JAR" ]
+}
+
+if ! resolve_jar; then
+    echo "未找到可启动的 jar（$APP_DIR/gb28181-platform-starter-*.jar）" >&2
+    exit 1
+fi
 
 # 服务器上 PostgreSQL 是 5432，profile 里已配好
 SPRING_PROFILE="server"
@@ -342,8 +383,29 @@ case "$1" in
     log)
         tail -f "$LOG"
         ;;
+    jar|pid)
+        # 只打印「实际在跑的是哪个 jar」与它对应的文件信息。
+        # 用途：升级后确认没跑成旧版本 —— status 里的 ps 输出太长，
+        # 肉眼比对版本号容易看漏，这里一行说清。
+        p=$(pid_of)
+        if [ -z "$p" ]; then
+            echo "未在运行；下次 start 将使用: $JAR"
+            exit 1
+        fi
+        running=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | sed -E 's/.*-jar +([^ ]+).*/\1/')
+        echo "PID      : $p"
+        echo "实际运行 : ${running:-（无法解析）}"
+        if [ -n "$running" ] && [ -f "$running" ]; then
+            echo "大小/时间: $(stat -c '%s bytes  %y' "$running")"
+            echo "MD5      : $(md5sum "$running" | cut -d' ' -f1)"
+        fi
+        if [ -n "$running" ] && [ "$running" != "$JAR" ]; then
+            echo "注意     : 与脚本当前解析到的 jar 不一致"
+            echo "           脚本解析: $JAR"
+        fi
+        ;;
     *)
-        echo "用法: $0 {start|stop|restart|status|log}"
+        echo "用法: $0 {start|stop|restart|status|jar|log}"
         exit 1
         ;;
 esac

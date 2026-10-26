@@ -24,7 +24,7 @@ cd ../gb28181-platform-starter
 mvn clean package
 
 # 启动（设备注册后自动拉取目录并入库）
-java -jar target/gb28181-platform-starter-1.0.0.jar \
+java -jar target/gb28181-platform-starter-1.0.1.jar \
      --gb28181.starter.self-check=true
 
 # 浏览器打开管理前端（默认账号 admin / admin123）
@@ -33,6 +33,11 @@ open http://localhost:8080/
 
 > **端口提醒**：Spring Boot 自己用 `8080`，因此媒体 HTTP 服务在 `application.yml` 里改成了 `8081`。
 > SIP 为 `5060/UDP`，媒体端口：HTTP 8081 / RTMP 11935 / RTSP 18554 / WebRTC 18000。
+
+> ⚠️ **生产部署前必读 [`docs/部署说明.md`](docs/部署说明.md)**。
+> 其中「放大 UDP 接收缓冲」（`net.core.rmem_max`）是**必做项**：
+> 漏掉会导致「服务重启后第一次播放黑屏、关掉重播才出画面」——
+> 内核丢掉开头的 SPS/PPS + I 帧后，ZLM 会把视频轨永久丢弃。
 
 ## 验证清单
 
@@ -162,6 +167,9 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 | `media-ip` | 空=自动探测 | **SDP `c=` 行与播放地址主机，必须是设备可达地址** |
 | `http-port` | `8081` | 媒体 HTTP（WebSocket-FLV / HTTP-FLV / HLS） |
 | `rtmp/rtsp/rtc-port` | `11935/18554/18000` | 各协议端口，`0`=自动选空闲端口，`-1`=关闭 |
+| `rtp-single-port` | `false` | 单端口收流（ZLM 按 SSRC 分流），开启后防火墙只需放行一个端口 |
+| `rtp-single-port-number` | `24560` | 单端口模式下的收流端口 |
+| `udp-recv-socket-buffer` | `8388608`（8 MB） | RTP 收流缓冲。**宿主机需同步调大 `net.core.rmem_max`**，否则会被内核静默夹小，详见 [`docs/部署说明.md`](docs/部署说明.md) |
 | `app` | `rtp` | ZLM 应用名 |
 | `auto-record` / `record-root` | `false` / `${user.dir}/record` | 平台录像 |
 | `starter.init-schema` | `true` | 启动时执行 `db/schema.sql`（建表 + 注释 + 初始账号，幂等） |

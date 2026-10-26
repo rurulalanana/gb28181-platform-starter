@@ -1,0 +1,13 @@
+# Shell 脚本必须是 LF。
+#
+# <p>仓库里 core.autocrlf=true，checkout 时会把文本文件转成 CRLF。deploy/gb.sh 是要
+# scp 到 Linux 执行的，一旦带上 CRLF，运行时会报
+#   /bin/bash^M: bad interpreter: No such file or directory
+# 而这个错看起来像「脚本丢了」，很容易误判。
+#
+# <p>这里强制 .sh 在工作区也用 LF，从源头避免。
+*.sh text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

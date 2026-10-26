@@ -13,15 +13,15 @@
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-platform-starter</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
   <name>gb28181-platform-starter</name>
   <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
 
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <sip.module.version>1.0.13</sip.module.version>
-    <zlm.module.version>1.0.9</zlm.module.version>
+    <sip.module.version>1.0.14</sip.module.version>
+    <zlm.module.version>1.0.10</zlm.module.version>
     <mybatis-plus.version>3.5.11</mybatis-plus.version>
     <aws.sdk.version>2.28.11</aws.sdk.version>
   </properties>
