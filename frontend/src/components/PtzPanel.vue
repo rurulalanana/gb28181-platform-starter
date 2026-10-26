@@ -403,7 +403,19 @@ async function refreshPresets() {
       await new Promise((r) => setTimeout(r, 700))
       const vo = await deviceApi.presetList(props.serial, props.code)
       if (vo && vo.queriedAt && vo.queriedAt !== presetBaseline) {
-        applyPresetList(vo)
+        /*
+         * 再等一拍、再拉一次。
+         *
+         * <p>设备会把预置位<b>拆成多帧</b>上报（实测 5 个预置位 = 4 + 1 两帧），
+         * 而 SN 变化才是新批次的标志 —— 第一帧到达时后端就已经开始累积了。
+         * 如果此刻立刻渲染，只能看到第一帧的内容（4 个），
+         * 用户会以为「又少了几个」。补拉一次把后续帧也带上。
+         */
+        await new Promise((r) => setTimeout(r, 500))
+        const full = await deviceApi.presetList(props.serial, props.code)
+        applyPresetList(
+          full && (full.items?.length || 0) >= (vo.items?.length || 0) ? full : vo
+        )
         ElMessage.success(
           presets.value.length ? `已查到 ${presets.value.length} 个预置位` : '设备上报没有预置位'
         )

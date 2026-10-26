@@ -11,6 +11,7 @@ import org.w3c.dom.Element;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,6 +72,20 @@ public class PresetService {
      * &lt;/Response&gt;
      * </pre>
      *
+     * <h3>⚠️ 必须按 SN 累积，不能逐帧覆盖</h3>
+     * 设备会把预置位<b>拆成多帧</b>上报，且<b>没有 {@code SumNum} 之类的总数字段</b>
+     * （{@code PresetList@Num} 只是本帧条数）。实测一台球机有 5 个预置位时发了两帧：
+     * <pre>
+     * 第一帧: &lt;PresetList Num="4"&gt; 1 2 3 4 &lt;/PresetList&gt;
+     * 第二帧: &lt;PresetList Num="1"&gt; 5 &lt;/PresetList&gt;
+     * </pre>
+     * 早先实现是「收到一帧就用它替换缓存」，于是第二帧的 {@code [5]} 把
+     * {@code [1,2,3,4]} 覆盖掉 —— 界面只显示 1 个预置位，
+     * 看上去像「设置新预置位把其他的都清了」，实际上设备上 5 个都在。
+     *
+     * <p>用应答里的 {@code <SN>} 区分批次：同一次查询的所有帧 SN 相同（SN 本来就用于
+     * 匹配请求与应答），SN 变化就是新的一次查询，此时才清空重来。
+     *
      * <p><b>{@code PresetList} 缺失也要记录</b>：部分设备用「空应答」表示"我一个预置位都没有"，
      * 与"设备没回"是两件事 —— 前者要让用户看到「设备上没有预置位」，
      * 后者要继续等。所以这里无条件下写一条快照（哪怕 items 为空）。
@@ -78,30 +93,49 @@ public class PresetService {
      * <p><b>编号解析失败的条目直接跳过</b>：厂商私有扩展里偶尔会出现
      * 非数字的 {@code PresetID}（如 {@code "A1"}），一个坏条目不该让整表作废。
      *
-     * @param channelId 通道编码（设备的 {@code <DeviceID>}）
-     * @param items     {@code PresetList} 下的 {@code Item} 列表；可为空
+     * @param channelId  通道编码（设备的 {@code <DeviceID>}）
+     * @param sn         应答的 {@code <SN>}，同一批次的帧相同；{@code null} 表示无法区分批次
+     * @param containers 全部 {@code <PresetList>} 容器（一帧里也可能有多个）
      */
-    public void onPresetList(String channelId, List<Element> items) {
+    public void onPresetList(String channelId, Integer sn, List<Element> containers) {
         if (channelId == null || channelId.isBlank()) {
             return;
         }
         List<PresetListVo.Item> parsed = new ArrayList<>();
-        for (Element item : items) {
-            Integer id = intOf(ManscdpText.first(item, "PresetID"));
-            if (id == null) {
-                log.debug("预置位条目编号无法解析，已跳过: channel={} text={}",
-                        channelId, ManscdpText.first(item, "PresetID"));
-                continue;
+        for (Element container : containers) {
+            for (Element item : childrenNamed(container, "Item")) {
+                Integer id = intOf(ManscdpText.first(item, "PresetID"));
+                if (id == null) {
+                    log.debug("预置位条目编号无法解析，已跳过: channel={} text={}",
+                            channelId, ManscdpText.first(item, "PresetID"));
+                    continue;
+                }
+                PresetListVo.Item vo = new PresetListVo.Item();
+                vo.setPresetId(id);
+                vo.setDeviceName(blankToNull(ManscdpText.first(item, "PresetName")));
+                vo.setStatus(blankToNull(ManscdpText.first(item, "Status")));
+                parsed.add(vo);
             }
-            PresetListVo.Item vo = new PresetListVo.Item();
-            vo.setPresetId(id);
-            vo.setDeviceName(blankToNull(ManscdpText.first(item, "PresetName")));
-            vo.setStatus(blankToNull(ManscdpText.first(item, "Status")));
-            parsed.add(vo);
         }
-        parsed.sort(Comparator.comparing(PresetListVo.Item::getPresetId));
-        cache.put(channelId, new Snapshot(LocalDateTime.now(), parsed));
-        log.info("预置位已同步: channel={} 数量={}", channelId, parsed.size());
+        cache.compute(channelId, (key, old) -> {
+            boolean sameBatch = old != null && sn != null && sn.equals(old.sn());
+            if (!sameBatch) {
+                // 新的一次查询（或无法判断批次）：以本帧为起点，清掉上一轮残留
+                return Snapshot.of(sn, parsed);
+            }
+            // 同一批次：按编号合并，后到的同编号条目覆盖先到的
+            Map<Integer, PresetListVo.Item> merged = new LinkedHashMap<>();
+            for (PresetListVo.Item i : old.items()) {
+                merged.put(i.getPresetId(), i);
+            }
+            for (PresetListVo.Item i : parsed) {
+                merged.put(i.getPresetId(), i);
+            }
+            return Snapshot.of(sn, new ArrayList<>(merged.values()));
+        });
+        Snapshot now = cache.get(channelId);
+        log.info("预置位已同步: channel={} 本帧={} 累计={} sn={}",
+                channelId, parsed.size(), now == null ? 0 : now.items().size(), sn);
     }
 
     /**
@@ -114,11 +148,11 @@ public class PresetService {
         PresetListVo vo = new PresetListVo();
         vo.setChannelId(channelId);
         Snapshot snap = channelId == null ? null : cache.get(channelId);
-        List<PresetListVo.Item> items = snap == null ? new ArrayList<>() : copy(snap.items);
+        List<PresetListVo.Item> items = snap == null ? new ArrayList<>() : copy(snap.items());
         if (snap != null) {
             // 用项目统一的时间格式：LocalDateTime#toString 会带上纳秒
             // （2026-10-26 16:23:30.991820635），既难看又会让前端字符串比较失效
-            vo.setQueriedAt(TimeFormats.toDisplay(snap.at));
+            vo.setQueriedAt(TimeFormats.toDisplay(snap.at()));
         }
         // 合并平台自定义名称：编号以设备为准，名称优先用自定义的
         Map<Integer, String> custom = customNames(channelId);
@@ -197,8 +231,39 @@ public class PresetService {
         return s == null || s.isBlank() ? null : s.trim();
     }
 
-    /** 一次设备应答的快照。 */
-    private record Snapshot(LocalDateTime at, List<PresetListVo.Item> items) {
+    /**
+     * 一次设备应答的快照。
+     *
+     * @param sn 应答的 {@code <SN>}，用于区分「同一次查询的多帧」与「新的一次查询」
+     */
+    private record Snapshot(Integer sn, LocalDateTime at, List<PresetListVo.Item> items) {
+
+        /** 构造时按编号升序排好，界面直接按顺序显示。 */
+        static Snapshot of(Integer sn, List<PresetListVo.Item> items) {
+            List<PresetListVo.Item> sorted = new ArrayList<>(items);
+            sorted.sort(Comparator.comparing(PresetListVo.Item::getPresetId));
+            return new Snapshot(sn, LocalDateTime.now(), sorted);
+        }
+    }
+
+    /**
+     * 取元素的直接子元素。
+     *
+     * <p>不用 {@code getElementsByTagName}：那是深度遍历，容器里若嵌了同名节点会多取。
+     */
+    private static List<Element> childrenNamed(Element parent, String name) {
+        List<Element> out = new ArrayList<>();
+        if (parent == null) {
+            return out;
+        }
+        var nl = parent.getChildNodes();
+        for (int i = 0; i < nl.getLength(); i++) {
+            var n = nl.item(i);
+            if (n.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && name.equals(n.getNodeName())) {
+                out.add((Element) n);
+            }
+        }
+        return out;
     }
 
     /**

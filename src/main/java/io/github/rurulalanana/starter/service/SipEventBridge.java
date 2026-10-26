@@ -115,13 +115,16 @@ public class SipEventBridge implements SipCallback {
              * 但设备的应答落到 default 分支被静默丢弃，
              * 表现为「点了查询预置位，什么都没发生」。数据解析与缓存见 PresetService。
              *
-             * <p>用 items() 而不是自己遍历：它会按容器名精确定位
-             * {@code <PresetList>} 再取其中的 {@code <Item>}，
-             * 不会被别的同名字段干扰。
+             * <p>传 {@code msg.getSn()}：设备会把预置位拆成多帧上报（实测 5 个预置位
+             * 发了两帧：4+1），同一次查询的各帧 SN 相同，PresetService 靠它区分
+             * 「同一批次的后续帧」与「新的一次查询」，否则后帧会把前帧覆盖掉。
+             *
+             * <p>传 {@code elements("PresetList")} 而不是 {@code items("PresetList")}：
+             * 后者只取第一个容器，一帧里若有多个容器就会漏。
              */
             case "PresetQuery" -> asyncExecutor.run("预置位落缓存",
                     () -> presetService.onPresetList(msg.getDeviceId(),
-                            msg.items("PresetList")));
+                            msg.getSn(), msg.elements("PresetList")));
             default -> {
                 // DeviceStatus / RecordInfo / ConfigDownload 等由各自的服务同步等待处理。
                 // 打一条 DEBUG：设备私有/未适配的命令能在这里被看见，
