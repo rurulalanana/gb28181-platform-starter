@@ -115,7 +115,7 @@
               :loading="presetLoading"
               :disabled="!serial"
               title="向设备查询预置位列表"
-              @click="refreshPresets"
+              @click="refreshPresets()"
             >
               <el-icon><RefreshRight /></el-icon> 刷新
             </el-button>
@@ -194,7 +194,7 @@
           </el-table>
 
           <p v-if="!presetQueriedAt" class="preset-hint">
-            点「刷新」向设备查询；空槽位可直接「设置」
+            {{ presetLoading ? '正在向设备查询预置位…' : '设备未应答，点「刷新」重试；空槽位可直接「设置」' }}
           </p>
         </div>
       </el-tab-pane>
@@ -326,6 +326,14 @@ const presetQueriedAt = ref(null)
 const presetLoading = ref(false)
 /** 上一次查询得到的应答时间，用来判断「轮询到的是不是本次的结果」。 */
 let presetBaseline = null
+/**
+ * 组件是否已销毁。
+ *
+ * <p>预置位查询是「下发 + 轮询 10 秒」，而面板可能在这期间被关掉（预览弹窗关闭、
+ * 切走页面）。不拦的话，循环会继续请求一个已经不存在的界面 —— 白跑十几秒，
+ * 还会在用户已经离开时弹出「已查到 N 个预置位」。
+ */
+let disposed = false
 
 /** 设备上已用的预置位个数。 */
 const usedCount = computed(() => presets.value.length)
@@ -563,6 +571,25 @@ function applyPresetList(vo) {
 }
 
 /**
+ * 取一次「本次查询的新结果」，有就渲染并返回，没有返回 {@code null}。
+ *
+ * <p>单独抽出来是因为它要被用在两处：正常轮询窗口内，以及窗口之后的
+ * 「迟到结果」补拉。两处的判断必须完全一致，否则迟早会一处改了另一处忘。
+ *
+ * <p><b>拿到后还要再等一拍再拉一次</b>：设备会把预置位拆成多帧上报
+ * （实测 5 个 = 4 + 1 两帧），SN 变化时后端刚开始累积，立刻渲染只能看到第一帧。
+ */
+async function takeFreshPresets(baseline, querySerial, queryCode) {
+  const vo = await deviceApi.presetList(querySerial, queryCode)
+  if (!vo || !vo.queriedAt || vo.queriedAt === baseline) return null
+  await new Promise((r) => setTimeout(r, 500))
+  if (disposed) return null
+  const full = await deviceApi.presetList(querySerial, queryCode)
+  applyPresetList(full && (full.items?.length || 0) >= (vo.items?.length || 0) ? full : vo)
+  return vo
+}
+
+/**
  * 向设备发起一次预置位查询，并等它的应答。
  *
  * <h3>为什么要轮询</h3>
@@ -573,58 +600,83 @@ function applyPresetList(vo) {
  * <p><b>基线比较不可省</b>：设备卡住不回应答时，缓存里仍是上一次的结果，
  * 只看「有没有数据」会立刻拿到旧数据并显示成功 —— 用户点刷新看到的是老列表，
  * 以为查询生效了。用时间戳判断才能区分「本次的应答」与「上一次的残留」。
+ *
+ * <h3>为什么要「迟到结果」补拉</h3>
+ * 设备应答快慢差别极大：平时 3~5 秒，但只要它同时在推流/处理 INVITE，
+ * 实测会拖到 20 秒以上。轮询窗口一到就收手的话，界面会停在「设备未应答」，
+ * 而数据十几秒后其实已经进了后端缓存 —— 用户看到的是永远空的表格，
+ * 只有手动点刷新才发现有数据。
+ * 所以在窗口之后再用更稀的节奏看一会儿，一旦有新结果就静默渲染。
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.silent] 静默模式（打开面板时自动查询用）：
+ *        成功不弹提示、超时也不弹警告 —— 用户没点任何按钮，
+ *        十秒后冒出一条提示只会让人困惑。失败信息由面板内的提示行表达。
  */
-async function refreshPresets() {
+async function refreshPresets(opts = {}) {
+  const silent = !!opts.silent
   if (!props.serial || presetLoading.value) return
   presetLoading.value = true
   presetBaseline = presetQueriedAt.value
+  // 记下本次查询的目标：轮询期间用户可能已经换了通道
+  const querySerial = props.serial
+  const queryCode = props.code
   try {
-    await deviceApi.fetchPreset({ serial: props.serial, code: props.code })
+    await deviceApi.fetchPreset({ serial: querySerial, code: queryCode })
     /*
-     * 15 × 700ms ≈ 10.5 秒。
+     * 20 × 700ms = 14 秒的密集轮询。
      *
      * 实测该海康球机从收到 PresetQuery 到应答要 3~5 秒（比常见的几百毫秒慢），
-     * 3 秒的等待会误判成「设备未应答」。宁可多等几秒，
-     * 也不要让用户看到「查不到」这种假失败 —— 那会引导他去查设备。
+     * 设备忙时更久。宁可多等几秒，也不要让用户看到「查不到」这种假失败 ——
+     * 那会引导他去查设备。
      */
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 700))
-      const vo = await deviceApi.presetList(props.serial, props.code)
-      if (vo && vo.queriedAt && vo.queriedAt !== presetBaseline) {
-        /*
-         * 再等一拍、再拉一次。
-         *
-         * <p>设备会把预置位<b>拆成多帧</b>上报（实测 5 个预置位 = 4 + 1 两帧），
-         * 而 SN 变化才是新批次的标志 —— 第一帧到达时后端就已经开始累积了。
-         * 如果此刻立刻渲染，只能看到第一帧的内容（4 个），
-         * 用户会以为「又少了几个」。补拉一次把后续帧也带上。
-         */
-        await new Promise((r) => setTimeout(r, 500))
-        const full = await deviceApi.presetList(props.serial, props.code)
-        applyPresetList(
-          full && (full.items?.length || 0) >= (vo.items?.length || 0) ? full : vo
-        )
-        ElMessage.success(
-          presets.value.length ? `已查到 ${presets.value.length} 个预置位` : '设备上报没有预置位'
-        )
+      if (disposed) return
+      if (await takeFreshPresets(presetBaseline, querySerial, queryCode)) {
+        if (!silent) {
+          ElMessage.success(
+            presets.value.length ? `已查到 ${presets.value.length} 个预置位` : '设备上报没有预置位'
+          )
+        }
         return
       }
     }
-    // 超时：保留旧数据但明确告知，避免用户以为「设备上就是这些」
-    ElMessage.warning('设备未应答预置位查询（可能不支持该指令或当前不可达）')
+    /*
+     * 窗口结束：改用更稀的节奏再等一会儿。
+     *
+     * 不消耗 presetLoading 之外的资源，也不需要用户操作；
+     * 面板关掉（disposed）或换了通道就立即停。
+     */
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 3000))
+      if (disposed || querySerial !== props.serial || queryCode !== props.code) return
+      if (await takeFreshPresets(presetBaseline, querySerial, queryCode)) return
+    }
+    // 确实没应答：保留旧数据但明确告知，避免用户以为「设备上就是这些」
+    if (!silent) {
+      ElMessage.warning('设备未应答预置位查询（可能不支持该指令或当前不可达）')
+    }
   } catch (e) {
-    ElMessage.error(e.message || '预置位查询失败')
+    if (!silent) ElMessage.error(e.message || '预置位查询失败')
   } finally {
-    presetLoading.value = false
+    if (!disposed) presetLoading.value = false
   }
 }
 
 /**
- * 换通道时重新拉一次。
+ * 换通道时重新拉一次，并且<b>总是向设备查一次预置位</b>。
  *
- * <p>不做「立即向下发查询」：打开预览时面板已经渲染，
- * 每次点播都多发一条 SIP 会打扰设备；先用缓存（若有）显示，
- * 用户想要最新的点一下「刷新」即可。
+ * <p><b>为什么必须每次都查</b>：预置位是设备侧数据 —— 现场调机位、换点位
+ * 都不会经过本平台，缓存随时会过期。只显示缓存就要用户每次先点「刷新」，
+ * 而面板存在的意义就是列出现有预置位；“打开时看到的是旧的”比“多等几秒”
+ * 更难被发现，也更危险（按旧列表调一个已改过的机位）。
+ *
+ * <p><b>先显示缓存、再后台刷新</b>：缓存有内容时立刻渲染，不让用户盯着空表格
+ * 等设备；设备应答后再覆盖。没缓存时才显示「正在向设备查询预置位…」。
+ *
+ * <p>自动查询走 {@code silent}：用户没点任何按钮，不该在几秒后收到提示；
+ * 「已用 N」这个计数本身就是结果，失败时面板内的提示行会说明。
  */
 watch(
   () => [props.serial, props.code],
@@ -636,8 +688,11 @@ watch(
     try {
       applyPresetList(await deviceApi.presetList(serial, code))
     } catch (e) {
-      // 缓存为空时忽略：界面显示「点刷新向设备查询」即可
+      // 缓存为空时忽略：下面会向设备查
     }
+    // 期间用户已经换了通道：这次自动查询没有意义
+    if (serial !== props.serial || code !== props.code) return
+    await refreshPresets({ silent: true })
   },
   { immediate: true }
 )
@@ -660,6 +715,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  disposed = true
   window.removeEventListener('pointerup', endMove)
   window.removeEventListener('pointercancel', endMove)
   window.removeEventListener('blur', endMove)
