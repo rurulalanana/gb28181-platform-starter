@@ -83,7 +83,14 @@ public class PlaybackController {
             @RequestParam(defaultValue = "config") String center,
             @RequestParam(defaultValue = "config") String indistinct,
             @RequestParam(required = false) Integer streamnumber,
-            @RequestParam(defaultValue = "15") Integer timeout) {
+            /*
+             * 默认 20 秒，而不是 15。
+             *
+             * <p>设备（下级平台）自己会向上级摄像机等 15 秒，超时才回
+             * `400 wait for recordinfo timeout[15s]`。取 15 就变成和设备的
+             * 回话点赛跑，白白丢掉它给出的原因。
+             */
+            @RequestParam(defaultValue = "20") Integer timeout) {
         StpUtil.checkLogin();
         String channelId = code == null || code.isBlank() ? serial : code;
         // serial 是设备编码（SIP 寻址），channelId 是通道编码（<DeviceID>）。
@@ -93,36 +100,68 @@ public class PlaybackController {
         String start = starttime;
         String end = endtime == null || endtime.isBlank()
                 ? TimeFormats.toIso(LocalDateTime.now()) : endtime;
-        List<RecordItem> items = recordService.queryDeviceRecords(
+        /*
+         * 走「带应答标志」的检索：设备没答 ≠ 没有录像，必须区分开。
+         */
+        RecordService.DeviceRecordQuery result = recordService.queryDeviceRecordsAnswered(
                 deviceId == null ? channelId : deviceId, channelId, start, end, timeout);
         List<RecordVo> list = new ArrayList<>();
-        for (RecordItem item : items) {
+        for (RecordItem item : result.items()) {
             list.add(recordView(item, channelId));
         }
-        // 设备不应答时回退到本地缓存（上一次查询结果）
-        if (list.isEmpty()) {
+        boolean fromCache = false;
+        if (!result.deviceAnswered()) {
+            /*
+             * 设备没答时才降级到本地缓存。
+             *
+             * <p>设备明确回了「没有录像」时<b>不能</b>用缓存顶替 ——
+             * 那等于把已经失效的旧录像重新显示出来，用户会以为录像还在，
+             * 点回放才失败。
+             */
             List<GbDeviceRecord> cached = recordService.deviceRecords(channelId,
                     TimeFormats.parse(start), TimeFormats.parse(end), type);
             for (GbDeviceRecord r : cached) {
-                RecordVo vo = new RecordVo();
-                vo.setDeviceId(r.getChannelId());
-                vo.setName(r.getName());
-                vo.setFilePath(r.getFilePath());
-                vo.setAddress(r.getAddress());
-                vo.setStartTime(TimeFormats.toIso(r.getStartTime()));
-                vo.setEndTime(TimeFormats.toIso(r.getEndTime()));
-                vo.setFileSize(r.getSize());
-                vo.setType(r.getType());
-                list.add(vo);
+                RecordVo row = new RecordVo();
+                row.setDeviceId(r.getChannelId());
+                row.setName(r.getName());
+                row.setFilePath(r.getFilePath());
+                row.setAddress(r.getAddress());
+                row.setStartTime(TimeFormats.toIso(r.getStartTime()));
+                row.setEndTime(TimeFormats.toIso(r.getEndTime()));
+                row.setFileSize(r.getSize());
+                row.setType(r.getType());
+                list.add(row);
             }
-            if (!list.isEmpty()) {
-                log.info("设备未应答，返回本地缓存的 {} 条录像记录: channel={}", list.size(), channelId);
-            }
+            fromCache = !list.isEmpty();
         }
         RecordListVo vo = new RecordListVo();
         vo.setDeviceId(channelId);
         vo.setSumNum(list.size());
         vo.setRecordList(list);
+        vo.setDeviceAnswered(result.deviceAnswered());
+        vo.setFromCache(fromCache);
+        if (!result.deviceAnswered()) {
+            /*
+             * 把设备的原话带上。
+             *
+             * <p>设备在 SIP 层拒绝时（例如 LiveGBS 回
+             * {@code 400 wait for recordinfo timeout[15s]}）已经把原因说清楚了，
+             * 而只报「设备未应答」会让人去查平台/网络 —— 排查方向完全错。
+             */
+            String base = fromCache
+                    ? "设备未应答本次检索，下面是上一次查询的缓存结果（可能不完整）"
+                    : "设备未应答本次录像检索";
+            vo.setNotice(result.failure() != null
+                    ? base + "：" + result.failure()
+                    /*
+                     * 设备连 SIP 响应都没给（UDP 丢包或设备完全没处理）。
+                     * 明确写出来，和「设备回了 400 但说原因」区分开：
+                     * 前者要先查网络/设备负载，后者是设备侧检索故障。
+                     */
+                    : base + "（未收到设备的 SIP 应答）。请确认设备在线，或稍后重试");
+            log.warn("设备录像检索未应答: channel={} 缓存条数={} 设备响应={}",
+                    channelId, list.size(), result.failure());
+        }
         return ApiResponse.ok(vo);
     }
 

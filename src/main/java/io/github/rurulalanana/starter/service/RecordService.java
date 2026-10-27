@@ -54,8 +54,22 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class RecordService {
 
-    /** 设备录像检索默认超时（秒）。 */
-    private static final int QUERY_TIMEOUT_SECONDS = 10;
+    /**
+     * 设备录像检索默认超时（秒）。
+     *
+     * <p><b>必须大于设备自身的内部等待</b>：实测 LiveGBS 会向上级摄像机再等 15 秒
+     * （超时后回 {@code 400 wait for recordinfo timeout[15s]}）。若这里也取 15，
+     * 就永远和设备的回话点赛跑 —— 设备刚要说原因，我们已经放弃了。
+     */
+    private static final int QUERY_TIMEOUT_SECONDS = 20;
+
+    /**
+     * 等待聚合结果的轮询片长（毫秒）。
+     *
+     * <p>用途是「让设备的拒绝能提前打断等待」：见 {@code doQuery} 的说明。
+     * 200ms 相对十几秒的超时可忽略不计。
+     */
+    private static final long WAIT_SLICE_MS = 200L;
 
     /** 等待流建立的总超时（毫秒）：设备推流通常 1~3 秒内开始。 */
     private static final long STREAM_READY_TIMEOUT_MS = 12_000;
@@ -77,6 +91,54 @@ public class RecordService {
     private final io.github.rurulalanana.starter.storage.ObjectStorageProperties storageProps;
     private final StreamService streamService;
     private final Gb28181Properties props;
+
+    /**
+     * 设备录像检索的「同通道串行锁」。
+     *
+     * <p>锁对象必须<b>按通道</b>而不是全局：不同通道的查询互不影响，
+     * 用全局锁会让「查 A 通道时 B 通道也卡住」，把一次慢查询放大成全线卡顿。
+     */
+    private final Map<String, Object> channelLocks = new ConcurrentHashMap<>();
+
+    /** 相同查询窗口的短时缓存：{@code 通道|起|止} → 结果。 */
+    private final Map<String, CachedRecords> recordCache = new ConcurrentHashMap<>();
+
+    /** 同一查询窗口的在途请求：后来的直接等前一个的结果，不重复发 SIP。 */
+    private final Map<String, CompletableFuture<DeviceRecordQuery>> recordInFlight =
+            new ConcurrentHashMap<>();
+
+    /**
+     * 检索结果缓存有效期（毫秒）。
+     *
+     * <p>取 15 秒的理由：设备录像目录不会秒级变化，而界面上的连续操作
+     * （换通道 → 切日期 → 切视角 → 回来）都发生在几秒内。
+     * 再长就会让「刚录完的一段」迟迟不出现。
+     */
+    private static final long RECORD_CACHE_MS = 15_000L;
+
+    /** 缓存条目上限：超过就整体清空（设备录像检索不是高频接口，够用即可）。 */
+    private static final int RECORD_CACHE_MAX = 200;
+
+    /**
+     * 一条检索结果缓存。
+     *
+     * @param result 完整结果（含“设备是否应答”标志，否则命中缓存时无法传递）
+     * @param at     写入时刻
+     */
+    private record CachedRecords(DeviceRecordQuery result, long at) {
+        boolean expired() {
+            return System.currentTimeMillis() - at >= RECORD_CACHE_MS;
+        }
+    }
+
+    /** 清掉过期缓存；条目过多时整体清空（比维护 LRU 简单且足够）。 */
+    private void trimRecordCache() {
+        if (recordCache.size() > RECORD_CACHE_MAX) {
+            recordCache.clear();
+            return;
+        }
+        recordCache.entrySet().removeIf(e -> e.getValue().expired());
+    }
 
     /**
      * 已删除录像的「墓碑」：文件路径 → 删除时刻。
@@ -156,37 +218,176 @@ public class RecordService {
     public List<RecordItem> queryDeviceRecords(String deviceId, String channelId,
                                                String startTime, String endTime,
                                                Integer timeoutSeconds) {
+        return queryDeviceRecordsAnswered(deviceId, channelId, startTime, endTime,
+                timeoutSeconds).items();
+    }
+
+    /**
+     * 一次设备录像检索的结果。
+     *
+     * @param items          录像段
+     * @param deviceAnswered 设备是否真的应答了（收到过 RecordInfo 帧，或正常收齐）
+     * @param failure        设备拒绝本次检索的原因（如 SIP {@code 400 ...}）；无则为 {@code null}
+     */
+    public record DeviceRecordQuery(List<RecordItem> items, boolean deviceAnswered,
+                                    String failure) {
+        static DeviceRecordQuery noAnswer() {
+            return new DeviceRecordQuery(List.of(), false, null);
+        }
+
+        static DeviceRecordQuery refused(String failure) {
+            return new DeviceRecordQuery(List.of(), false, failure);
+        }
+    }
+
+    /**
+     * 检索设备录像，并<b>明确告知设备有没有应答</b>。
+     *
+     * <p>“设备没应答”与“设备回了空列表（这段确实没录）”在数据上都是空列表，
+     * 但处理方式完全相反：前者要去查设备/网络，后者什么都不用做。
+     * 只看 {@code items.isEmpty()} 分不出来，所以必须把标志一起交上去 ——
+     * 否则界面上就会把“设备故障”显示成“当天无录像”。
+     */
+    public DeviceRecordQuery queryDeviceRecordsAnswered(String deviceId, String channelId,
+                                                        String startTime, String endTime,
+                                                        Integer timeoutSeconds) {
         Gb28181MediaService media = platform.mediaService();
         if (media == null) {
             throw BizException.badRequest("媒体服务未启动");
         }
+        String key = channelId + "|" + startTime + "|" + endTime;
+
+        /* ① 短时缓存：用户连点「检索」、在列表与时间轴间来回切，不该再发一次 SIP。 */
+        CachedRecords cached = recordCache.get(key);
+        if (cached != null && !cached.expired()) {
+            return cached.result();
+        }
+
+        /* ② 同一窗口已在查：共用这一次查询，不重复下发 MESSAGE。 */
+        CompletableFuture<DeviceRecordQuery> mine = new CompletableFuture<>();
+        CompletableFuture<DeviceRecordQuery> running = recordInFlight.putIfAbsent(key, mine);
+        if (running != null) {
+            int wait = timeoutSeconds == null || timeoutSeconds <= 0
+                    ? QUERY_TIMEOUT_SECONDS : timeoutSeconds;
+            try {
+                return running.get(wait + 2L, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                return DeviceRecordQuery.noAnswer();
+            }
+        }
+
+        try {
+            DeviceRecordQuery result;
+            /*
+             * ③ 同一通道串行。
+             *
+             * <p>必须串行的原因在 SIP 层：应答聚合状态是<b>按通道单一槽位</b>
+             * （recordPagers / recordCallbacks 都以通道编码为键），
+             * 同通道两个查询会互相覆盖回调 —— 先发的那个永远等不到应答，
+             * 最终以「设备未应答」超时收场。而界面上「换通道」会同时触发
+             * 「当天检索」与「最近 15 分钟录像状态」两次查询，
+             * 于是每换一次通道就必然产生一次假超时（线上日志里超时次数
+             * 是成功次数的两倍，而设备其实每次都答了）。
+             */
+            Object lock = channelLocks.computeIfAbsent(channelId, k -> new Object());
+            synchronized (lock) {
+                result = doQuery(media, deviceId, channelId, startTime, endTime, timeoutSeconds);
+            }
+            /*
+             * 只缓存「设备应答过」的查询。
+             *
+             * <p>未应答的结果缓存下来会让用户重试时立刻又拿到同一个失败结果，
+             * 看起来像平台坏了。
+             */
+            if (result.deviceAnswered()) {
+                recordCache.put(key, new CachedRecords(result, System.currentTimeMillis()));
+                trimRecordCache();
+            }
+            mine.complete(result);
+            return result;
+        } catch (RuntimeException e) {
+            mine.complete(DeviceRecordQuery.noAnswer());
+            throw e;
+        } finally {
+            recordInFlight.remove(key, mine);
+        }
+    }
+
+    /**
+     * 真正下发 {@code RecordInfo} 并等待聚合结果。
+     *
+     * <p><b>等待方式要「能被设备打断」</b>：设备拒绝时（实测 LiveGBS 回
+     * {@code 400 wait for recordinfo timeout[15s]}）它是在自己的超时点才回话的，
+     * 正好落在业务超时附近。若只做一次 {@code future.get(timeout)}，
+     * 很可能在设备回话前就放弃 —— 那样就拿不到原因，只能报「设备未应答」。
+     *
+     * <p>所以按小片轮询：一旦发现设备已经明确拒绝，立刻结束等待把原因带回去，
+     * 既最快、又完整。
+     */
+    private DeviceRecordQuery doQuery(Gb28181MediaService media, String deviceId,
+                                      String channelId, String startTime,
+                                      String endTime, Integer timeoutSeconds) {
         CompletableFuture<List<RecordItem>> future = new CompletableFuture<>();
         media.queryRecordInfo(deviceId, channelId, startTime, endTime, future::complete);
         int timeout = timeoutSeconds == null || timeoutSeconds <= 0
                 ? QUERY_TIMEOUT_SECONDS : timeoutSeconds;
+        long deadline = System.currentTimeMillis() + timeout * 1000L;
         try {
-            List<RecordItem> items = future.get(timeout, TimeUnit.SECONDS);
-            cacheDeviceRecords(channelId, items);
-            return items;
-        } catch (java.util.concurrent.TimeoutException te) {
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    List<RecordItem> items = future.get(WAIT_SLICE_MS, TimeUnit.MILLISECONDS);
+                    cacheDeviceRecords(channelId, items);
+                    return new DeviceRecordQuery(items, true, null);
+                } catch (java.util.concurrent.TimeoutException slice) {
+                    // 这一片没结果：看设备是否已经明确拒绝
+                    String refusal = media.lastRecordFailure(channelId);
+                    if (refusal != null) {
+                        Gb28181MediaService.RecordDrain drain = media.drainRecordQuery(channelId);
+                        log.warn("录像检索被设备拒绝: device={} channel={} 段数={} 响应={}",
+                                deviceId, channelId, drain.items().size(), refusal);
+                        if (!drain.items().isEmpty()) {
+                            cacheDeviceRecords(channelId, drain.items());
+                            return new DeviceRecordQuery(drain.items(), true, refusal);
+                        }
+                        return DeviceRecordQuery.refused(refusal);
+                    }
+                }
+            }
             /*
-             * 超时也把已收到的帧交上去：设备少报了 SumNum、或分页帧中途丢包时，
-             * 聚合永远等不到「收齐」。让用户看到 5 段远好于「一段都没有」。
+             * 超时也把已收到的帧交上去：设备少报了 SumNum（甚至根本不发
+             * SumNum），或分页帧中途丢包时，聚合永远等不到「收齐」。
+             * 让用户看到 5 段远好于「一段都没有」。
              */
-            List<RecordItem> partial = media.takePendingRecords(channelId);
+            Gb28181MediaService.RecordDrain drain = media.drainRecordQuery(channelId);
+            List<RecordItem> partial = drain.items();
             if (!partial.isEmpty()) {
                 log.info("设备录像检索超时，返回已收到的 {} 段: device={} channel={}",
                         partial.size(), deviceId, channelId);
                 cacheDeviceRecords(channelId, partial);
-                return partial;
+                return new DeviceRecordQuery(partial, true, null);
             }
-            log.warn("设备录像检索超时: device={} channel={}（设备未应答）",
-                    deviceId, channelId);
-            return List.of();
+            /*
+             * 设备在 SIP 层直接拒绝了（如 400）时把原因带上去。
+             *
+             * <p>这是最有价值的一条信息：没有它，界面只能报「设备未应答」，
+             * 运维会去查平台/网络；而设备其实已经说清楚了原因（例如
+             * {@code 400 wait for recordinfo timeout[15s]} 表示它去问下级摄像机超时）。
+             */
+            String refusal = media.lastRecordFailure(channelId);
+            log.warn("设备录像检索超时: device={} channel={} 收到帧={} 设备响应={}",
+                    deviceId, channelId, drain.framesReceived(), refusal);
+            if (refusal != null) {
+                return DeviceRecordQuery.refused(refusal);
+            }
+            /*
+             * 收到过帧、但里面一段都没有 —— 设备确实回了「没有录像」，
+             * 这是有效答案，不是故障。
+             */
+            return new DeviceRecordQuery(List.of(), drain.framesReceived(), null);
         } catch (Exception e) {
             log.warn("设备录像检索失败: device={} channel={} {}",
                     deviceId, channelId, e.getMessage());
-            return List.of();
+            return DeviceRecordQuery.noAnswer();
         }
     }
 
