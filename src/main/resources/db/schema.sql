@@ -171,9 +171,11 @@ CREATE INDEX IF NOT EXISTS idx_gb_stream_channel ON gb_stream (channel_id);
 
 CREATE TABLE IF NOT EXISTS gb_record (
     id           BIGSERIAL PRIMARY KEY,
+    -- 编码按 GB/T 28181 标准是 20 位，但这里给 64：对账时目录名、级联下级的
+    -- 非标编码都可能更长，卡在 20 位只会让插入静默失败（历史事故，见文末迁移段）
     record_id    VARCHAR(64)  NOT NULL,
-    channel_id   VARCHAR(20)  NOT NULL,
-    device_id    VARCHAR(20),
+    channel_id   VARCHAR(64)  NOT NULL,
+    device_id    VARCHAR(64),
     name         VARCHAR(255),
     file_path    VARCHAR(512),
     file_name    VARCHAR(255),
@@ -569,6 +571,25 @@ ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS object_key   VARCHAR(512);
 ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS file_url     VARCHAR(1024);
 ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS upload_state VARCHAR(16) DEFAULT 'NONE';
 ALTER TABLE gb_record ADD COLUMN IF NOT EXISTS upload_time  TIMESTAMP;
+
+-- ------------------------------------------------------------
+--  迁移：放宽 gb_record 的编码字段到 VARCHAR(64)。
+--
+--  GB/T 28181 的设备/通道编码标准长度是 20 位，VARCHAR(20) 恰好「不多不少」——
+--  看起来精确，实际是把任何非标编码都变成运行时故障。线上已经发生过：
+--  对账任务把下载/回放目录（形如
+--  {@code <设备编码>_<通道编码>_playback}，50 字符）当通道登记，
+--  每次都对 gb_record 插入失败，日志里刷出上百条
+--  {@code value too long for type character varying(20)}；
+--  目录名过滤修掉后仍有隐患——级联下级平台的通道编码不受本平台控制，
+--  某些厂商会用超过 20 位的编码。
+--
+--  放宽到 64 的代价可忽略（存储差异在长度前缀上），换来的是「非标编码不再丢数据」。
+--  ALTER ... TYPE 是幂等的：目标类型已是 VARCHAR(64) 时 PostgreSQL 只做一次空操作。
+-- ------------------------------------------------------------
+
+ALTER TABLE gb_record ALTER COLUMN channel_id TYPE VARCHAR(64);
+ALTER TABLE gb_record ALTER COLUMN device_id  TYPE VARCHAR(64);
 
 
 -- ============================================================

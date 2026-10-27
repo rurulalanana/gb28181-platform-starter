@@ -753,10 +753,17 @@ function clearSelection() {
 async function downloadSelection() {
   const s = selection.value
   if (!s) return
-  const day = day.value
+  /*
+   * 局部变量<b>不能叫 day</b>：`const day = day.value` 会让声明出来的 day
+   * 在自己的初始化表达式里就进入暂时性死区（TDZ），运行时直接抛
+   * {@code ReferenceError: Cannot access 'day' before initialization} ——
+   * 表现为「点了『下载这一区间』什么都没发生」。
+   * 压缩后变量名变成单字母 t，报错信息里完全看不出是这个原因。
+   */
+  const dayStr = day.value
   const row = {
-    startTime: `${day}T${s.startText}`,
-    endTime: `${day}T${s.endText}`,
+    startTime: `${dayStr}T${s.startText}`,
+    endTime: `${dayStr}T${s.endText}`,
     filePath: '',
     fileSize: 0
   }
