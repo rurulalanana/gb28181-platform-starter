@@ -253,51 +253,61 @@ public class StreamService {
             String want = recordIdentity(item);
             String have = existing.getMediaUri();
             boolean same = want != null && want.equals(have);
-            if (same && downloadSpeed <= 1) {
+            /*
+             * 只有**正在推流**的会话才值得复用。
+             *
+             * <p>会话对象在设备停推后仍会留在表里（状态变 OFFLINE），而它对应的
+             * ZLM 媒体源已经被摘除。此时若按「同一段就复用」返回这个僵尸会话，
+             * 播放器拿到的流永远没有数据 —— 用户看到的是「继续播放后画面不动」，
+             * 而日志里一切正常。
+             *
+             * <p>典型触发路径：暂停（发 SIP PAUSE 让设备停推）超过 ZLM 的
+             * RTP 超时（{@code RtpProcess timeout}，约 15~20 秒）后媒体源被注销，
+             * 用户再点「继续」。
+             */
+            if (same && downloadSpeed <= 1 && RtpSession.ONLINE.equals(existing.getState())) {
                 return toStream(existing, GbStream.TYPE_PLAYBACK);
             }
+            /*
+             * 走到这里只剩两种意图：换一段录像，或同一段要求更高倍速。
+             * 两者都必须**销毁旧会话**（推流速率由上一次 INVITE 的 SDP 决定，
+             * 不复用就只能重建），所以把下载锁的检查放在这两条路的<b>共同入口</b>。
+             *
+             * <p><b>不能漏掉「提速」那条路</b>：它同样会 stop 掉下载中的会话。
+             * 早先只在「换段」分支里检查，前端靠按钮禁用挡住了，
+             * 但接口层不该指望调用方守规矩 —— 一个直接构造的请求就能打断下载。
+             *
+             * <p><b>键必须取自会话本身</b>（{@code existing.getSessionKey()}）
+             * 而不是在这里拼一份副本：真实规则在
+             * {@code RtpSessionManager#sessionKey}，设备编码或通道编码缺失时
+             * app 与 stream 会互相回退。自己拼的第二份实现迟早会与它算得不一样，
+             * 而算错的结果是一个永远锁不住的锁（比没有锁更糟：看着有防护）。
+             */
+            if (isDownloadLocked(existing.getSessionKey())) {
+                throw BizException.badRequest(
+                        "该通道正在后台下载，无法同时回放或倍速播放；"
+                                + "请等下载完成，或先在「下载任务」里取消");
+            }
             if (same) {
-                // 同一段但要求更高倍速：先停旧会话，避免同通道两路回放把设备打满
                 log.info("回放需提速到 {}x，重建会话: {} {}", downloadSpeed, deviceId, channel);
-                stop(deviceId, channel, MediaType.PLAYBACK);
             } else {
                 /*
-                 * 请求的是**另一段**录像。
+                 * 请求的是**另一段**录像 → 显式停掉旧会话。
                  *
-                 * <p><b>必须显式停掉旧会话</b>。会话键是
-                 * {@code 设备/通道_playback}（同通道只允许一个回放会话），
-                 * 直接往下走会让 {@code sessionManager.open} 用新会话顶掉旧的 ——
-                 * 旧会话对应的 ZLM 媒体源与录制随之重置，正在跑的下载就
+                 * <p>不显式停会让 {@code sessionManager.open} 用新会话顶掉旧的，
+                 * 旧会话对应的 ZLM 媒体源与录制随之重置，正在跑的下载只
                  * 得到一段只有开头几十秒的文件。用户看到的现象是
                  * 「下载时长严重不足」，而日志里一点异常都没有。
-                 *
-                 * <p>下载中的通道在上一步已被拦住（见 {@link #isDownloadLocked}），
-                 * 能走到这里的都是纯回放，停掉是安全的。
                  */
-                if (isDownloadLocked(playbackKey(deviceId, channel))) {
-                    throw BizException.badRequest(
-                            "该通道正在后台下载，无法同时回放其它时段；"
-                                    + "请等下载完成，或先在「下载任务」里取消");
-                }
                 log.info("回放切换录像段，关闭旧会话: {} {} → {}", deviceId, channel, want);
-                stop(deviceId, channel, MediaType.PLAYBACK);
             }
+            stop(deviceId, channel, MediaType.PLAYBACK);
         }
         RtpSession session = platform.mediaService()
                 .playback(deviceId, channel, item, downloadSpeed);
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;
-    }
-
-    /**
-     * 回放会话键（与 {@code RtpSession#getSessionKey} 的规则一致）。
-     *
-     * <p>单独抽出来是因为「下载占用」的锁必须和真实会话用同一个键，
-     * 用别的拼法拼错了会得到一个永远锁不住的锁。
-     */
-    private static String playbackKey(String deviceId, String channel) {
-        return deviceId + "/" + channel + "_playback";
     }
 
     /**

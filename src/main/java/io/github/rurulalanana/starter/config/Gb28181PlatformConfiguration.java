@@ -74,6 +74,15 @@ public class Gb28181PlatformConfiguration {
                 // 只在配置了正数时覆盖，避免有人把 yml 写成 0 反而把缓冲清零。
                 .udpRecvSocketBuffer(props.getUdpRecvSocketBuffer() > 0
                         ? props.getUdpRecvSocketBuffer() : 8 * 1024 * 1024)
+                /*
+                 * 等轨就绪的时间：决定「慢起推的录像段能不能播」。
+                 *
+                 * ZLM 默认 10 秒，实测设备（经下级平台转发）最慢要 11 秒才推视频，
+                 * 超过阈值就会被永久丢弃 H264 轨，媒体源只剩音频 —— 现象是
+                 * 「某些录像段怎么都播不出来」。只在配置了正数时覆盖。
+                 */
+                .waitTrackReadyMs(props.getWaitTrackReadyMs() > 0
+                        ? props.getWaitTrackReadyMs() : 30_000)
                 .autoRecord(props.isAutoRecord())
                 .recordMaxSecond(props.getRecordMaxSecond())
                 .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())

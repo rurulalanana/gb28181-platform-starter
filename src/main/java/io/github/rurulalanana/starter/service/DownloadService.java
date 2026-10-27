@@ -83,7 +83,7 @@ public class DownloadService {
      */
     private static final long GRACE_SECONDS = 10L;
 
-        /** 判定「设备已停推」前至少先跑这么久，避免起播瞬间会话空缺被误判（秒）。 */
+    /** 判定「设备已停推」前至少先跑这么久，避免起播瞬间会话空缺被误判（秒）。 */
     private static final long MIN_RUN_SECONDS = 15L;
 
     /**

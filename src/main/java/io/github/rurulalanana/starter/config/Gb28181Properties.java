@@ -108,6 +108,24 @@ public class Gb28181Properties {
      */
     private int udpRecvSocketBuffer = 8 * 1024 * 1024;
 
+    /**
+     * ZLM {@code general.wait_track_ready_ms}：等各条轨就绪的最长时间（毫秒）。
+     *
+     * <p><b>决定「这段录像能不能播」</b>。ZLM 收流后要等视频轨和音频轨都就绪才建
+     * 媒体源；时间一到，没就绪的轨会被<b>永久丢弃</b>：
+     * <pre>All track ready use 10064ms
+     *Track not ready for a long time, ignored: H264
+     *codec info: PCMA[8000/1/16]      ← 只剩音频，播放器永远黑屏</pre>
+     *
+     * <p>ZLM 默认 10000ms，而实测同一通道的录像段：有的 6ms 就齐了，有的要 11 秒
+     * （下级平台转发慢），10 秒阈值恰好把后者全部判死 —— 这就是「有些录像
+     * 能播、有些怎么都播不出来」的直接原因。
+     *
+     * <p>取 30000 是折中：能救回 30 秒内起推的所有段，又不会让「设备彻底不推视频」
+     * 的会话无限期挂着（那种情况本来就要靠上层超时回收）。
+     */
+    private int waitTrackReadyMs = 30_000;
+
     /** 是否随流上下线自动录像。 */
     private boolean autoRecord = false;
 
