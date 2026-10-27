@@ -39,6 +39,16 @@ import { decodeG711, G711_SAMPLE_RATE } from './g711'
 
 /** 直播缓冲保留时长（秒）：超过就从 SourceBuffer 里清掉，防止内存涨到爆。 */
 const BUFFER_KEEP_SECONDS = 30
+
+/**
+ * 待写入队列的上限（段数）。
+ *
+ * <p>正常播放时队列只有 0~2 段（上一段 append 完成才取下一条）。持续积压
+ * 说明媒体源<b>已经不再消费数据</b>（video 进入错误态、readyState 变成
+ * ended/closed）。此时无限堆积只会把内存拖垮，用户看到的是整个页面卡死，
+ * 比直接报错停下更糟。
+ */
+const MAX_APPEND_QUEUE = 256
 /** 硬跳阈值（秒）：音画差超过它就直接改 currentTime。 */
 const HARD_SYNC_THRESHOLD = 0.5
 /** 软调阈值（秒）：超过它用播放速率追赶，避免频繁跳帧。 */
@@ -337,9 +347,14 @@ export default class WsFlvStream {
     if (!this.sourceBuffer) {
       if (!videoTrack.codec) return
       if (!this._ensureSourceBuffer(videoTrack.codec)) {
+        /*
+         * 编码不支持是<b>确定性</b>失败：重建播放器一万次也还是这个编码，
+         * 标成不可重试，免得把用户丢进三次无谓的重连里。
+         */
         this._fail(
           `当前浏览器无法硬解该视频编码（${videoTrack.codec}）。` +
-            'H.265 需要 Chrome/Edge 107+ 且系统具备 HEVC 解码能力。'
+            'H.265 需要 Chrome/Edge 107+ 且系统具备 HEVC 解码能力。',
+          false
         )
         return
       }
@@ -419,15 +434,44 @@ export default class WsFlvStream {
   }
 
   _append(data) {
-    if (!data || !data.byteLength) return
+    // 已失败后不再接收数据：下游不会再消费，收到只是无谓地堆内存
+    if (!data || !data.byteLength || this.destroyed || this.failed) return
+    if (this.appendQueue.length >= MAX_APPEND_QUEUE) {
+      this._fail('播放器已停止消费数据（解码队列积压），需要重建')
+      return
+    }
     this.appendQueue.push(data)
     this._pump()
   }
 
   _pump() {
+    if (this.destroyed || this.failed) return
     const sb = this.sourceBuffer
     if (!sb || this.appending || sb.updating || !this.appendQueue.length) return
-    if (this.mediaSource.readyState !== 'open') return
+    /*
+     * append 之前必须确认「下游还能收数据」。
+     *
+     * <p>video 元素一旦进入错误状态（解码失败等），它绑定的 MediaSource
+     * 就<b>永久作废</b>：此后每次 appendBuffer 都抛
+     * {@code InvalidStateError: The HTMLMediaElement.error attribute is not null}，
+     * 而且不可能有哪一次成功。原实现在这里直接 append，于是真正的根因
+     * （MEDIA_ERR_DECODE）被后面成百上千条 append 异常淹没，
+     * 用户只能看到一条看不出原因的「写入解码数据失败」。
+     *
+     * <p>这里改为「主动投降」：立刻回调业务方去重建播放器
+     * （新 MediaSource + 重新拉流，等下一个完好 GOP），
+     * 而不是继续往一个已经死掉的解码器里灌数据。
+     */
+    const mediaError = this.media && this.media.error
+    if (mediaError) {
+      this._fail(`视频元素已出错（code=${mediaError.code}），需要重建播放器`)
+      return
+    }
+    const readyState = this.mediaSource && this.mediaSource.readyState
+    if (readyState !== 'open') {
+      this._fail(`媒体源已关闭（readyState=${readyState}），需要重建播放器`)
+      return
+    }
     const data = this.appendQueue.shift()
     this.appending = true
     sb.onupdateend = () => {
@@ -453,7 +497,8 @@ export default class WsFlvStream {
   _evict(aggressive = false) {
     const sb = this.sourceBuffer
     const v = this.media
-    if (!sb || sb.updating || !v || !v.buffered.length) return
+    // 媒体已作废时 remove 同样会抛 InvalidStateError，直接跳过
+    if (!sb || sb.updating || !v || v.error || !v.buffered.length) return
     const start = v.buffered.start(0)
     const removeTo = v.currentTime - (aggressive ? 2 : BUFFER_KEEP_SECONDS)
     if (removeTo - start > 1) {
@@ -599,10 +644,19 @@ export default class WsFlvStream {
 
   // ==================== 收尾 ====================
 
-  _fail(msg) {
+  /**
+   * 标记不可恢复的失败并回调业务方。
+   *
+   * @param {string} msg 给用户看的原因
+   * @param {boolean} [retryable] 重建播放器是否有意义。编码不支持这类
+   *        <b>确定性</b>失败传 {@code false}，避免无谓的重连循环。
+   */
+  _fail(msg, retryable = true) {
     if (this.destroyed || this.failed) return
     this.failed = true
-    this.onError(msg)
+    // 不会再消费了，排队的段直接丢弃，否则会滞留在内存里
+    this.appendQueue = []
+    this.onError(msg, retryable)
   }
 
   destroy() {

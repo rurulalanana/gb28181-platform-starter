@@ -37,7 +37,7 @@
           effect="plain"
           class="rec-tag"
           :class="{ clickable: !!query.channelKey }"
-          @click="refreshRecState"
+          @click="refreshRecState(true)"
         >
           {{ recStateText }}
         </el-tag>
@@ -151,7 +151,7 @@
             或右侧抽屉，那是另一个量级的交互改动，不在这里假装实现。
           -->
           <div v-if="!timelineSegments.length" class="timeline-empty">
-            {{ searched ? '当日没有录像' : '选择通道后点「检索」' }}
+            {{ timelineEmptyText }}
           </div>
         </div>
         <div class="timeline-foot">
@@ -323,6 +323,21 @@ const channels = ref([])
 const records = ref([])
 const searching = ref(false)
 const searched = ref(false)
+/**
+ * 上一次检索设备是否应答。
+ *
+ * <p>用来区分「设备没答」与「设备答了：当天没录像」——两者都是空列表，
+ * 但前者不能显示成「当日没有录像」（那是报假警）。
+ */
+const deviceUnanswered = ref(false)
+/**
+ * 设备未应答时后端给出的说明（含设备自己的拒绝原因）。
+ *
+ * <p>单独存一份而不只是弹一条消息：提示条几秒就消失了，
+ * 而用户盯着空时间轴时需要可信的理由；设备返回的原文（如
+ * {@code 400 wait for recordinfo timeout[15s]}）是判断「该找谁」的唯一线索。
+ */
+const deviceNotice = ref('')
 const query = reactive({ channelKey: '' })
 
 /** 呈现视角：`timeline` 时间轴（默认）/ `list` 明细列表。 */
@@ -479,10 +494,39 @@ const timelineSegments = computed(() => {
   return out
 })
 
-/** 当日累计录像时长（秒）。按裁剪后的可见部分累加，跨天段两天各算一半。 */
-const timelineTotalSeconds = computed(() =>
-  timelineSegments.value.reduce((sum, s) => sum + (s.clippedEndMs - s.clippedStartMs) / 1000, 0)
-)
+/**
+ * 当日累计录像时长（秒）。
+ *
+ * <p><b>必须按「时间轴实际被覆盖的长度」算，不能把各段直接相加</b>：
+ * 设备上报的录像段经常<b>互相重叠</b>（同一时段既有定时录像又有报警/手动录像，
+ * 实测一个通道里有 5 段都从 12:00 开始）。逐段相加会得到一个自相矛盾的数字 ——
+ * 页面上曾出现「当日累计 28 时 58 分」，一天不可能超过 24 小时。
+ *
+ * <p>做法是把各段按起点排序后求<b>并集</b>：相邻或重叠的合并成一段再累加。
+ * 这样得到的就是「这一天里有多少时间有录像」，既不会超过 24 小时，
+ * 也和用户在时间轴上看到的色块总宽度一致（跨天部分已裁到当天，近跨天时两边各算一半）。
+ */
+const timelineTotalSeconds = computed(() => {
+  const spans = timelineSegments.value
+    .map((s) => [s.clippedStartMs, s.clippedEndMs])
+    .sort((a, b) => a[0] - b[0])
+  let total = 0
+  let curStart = null
+  let curEnd = null
+  for (const [start, end] of spans) {
+    if (curEnd === null || start > curEnd) {
+      // 与上一段不相接：结算上一段，另起一段
+      if (curEnd !== null) total += curEnd - curStart
+      curStart = start
+      curEnd = end
+    } else if (end > curEnd) {
+      // 重叠或首尾相接：向右延伸
+      curEnd = end
+    }
+  }
+  if (curEnd !== null) total += curEnd - curStart
+  return total / 1000
+})
 
 /** 色块的悬浮提示：起止 + 时长（跨天段额外说明）。 */
 function segTitle(s) {
@@ -535,6 +579,16 @@ const hoverAt = ref(null)
 const DRAG_THRESHOLD_PX = 4
 
 const drag = reactive({ active: false, startX: 0, startAt: 0, moved: false })
+
+/**
+ * 最近一次拖拽结束的时刻（毫秒）。
+ *
+ * <p>用于吞掉浏览器在松手后补发的那次 click。用一个时间戳而不是
+ * {@code moved} 标志：松手位置可能在轨道外，那时根本不会有 click，
+ * 标志会一直挂着，把<b>下一次正常点击</b> 吞掉 —— 表现为「点色块没反应，
+ * 要再点一次」。
+ */
+let dragEndedAt = 0
 
 /** 框选结果；`null` 表示没有选区。 */
 const selection = ref(null)
@@ -618,22 +672,50 @@ function buildSelection(atA, atB) {
 
 function onTrackLeave() {
   hoverAt.value = null
-  // 鼠标移出轨道时结束拖拽：否则在轨道外松手收不到 mouseup，选区会一直挂着
+  /*
+   * 拖拽<b>不</b>在鼠标移出轨道时结束。
+   *
+   * <p>一是用户经常会拖到轨道边缘之外（想选到 24:00），提前结束会让选区
+   * 停在半路；{@link trackPoint} 已经把比例夹在 0~100%，拖出外面反而是
+   * 自然的「选到头」交互。
+   *
+   * <p>二是真正的结束点必须覆盖「在轨道外松手」这种情况，那只能靠
+   * window 上的 mouseup（见 {@link onDragEnd}）。在这里提前置 false 反而会
+   * 让「按住拖出轨道再拖回来」变成两个动作。
+   */
+}
+
+/**
+ * 结束拖拽。必须挂在 <b>window</b> 的 mouseup 上。
+ *
+ * <p>改造前只在轨道上监听 mousedown/mousemove，没有任何 mouseup ——
+ * 松开鼠标后 {@code drag.active} 一直是 true，之后再移动鼠标（不用按键）
+ * 选区就继续跟着长，表现为「松手了还在选」。这是用户直接看到的现象。
+ *
+ * <p>挂在 window 而不是轨道上：用户很可能是在<b>轨道外</b>松手的
+ * （拖到边缘想选到 24:00，或拖过头）。只挂轨道就收不到那种 mouseup，
+ * 同样的 bug 依旧存在，只是触发条件更隐蔽。
+ */
+function onDragEnd() {
+  if (!drag.active) return
   drag.active = false
+  if (drag.moved) {
+    // 拖拽结束会紧跟一次 click，打上时间戳让 onTrackClick 吞掉它
+    dragEndedAt = Date.now()
+    drag.moved = false
+  }
 }
 
 /**
  * 时间轴点击：有选区时先清选区（用户的意图是回到「点播」），
  * 否则播命中时刻的那一段。
  *
- * <p>拖拽结束后浏览器还会补一个 click，用 {@code drag.moved} 把它吞掉 ——
- * 否则松手瞬间会在选区之外又开始播放一段录像，两个动作打架。
+ * <p>拖拽结束后浏览器会补一个 click，必须吞掉 —— 否则松手瞬间会在
+ * 选区之外又开始播放一段录像，两个动作打架。用时间戳判定而不是标志位，
+ * 这样无论在哪松手、有没有补发 click，下一次真实点击都不会被误吞。
  */
 function onTrackClick(ev) {
-  if (drag.moved) {
-    drag.moved = false
-    return
-  }
+  if (Date.now() - dragEndedAt < 400) return
   if (selection.value) {
     clearSelection()
     return
@@ -723,18 +805,43 @@ const recStateHint = computed(() => {
 })
 
 /**
+ * 这批录像段里是否有某一段覆盖到给定的时刻。
+ *
+ * <p>不能只看「查到了段」：设备常见 2 小时一段，停止录像后 15 分钟内
+ * 仍能查到与区间有交集的旧段。必须看段尾有没有覆盖到现在。
+ */
+function isRecordingAt(list, at) {
+  const deadline = at - REC_TOLERANCE_SECOND * 1000
+  return list.some((r) => {
+    const end = parseWall(r.endTime)
+    return Number.isFinite(end) && end >= deadline
+  })
+}
+
+/**
  * 查询设备当前录像状态。
  *
  * <p>刻意<b>不</b>用当天的检索结果判断：那查的是「用户选中的日期」，
  * 用户翻到上周三时，看的是上周三有没有录像，与「现在是否在录」无关。
  * 必须单独问一次设备「最近 15 分钟」。
  *
+ * <p><b>但「今天」是例外</b>：当天检索的区间本来就覆盖了此刻，
+ * 直接从它的结果里判断即可。这不是为了省事 —— 设备侧 RecordInfo 是
+ * 串行问答，多发一次就要多等一次，而且并发查询会互相覆盖应答回调
+ * （见 RecordService 的说明）。
+ *
  * <p>查询失败一律记为「未知」而不是「未录像」：设备离线、SIP 超时都会
  * 走到异常分支，把它们显示成「未录像」会变成误报 —— 用户可能据此去
  * 现场检查一台其实在正常录像的设备。
+ *
+ * @param {boolean} [force] 忽略当天检索结果，强制向设备再问一次（用户点标签时用）
  */
-async function refreshRecState() {
-  if (!query.channelKey || recChecking.value) return
+async function refreshRecState(force = false) {
+  if (!query.channelKey || recChecking.value || searching.value) return
+  if (!force && day.value === todayStr() && searched.value && records.value.length) {
+    recordingNow.value = isRecordingAt(records.value, Date.now())
+    return
+  }
   recChecking.value = true
   recordingNow.value = null
   try {
@@ -743,14 +850,15 @@ async function refreshRecState() {
       serial: serial.value,
       code: code.value,
       starttime: fmtFull(new Date(now - REC_LOOKBACK_MS)),
-      endtime: fmtFull(new Date(now))
+      endtime: fmtFull(new Date(now)),
+      // 状态探测只需“有没有”，不必等满 15 秒：后端同通道查询是串行的，
+      // 这里等太久会把后面的检索一起拖慢。
+      timeout: 8
     })
-    const list = data?.recordList || []
-    const deadline = now - REC_TOLERANCE_SECOND * 1000
-    recordingNow.value = list.some((r) => {
-      const end = parseWall(r.endTime)
-      return Number.isFinite(end) && end >= deadline
-    })
+    // 设备没应答时保持「未知」，不能当成「未录像」
+    recordingNow.value = data?.deviceAnswered === false
+      ? null
+      : isRecordingAt(data?.recordList || [], now)
   } catch (e) {
     recordingNow.value = null
   } finally {
@@ -807,10 +915,17 @@ async function ensureMediaPort() {
 function onChannelChange() {
   records.value = []
   searched.value = false
+  deviceUnanswered.value = false
+  deviceNotice.value = ''
   hoverAt.value = null
-  // 录像状态与日期无关，跟通道走；失败不打断主流程
-  refreshRecState()
-  search()
+  /*
+   * 先检索、拿到结果后再判录像状态。
+   *
+   * <p>两者不能并发：设备侧的录像检索是<b>串行问答</b>，同通道两个查询会
+   * 互相覆盖应答回调，导致其中一个必然超时（表现为「查询录像老是查不出来」）。
+   * 先等当天结果、再从中判状态，一次通道切换只发一条 SIP 查询。
+   */
+  search().then(() => refreshRecState())
 }
 
 /** 日期 → `YYYY-MM-DD`（本地时区，不用 toISOString 以免被 UTC 拉走一天）。 */
@@ -856,6 +971,30 @@ function onDayChange() {
   if (query.channelKey) search()
 }
 
+/**
+ * 时间轴空位文案。
+ *
+ * <p><b>「设备没答」不能说成「当日没有录像」</b>：那是在报假警 ——
+ * 用户会据此认为设备没录、甚至跑去现场。空列表有三种完全不同的原因，
+ * 文案必须分开：还没查 / 设备没答 / 确实没录。
+ */
+const timelineEmptyText = computed(() => {
+  if (!searched.value) return '选择通道后点「检索」'
+  if (deviceUnanswered.value) {
+    return deviceNotice.value || '设备未应答检索，无法确认当日是否有录像'
+  }
+  return '当日没有录像'
+})
+
+/**
+ * 检索请求序号：只认最后一次发起的结果。
+ *
+ * <p>设备检索要几秒，用户在这期间换了通道或日期时，先发的那次会晚回来，
+ * 直接写 {@code records} 就会把新通道的结果覆盖成旧通道的 ——
+ * 界面上表现为「选了 A 通道，时间轴上却是 B 通道的录像」。
+ */
+let searchSeq = 0
+
 async function search() {
   if (!query.channelKey) {
     ElMessage.warning('请先选择通道')
@@ -865,6 +1004,8 @@ async function search() {
     ElMessage.warning('请选择日期')
     return
   }
+  const seq = ++searchSeq
+  const dayOfQuery = day.value
   searching.value = true
   try {
     const data = await playbackApi.recordList({
@@ -873,21 +1014,56 @@ async function search() {
       starttime: dayStartTime.value,
       endtime: dayEndTime.value
     })
+    // 期间用户又换了通道/日期：这次结果已经过期，丢弃
+    if (seq !== searchSeq) return
     records.value = data?.recordList || []
     searched.value = true
-    if (!records.value.length) {
+    deviceUnanswered.value = data?.deviceAnswered === false
+    deviceNotice.value = data?.notice || ''
+    /*
+     * 设备没应答 ≠ 没有录像。
+     *
+     * <p>后端会在 {@code notice} 里把这两者说清楚（含“下面是缓存结果”）。
+     * 早先不管三七二十一弹「当日无录像」，等于告诉用户“设备没录”，
+     * 而实际上可能是设备侧的录像检索坏了 —— 排查方向直接错掉。
+     */
+    if (deviceUnanswered.value) {
+      ElMessage.warning(data.notice || '设备未应答录像检索')
+    } else if (!records.value.length) {
       ElMessage.info('当日无录像')
+    } else if (dayOfQuery === todayStr()) {
+      // 今天的数据顺手把「是否在录」也确定下来，省一次 SIP 查询
+      recordingNow.value = isRecordingAt(records.value, Date.now())
     }
   } catch (e) {
-    ElMessage.error(e.message || '检索失败')
+    if (seq === searchSeq) ElMessage.error(e.message || '检索失败')
   } finally {
-    searching.value = false
+    if (seq === searchSeq) searching.value = false
   }
 }
 
 
-/** 发起回放并播放。 */
-async function play(row) {
+/**
+ * 画面起不来时的重拉次数。
+ *
+ * <p>只在<b>用户主动点播</b>时清零；自动重建沿用计数，否则会变成无限重试。
+ */
+let stallRetry = 0
+
+/** 最多重拉几次。超过就停下来告诉用户，而不是一直重试刷设备。 */
+const MAX_STALL_RETRY = 2
+
+/**
+ * 发起回放并播放。
+ *
+ * @param {object} row 录像段
+ * @param {object} [opts]
+ * @param {boolean} [opts.rebuild] 内部重拉（不清零重试计数）
+ * @param {number} [opts.startOffset] 从本段第几秒开始播（拖动定位用，默认 0）
+ */
+async function play(row, opts = {}) {
+  if (!opts.rebuild) stallRetry = 0
+  const offset = Math.max(0, Math.floor(Number(opts.startOffset) || 0))
   /*
    * 【先请求、成功后再开窗】
    *
@@ -905,7 +1081,8 @@ async function play(row) {
       serial: serial.value,
       code: code.value,
       filePath: row.filePath,
-      starttime: row.startTime,
+      // 定位靠「改 INVITE 的 t= 起点」，不是靠设备侧的 npt 跳转，见 seekTo
+      starttime: offset > 0 ? addSeconds(row.startTime, offset) : row.startTime,
       endtime: row.endTime
     })
   } catch (e) {
@@ -935,14 +1112,106 @@ async function play(row) {
    */
   await player.play(playbackKey.value, urls, {
     proto: 'wsflv',
+    /*
+     * 画面永远起不来时重拉整条流。
+     *
+     * <p><b>这里必须接 onStall，否则那个看门狗是死的</b>：播放器里只能在
+     * “自己无救”时回调出来 —— 它连的是同一个媒体源，重连一万次也没有视频轨。
+     * 真正要做的是停掉回放会话 + 重新 INVITE（换 SSRC、ZLM 重建媒体源）。
+     * 早先这里没传，于是看门狗触发后什么也没发生，界面永远停在
+     * 「等待设备推流…」，只能关掉重播。
+     *
+     * <p>典型成因：设备推流慢（实测某下级平台应答后要 11 秒才推视频），
+     * ZLM 等轨道就绪超时就把 H264 轨<b>永久丢弃</b>，媒体源只剩 PCMA。
+     */
+    onStall: rebuildStream,
+    /*
+     * 稳定播放 10 秒后把重拉预算还回去。
+     *
+     * <p>否则一个长时间的观看过程里，几次彼此无关的起播故障（设备慢一次、
+     * 丢包坏帧一次…）会把 2 次预算永久耗光，之后再出问题就直接放弃了。
+     */
+    onStable: () => { stallRetry = 0 },
     vod: {
       duration: segmentSeconds.value,
-      onSeek: (sec) => control('seek', { range: String(Math.floor(sec)) }),
+      /*
+       * 起始偏移：本段从第 offset 秒开始推，所以媒体时间轴 0 点对应段内的 offset。
+       * 进度条显示 = offset + media.currentTime，总长仍是整段时长。
+       */
+      startOffset: offset,
+      onSeek: (sec) => seekTo(sec),
       onPause: () => control('pause'),
-      onResume: () => control('play', { range: 'now' }),
+      onResume: () => resumePlayback(),
       onRate: (rate) => control('scale', { scale: rate })
     }
   })
+}
+
+/** 把 {"YYYY-MM-DDTHH:mm:ss"} 加上若干秒，返回同格式字符串。 */
+function addSeconds(timeStr, seconds) {
+  const t = new Date(String(timeStr).replace(' ', 'T')).getTime()
+  if (!Number.isFinite(t)) return timeStr
+  const d = new Date(t + seconds * 1000)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/**
+ * 拖动/点击进度条定位。
+ *
+ * <h3>为什么不发设备的 npt 跳转</h3>
+ * 标准附录 D 的 {@code PLAY RTSP/1.0 + Range: npt=<秒>-} 看着是正解，实测却不行：
+ * 本次现场的下级平台（LiveGBS）对这条 INFO <b>回 200 OK 但不跳转</b> ——
+ * SIP 层没有任何错误、抓包看报文完全合规，画面却一直往下播。
+ * 用户看到的正是「点进度条毫无反应」。
+ *
+ * <p>（同一通道的 PAUSE 是生效的：抓包可见设备停推、ZLM 缓冲区停止增长。
+ * 所以不是 INFO 通道的问题，而是该设备不支持 npt 定位。）
+ *
+ * <p>改用「按目标时间重新 INVITE」：它就是首次播放走的同一条路径，
+ * 只是把 {@code t=} 的起点换成目标时刻，<b>必然生效</b>。
+ * 代价是一次重新协商（约 2~3 秒），换来「点哪儿播哪儿」永远成立。
+ */
+async function seekTo(sec) {
+  const row = current.value
+  if (!row) return
+  await restartAt(Math.max(0, Math.floor(Number(sec) || 0)))
+}
+
+/**
+ * 从本段第 {@code offsetSeconds} 秒重新开始播放。
+ *
+ * <p>停旧会话 → 带新起点重新 INVITE。用于拖动定位与「继续播放」：
+ * 两者都需要设备真正移动到某个时刻，而唯一可靠的手段就是重新协商。
+ */
+async function restartAt(offsetSeconds) {
+  const row = current.value
+  if (!row) return
+  try {
+    await playbackApi.stop({ serial: serial.value, code: code.value })
+  } catch (e) {
+    // 会话可能已不存在（设备已 BYE），继续重开即可
+  }
+  await play(row, { rebuild: true, startOffset: offsetSeconds })
+}
+
+/**
+ * 重拉整条回放流（停会话 → 重新 INVITE）。
+ *
+ * <p>只在「播放器自己无救」时被调用：媒体源已经丢了视频轨、或连上了却
+ * 一个字节都收不到。这两种情况重连 WebSocket 都没用，必须换一路流。
+ */
+async function rebuildStream() {
+  const row = current.value
+  if (!row) return
+  if (stallRetry >= MAX_STALL_RETRY) {
+    ElMessage.error('画面无法就绪，已重试多次。请返回后重新点播，或检查设备推流')
+    return
+  }
+  stallRetry++
+  // 重拉后从原来的位置接着看（靠 INVITE 的 t= 定位，不依赖设备 npt）
+  await restartAt(Math.floor(player.position.value || 0))
 }
 
 /* ==================== 录像下载 ==================== */
@@ -1056,6 +1325,37 @@ async function control(command, extra = {}) {
   } catch (e) {
     ElMessage.error(e.message || '控制失败')
   }
+}
+
+/**
+ * 继续播放：<b>停掉旧会话再整段重开</b>，而不是只发一条 SIP PLAY。
+ *
+ * <p>为什么不能「发条 PLAY 让它继续」：暂停 = 向设备发 SIP PAUSE，
+ * 设备立刻停推 RTP。而 ZLM 对没有数据的 RTP 会话有硬超时
+ * （日志里的 {@code RtpProcess timeout}，实测十几秒），一旦超时就<b>注销媒体源</b>。
+ * 此后设备即使被要求继续推，平台侧也不再有可用的媒体源 ——
+ * 表现就是「点继续以后画面动几秒就卡死」，而日志里没有任何错误。
+ *
+ * <p>所以这里走最短的可靠路径：停会话 → 重新 INVITE → 跳回原进度。
+ * 代价是多几秒重新协商，换来的是「继续」永远可用；
+ * 相比赌「媒体源还活着」，这个代价值得付。
+ *
+ * <p>进度要<b>先记下来</b>：重开会把 position 归零。
+ */
+async function resumePlayback() {
+  const row = current.value
+  if (!row) return
+  /*
+   * 暂停后「继续」必须重新协商，不能只发一条 SIP PLAY。
+   *
+   * <p>暂停 = 向设备发 PAUSE，设备立刻停推 RTP；而 ZLM 对没有数据的 RTP
+   * 会话有硬超时（实测约 100 秒），一过就<b>注销媒体源</b>。此后设备即使
+   * 被要求继续推，平台侧也没有可用的源 —— 表现是「点继续后画面不再更新」，
+   * 日志里只有一行 {@code RtpProcess timeout}。
+   *
+   * <p>所以走与拖动定位同一条可靠路径：按当前进度重新 INVITE。
+   */
+  await restartAt(Math.floor(player.position.value || 0))
 }
 
 /* ==================== 进度显示 ==================== */
@@ -1189,6 +1489,14 @@ function sleep(ms) {
 }
 
 onMounted(async () => {
+  /*
+   * 拖拽的收尾必须挂在 window 上。
+   *
+   * <p>挂在轨道上只能覆盖「在轨道内松手」，而用户拖到边缘时经常是在
+   * 轨道外松手的 —— 那时收不到 mouseup，drag.active 会一直为 true，
+   * 之后不按键只移动鼠标也会继续改选区。见 {@link onDragEnd}。
+   */
+  window.addEventListener('mouseup', onDragEnd)
   await loadChannels()
   // 从通道列表点「设备录像」跳进来时预填设备/通道
   const serial = String(route.query.serial || '').trim()
@@ -1197,13 +1505,18 @@ onMounted(async () => {
     query.channelKey = `${serial}/${code}`
     /*
      * 预填走的是 query 参数，不会经过 onChannelChange，
-     * 所以这里要显式查一次录像状态 —— 否则从通道列表跳进来时
-     * 徽标一直停在「录像状态 —」，而用户正是为了确认状态才点进来的。
+     * 所以这里要自己查一次。
+     *
+     * <p><b>顺序不能反</b>：先检索当天、再判录像状态。原实现只查了状态，
+     * 用户从通道列表点「设备录像」跳进来时时间轴/列表都是空的，
+     * 必须先手动点一次「检索」才看得到内容 —— 而他跳进来的目的
+     * 往往就是直接找某一段。
      */
-    refreshRecState()
+    search().then(() => refreshRecState())
   }
 })
 onUnmounted(() => {
+  window.removeEventListener('mouseup', onDragEnd)
   player.stop()
 })
 </script>

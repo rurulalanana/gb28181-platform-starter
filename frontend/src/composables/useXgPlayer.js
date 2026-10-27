@@ -63,8 +63,20 @@ export function useXgPlayer(containerRef) {
    * 计数必须跨重建保留，否则会变成无限重试。
    */
   let decodeRetryCount = 0
-  /** 销毁标记：异步流程返回后若已停止，丢弃结果。 */
+  /**
+   * 销毁标记：异步流程返回后若已停止，丢弃结果。
+   */
   let disposed = false
+  /** 稳定播放计时器（到时把解码重试预算归零，见 {@link playFlv} 的说明）。 */
+  let stableTimer = null
+
+  /**
+   * 连续稳定播放多久算「上一次故障已恢复」（毫秒）。
+   *
+   * <p>10 秒大于任何一次正常重建的耗时（退避 1.2s×次数 + 等关键帧 1~2s），
+   * 又远小于用户的实际观看时长 —— 能跑满就说明画面确实在动。
+   */
+  const STABLE_PLAY_MS = 10000
   /**
    * 当前回放参数（录像段的 duration 与信令回调）。
    *
@@ -88,7 +100,8 @@ export function useXgPlayer(containerRef) {
    * @param {object} [opts]   `{ proto: 'wsflv'|'httpflv'|'webrtc'|'hls', vod: {...} }`
    * @param {function} [opts.onFatal] 播放彻底失败时的回调（解码错误重试耗尽后触发）
    * @param {object} [opts.vod] 录像回放参数，给了就切到「伪点播」模式：
-   *   `{ duration, onSeek, onPause, onResume, onRate }`。
+   *   `{ duration, startOffset, onSeek, onPause, onResume, onRate }`。
+   *   `startOffset` 表示本次流的 0 点对应录像段内的第几秒（默认 0）。
    *   见 {@link applyVodControls} 的说明。
    * @param {object} [opts.protocolSwitch] 把「播放协议」选择器放进播放器控制栏：
    *   `{ value, options: [{ value, label }], onChange(value) }`。
@@ -125,7 +138,8 @@ export function useXgPlayer(containerRef) {
     } else if (proto === 'hls') {
       await playHls(urls?.hls)
     } else {
-      await playFlv(flvUrlOf(proto, urls), opts.onFatal, currentVod, opts.onStall)
+      await playFlv(flvUrlOf(proto, urls), opts.onFatal, currentVod, opts.onStall,
+        opts.onStable)
     }
   }
 
@@ -147,8 +161,10 @@ export function useXgPlayer(containerRef) {
    *
    * @param {object|null} vod 录像回放参数；非空时进入「伪点播」模式
    * @param {function} [onStall] 流通但始终无视频轨时的回调（需调用方重建会话）
+   * @param {function} [onStable] 连续稳定播放达到 {@link STABLE_PLAY_MS} 时的回调，
+   *        调用方可借此把自己那侧的「重建预算」也还回去
    */
-  async function playFlv(url, onFatal, vod, onStall) {
+  async function playFlv(url, onFatal, vod, onStall, onStable) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -195,16 +211,74 @@ export function useXgPlayer(containerRef) {
     // 协议选择器放进控制栏（像视频网站的清晰度切换）
     attachProtocolSwitch(p, currentProtoSwitch)
 
+    /** 解码/媒体源失败后的最大重建次数（跨重建保留计数，见 decodeRetryCount）。 */
+    const MAX_DECODE_RETRY = 3
+
+    /**
+     * 重建播放器（丢包坏帧、媒体源作废后的自愈）。
+     *
+     * <p><b>为什么只能整个重建</b>：video 元素一旦报错，它绑定的
+     * MediaSource 就永久作废 —— 不能续用、也不能清空复用，只能新建
+     * MediaSource、重新连一路 FLV、重新等一个完整的关键帧。
+     *
+     * <p><b>为什么退避 1.2s × 次数</b>：立刻重连大概率拿到同一批坏数据，
+     * 退避让设备有机会走到下一个 GOP。
+     *
+     * <p>所有不可恢复的错误（解码失败、媒体源关闭、队列积压、流层主动放弃）
+     * 都走这里。<b>不能只处理 MEDIA_ERR_DECODE</b>：其余错误码既不重试也不
+     * 报错时，播放器会停在那儿一动不动，用户只能关掉重弹窗重播。
+     */
+    function scheduleRebuild(reason) {
+      if (disposed) return
+      if (decodeRetryCount >= MAX_DECODE_RETRY) {
+        state.value = `播放异常：${reason}（已重试 ${MAX_DECODE_RETRY} 次）`
+        playing.value = false
+        if (onFatal) onFatal()
+        return
+      }
+      decodeRetryCount++
+      state.value = `${reason}，重试中（${decodeRetryCount}/${MAX_DECODE_RETRY}）…`
+      playing.value = false
+      const timer = setTimeout(() => {
+        if (disposed) return
+        stop()
+        /*
+         * vod 必须显式回传：stop() 会清空 currentVod，不传就变成直播模式了。
+         *
+         * <p>协议也要沿用本次的：原来写死 {@code proto: 'wsflv'}，
+         * 用户在 HTTP-FLV 下解码失败重建时会被默默换成 WebSocket 通路，
+         * 菜单上的标签与实际通路对不上。两种 FLV 地址都传，
+         * 让 {@link flvUrlOf} 按协议选。
+         */
+        play(currentStream.value, { wsFlv: url, httpFlv: url }, {
+          proto: protocol.value === 'httpflv' ? 'httpflv' : 'wsflv',
+          onFatal,
+          _rebuild: true,
+          vod
+        })
+      }, 1200 * decodeRetryCount)
+      waitTimers.push(timer)
+    }
+
     stream = new WsFlvStream({
       url,
       mediaSource,
       media,
       // 回放不做音画同步：位置/倍速由设备侧控制（见 WsFlvStream 的 vod 说明）
       vod: !!vod,
-      onError: (msg) => {
+      onError: (msg, retryable) => {
         if (disposed) return
-        state.value = '播放异常：' + msg
-        playing.value = false
+        /*
+         * 编码不支持这类确定性失败重建也没用，直接报给用户；
+         * 其余（解码失败、媒体源关闭、队列积压）都值得重建一次。
+         */
+        if (retryable === false) {
+          state.value = '播放异常：' + msg
+          playing.value = false
+          if (onFatal) onFatal()
+          return
+        }
+        scheduleRebuild(msg)
       },
       onStats: (info) => {
         if (disposed) return
@@ -260,6 +334,32 @@ export function useXgPlayer(containerRef) {
     }, 12000)
     waitTimers.push(stallTimer)
 
+    /*
+     * 「连上了但一个字节都收不到」的看门狗 —— 另一类永远黑屏。
+     *
+     * <p>ZLM 的媒体源可能<b>只有音频轨</b>：设备推流慢一点（实测某下级平台
+     * INVITE 应答后要 11 秒才推视频），ZLM 等轨道就绪超时就把没就绪的轨
+     * <b>永久丢弃</b>（日志 {@code Track not ready for a long time, ignored: H264}），
+     * 媒体源从此只有 PCMA。播放器连上去一个视频字节都收不到，
+     * 状态栏永远停在「等待设备推流…」，而设备其实早就在推了。
+     *
+     * <p><b>为什么上面的 stallTimer 救不了它</b>：那个判据要求
+     * {@code receivedBytes > 0}，而这种情况字节数恒为 0 —— 一个条件都不满足，
+     * 于是永远不重建，用户只能关掉重播。
+     *
+     * <p>窗口取 20 秒：覆盖「设备真的慢」的实测值（11 秒）并留余量；
+     * 重建会换新 SSRC 与端口、ZLM 重建媒体源，通常 1~2 秒内就能拿到完整轨道。
+     */
+    const noDataTimer = setTimeout(() => {
+      if (disposed || !stream) return
+      if (stream.receivedBytes === 0) {
+        state.value = '未收到视频数据，正在重新拉流…'
+        playing.value = false
+        if (onStall) onStall()
+      }
+    }, 20000)
+    waitTimers.push(noDataTimer)
+
     // video 的音量/静音按钮由 xgplayer 操作，Web Audio 这条链路要跟着变
     const syncVolume = () => stream?.setVolume(media.muted ? 0 : media.volume)
     media.addEventListener('volumechange', syncVolume)
@@ -269,6 +369,24 @@ export function useXgPlayer(containerRef) {
       if (disposed) return
       playing.value = true
       state.value = '播放中'
+      /*
+       * 稳定播放一段时间后把重试预算还回去。
+       *
+       * <p>{@code decodeRetryCount} 必须跨重建保留（否则会变成无限重试），
+       * 但它<b>只增不减</b>：一次播放里偶发几次丢包坏帧（公网 4% 丢包很正常），
+       * 预算就被<b>永久</b>耗光 —— 此后哪怕已经稳定跑了半小时，
+       * 再碰上一次坏帧就直接报「已重试 3 次」并停住（实测就是这样卡死的）。
+       *
+       * <p>这类故障彼此独立：能稳定播放就说明上一次确实恢复了，
+       * 所以跑满窗口就把计数归零。撑不到窗口不会归零，因此不会退化成无限重试。
+       */
+      if (stableTimer) clearTimeout(stableTimer)
+      stableTimer = setTimeout(() => {
+        stableTimer = null
+        if (disposed) return
+        decodeRetryCount = 0
+        if (onStable) onStable()
+      }, STABLE_PLAY_MS)
     })
 
     // 直播不允许暂停：把 media 的 pause 事件拉回来。
@@ -312,40 +430,17 @@ export function useXgPlayer(containerRef) {
     // 一旦 video 元素报错，MediaSource 就废了（不能续用），
     // 只能整个重建 —— 重新连 WebSocket、重新等一个完整的关键帧。
     // 网络恢复后的下一个 GOP 通常是好的，所以重建大多能救回来。
-    const MAX_DECODE_RETRY = 3
     media.addEventListener('error', () => {
       if (disposed) return
-      // code 3 = MEDIA_ERR_DECODE；其它错误（网络中断等）交给流层处理
-      if (media.error?.code !== 3) return
-      if (decodeRetryCount >= MAX_DECODE_RETRY) {
-        state.value = `播放异常：解码失败（已重试 ${MAX_DECODE_RETRY} 次）`
-        playing.value = false
-        if (onFatal) onFatal()
-        return
-      }
-      decodeRetryCount++
-      state.value = `解码失败，重试中（${decodeRetryCount}/${MAX_DECODE_RETRY}）…`
-      playing.value = false
-      // 退避一下再重建：立刻重建大概率拿到同一批坏数据
-      const timer = setTimeout(() => {
-        if (disposed) return
-        stop()
-        /*
-         * vod 必须显式回传：stop() 会清空 currentVod，不传就变成直播模式了。
-         *
-         * <p>协议也要沿用本次的：原来写死 {@code proto: 'wsflv'}，
-         * 用户在 HTTP-FLV 下解码失败重建时会被默默换成 WebSocket 通路，
-         * 菜单上的标签与实际通路对不上。两种 FLV 地址都传，
-         * 让 {@link flvUrlOf} 按协议选。
-         */
-        play(currentStream.value, { wsFlv: url, httpFlv: url }, {
-          proto: protocol.value === 'httpflv' ? 'httpflv' : 'wsflv',
-          onFatal,
-          _rebuild: true,
-          vod
-        })
-      }, 1200 * decodeRetryCount)
-      waitTimers.push(timer)
+      /*
+       * 任何错误码都要处理，不能只认 code 3：
+       *   2 MEDIA_ERR_NETWORK        —— 读流中断，重建会重新连
+       *   3 MEDIA_ERR_DECODE         —— 丢包坏帧，下一个 GOP 通常是好的
+       *   4 MEDIA_ERR_SRC_NOT_SUPPORTED —— MediaSource 已作废
+       * 只处理 code 3 时，其余错误既不重试也不提示，画面永远停在那里。
+       */
+      const err = media.error
+      scheduleRebuild(err?.message || `媒体错误（code=${err?.code ?? '?'}）`)
     })
 
     // MSE 起播需要主动拉一次；失败不致命（等数据到了会自动起）
@@ -774,6 +869,10 @@ export function useXgPlayer(containerRef) {
     }
     // 清掉回放参数：否则下一次播直播（不传 vod）会残留上一段的进度条配置
     currentVod = null
+    if (stableTimer) {
+      clearTimeout(stableTimer)
+      stableTimer = null
+    }
     for (const t of waitTimers) clearTimeout(t)
     waitTimers.length = 0
     if (stream) {
@@ -927,9 +1026,18 @@ function baseUiConfig(mode = 'live') {
  */
 function applyVodControls(p, media, vod, positionRef) {
   const duration = Math.max(1, Math.round(vod.duration || 0))
-  // 进度条总长；同时把偏移归零，让首帧显示在 0
+  /*
+   * 进度条总长取整段时长；起始偏移取 vod.startOffset。
+   *
+   * <p>{@code startOffset} 用于「从段中间开始播」：拖动定位与暂停后继续都是
+   * 停掉旧会话、带着新的 {@code t=} 起点重新 INVITE，此时媒体时间轴从 0 开始，
+   * 但它在录像段里的真实位置是 startOffset。
+   * 显示位置 = timeOffset + media.currentTime，总长仍是整段，
+   * 所以进度条会从中间那个点开始走，而不是跳回开头。
+   */
+  const startOffset = Math.min(duration, Math.max(0, Math.round(Number(vod.startOffset) || 0)))
   p.config.customDuration = duration
-  p.config.timeOffset = 0
+  p.config.timeOffset = startOffset
 
   const clamp = (t) => {
     const n = Number(t)
@@ -957,19 +1065,61 @@ function applyVodControls(p, media, vod, positionRef) {
   p.on('playing', () => {
     userReady = true
   })
+
+  /** 用户操作的时间窗（毫秒）：覆盖事件从 player API 冒泡到 media 的延迟。 */
+  const USER_ACTION_WINDOW_MS = 600
+
+  /*
+   * 【关键一】用户暂停 / 继续 与「播放器内部事件」必须分开。
+   *
+   * <p>media 的 play/pause 事件<b>不代表用户操作</b>：MSE 欠载恢复、缓冲边界、
+   * 播放器内部状态机都会触发它们。原实现只看 {@code userReady} 就往外发
+   * SIP 指令，后果是灾难性的：一次内部 pause 就发 SIP PAUSE →
+   * 设备真的停推 → ZLM 收流超时注销媒体源（实测约 20 秒）→ WebSocket 被关 →
+   * 画面定格。用户看到的就是「播着播着就不动了，必须关掉重播」。
+   *
+   * <p><b>只拦 {@code playPause} 而不是 {@code play}/{@code pause}</b>：
+   * 后两者是播放器内部也会调用的公共方法（自动起播、欠载恢复都走 {@code play()}），
+   * 拿它当「用户动作」等于没拦。{@code playPause} 才是真正的用户入口 ——
+   * xgplayer 的控制栏按钮与键盘空格键都只经过它。
+   */
+  let userActionAt = 0
+  const playPauser = p.playPause
+  if (typeof playPauser === 'function') {
+    p.playPause = (...args) => {
+      userActionAt = Date.now()
+      return playPauser.apply(p, args)
+    }
+  }
+
   p.on('pause', () => {
     /*
-     * 【关键】播放器被主动销毁时会触发一次 pause，那不是用户操作。
+     * 播放器被主动销毁时会触发一次 pause，那不是用户操作。
      * 不拦住就会向设备发 SIP PAUSE —— 设备真的停推，ZLM 收流超时后
      * 注销媒体源（实测 16~20 秒），紧接着切 WebRTC 就报 stream not found。
      * 切协议、关弹窗都会走这条销毁路径。
      */
     if (p.__closing) return
-    if (userReady) vod.onPause?.()
+    if (!userReady) return
+    if (Date.now() - userActionAt > USER_ACTION_WINDOW_MS) {
+      /*
+       * 【关键二】非用户暂停不要直接放弃，而要「续播」。
+       *
+       * <p>这类暂停几乎都是缓冲欠载造成的。此时若什么都不做，画面就永远
+       * 停在那儿 —— 用户既没按暂停、也没有任何提示，只能关掉重开。
+       * 自动拉回播放，等下一个数据包到了自然续上。
+       */
+      if (!media.ended) media.play().catch(() => {})
+      return
+    }
+    vod.onPause?.()
   })
   p.on('play', () => {
     if (p.__closing) return
-    if (userReady) vod.onResume?.()
+    if (!userReady) return
+    // 内部起播/欠载恢复不是用户意图，不能反向发 SIP PLAY
+    if (Date.now() - userActionAt > USER_ACTION_WINDOW_MS) return
+    vod.onResume?.()
   })
 
   /*
