@@ -31,6 +31,9 @@ src/main/resources/application-*.local.yaml
 # Playwright 排障脚本（本地临时目录，不入库）
 .tmp-*/
 
+# AI 工具配置（skill 包，随工具版本变化，不是项目代码）
+.agents/
+
 # ============ 第三方厂商 SDK（严禁入库） ============
 # 大华 NetSDK 的 Java 源码 + 原生库（libdhnetsdk.so / *.dll）受厂商许可约束，
 # 不允许随公开仓库分发。本仓库是公开的，因此整个 sdk/ 目录一律不入库。
