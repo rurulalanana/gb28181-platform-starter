@@ -540,6 +540,19 @@ public class StreamService {
         vo.setSsrc(session.getSsrc());
         vo.setRtpPort(session.getPort());
         vo.setState(session.getState());
+        /*
+         * 观众数（来自 ZLM 的读者计数，含录制器）。
+         *
+         * <p>运维排障时最常问的就是「这路到底有没有人在看」与「能不能关」——
+         * 把它暴露出来，看列表就知道，不必去翻日志。
+         *
+         * <p>ZLM 的计数对 ws-flv 是准确的（实测：连着时 1、断开后 0），
+         * 因此它就是「有没有人看」的权威来源。
+         */
+        if (platform.mediaServer() != null) {
+            vo.setReaders(platform.mediaServer()
+                    .readerCount(session.getZlmApp(), session.getStream()));
+        }
         vo.setTransport(session.getTcpMode() == 1 ? "TCP" : "UDP");
         if (urls != null) {
             vo.setWebrtc(urls.getWebrtc());

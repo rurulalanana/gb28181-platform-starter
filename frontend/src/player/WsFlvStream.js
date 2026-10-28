@@ -41,6 +41,36 @@ import { decodeG711, G711_SAMPLE_RATE } from './g711'
 const BUFFER_KEEP_SECONDS = 30
 
 /**
+ * 起播前要求的最小缓冲（秒）。
+ *
+ * <p><b>为什么必须预缓冲</b>：改造前播放器是 {@code autoplay} —— 拿到第一个
+ * 关键帧、buffer 里有 0.1 秒数据就开始播。在带宽充足的局域网里没问题，
+ * 但只要「到达速率」略低于「码率」，buffer 就<b>永远贴着 0</b>：
+ * <pre>
+ *   实测弱网（带宽 500 kbps / 码率 850 kbps）：
+ *   buffered 余量长期 0.11 ~ 0.64 秒
+ *   25 秒内出现 15 次 waiting（= 用户看到的一卡一卡）
+ * </pre>
+ * 因为只要网络有 0.2 秒的间隙，那 0.1 秒的缓冲就见底了。
+ *
+ * <p>先攒够 {@code PREBUFFER_SECONDS} 再起播，等于把「抖动容忍」从 0.1 秒
+ * 提到 2 秒 —— 常见的一两秒网络抖动就完全无感了。
+ *
+ * <p><b>代价是起播变慢</b>：低码率流攒 2 秒约需 2~4 秒。监控场景下
+ * 「晚 2 秒出画面」远比「画面一卡一卡」可接受，所以取 2 秒而不是更低。
+ */
+const PREBUFFER_SECONDS = 2
+
+/**
+ * 预缓冲的最长等待（毫秒）。
+ *
+ * <p>带宽严重不足时可能很久都攒不够 2 秒。不能让用户对着黑屏干等 ——
+ * 超时后无论攒了多少都起播（哪怕只有 0.3 秒），画面卡但至少能看到内容，
+ * 同时由 {@code onStall} 那条看门狗继续兜底。
+ */
+const PREBUFFER_TIMEOUT_MS = 8000
+
+/**
  * 待写入队列的上限（段数）。
  *
  * <p>正常播放时队列只有 0~2 段（上一段 append 完成才取下一条）。持续积压
@@ -113,6 +143,14 @@ export default class WsFlvStream {
     this.videoMime = ''
     /** 是否已经拿到关键帧：没有关键帧不能喂给解码器。 */
     this.gotKeyframe = false
+    /**
+     * 预缓冲是否已完成。
+     *
+     * <p>见 {@link PREBUFFER_SECONDS} 的说明：攒够缓冲才允许起播。
+     */
+    this.prebuffered = false
+    /** 预缓冲的兜底定时器。 */
+    this.prebufferTimer = null
     /** 已收到的 FLV 字节数（用于判断「连上了但设备还没推流」）。 */
     this.receivedBytes = 0
 
@@ -147,6 +185,17 @@ export default class WsFlvStream {
     if (this.destroyed) return
     this._connect()
     this.syncTimer = setInterval(() => this._syncAudioVideo(), 500)
+    /*
+     * 预缓冲兜底：到点无论攒了多少都起播。
+     *
+     * <p>见 {@link PREBUFFER_TIMEOUT_MS}。带宽严重不足时 2 秒缓冲可能永远
+     * 攒不到，用户不该对着黑屏无限等待 —— 先出画面（卡也比黑屏好），
+     * 剩下的交给 onStall 看门狗。
+     */
+    this.prebufferTimer = setTimeout(() => {
+      this.prebufferTimer = null
+      this._releasePrebuffer()
+    }, PREBUFFER_TIMEOUT_MS)
   }
 
   // ==================== 连接（WebSocket / HTTP） ====================
@@ -477,6 +526,8 @@ export default class WsFlvStream {
     sb.onupdateend = () => {
       this.appending = false
       this._evict()
+      // 每写完一段就看一次预缓冲是否够了（够了就放行起播）
+      this._checkPrebuffer()
       this._pump()
     }
     try {
@@ -490,6 +541,46 @@ export default class WsFlvStream {
       } else {
         this._fail('写入解码数据失败：' + (e && e.name ? e.name + ' - ' + e.message : e))
       }
+    }
+  }
+
+  /**
+   * 预缓冲检查：攒够 {@link PREBUFFER_SECONDS} 就放行起播。
+   *
+   * <p>见 {@link PREBUFFER_SECONDS} 的说明 —— 这是「播两秒卡一下」的
+   * 直接解药：不再一有数据就播，而是先攒出可用的抖动余量。
+   *
+   * <p>超时兜底：带宽严重不足时可能永远攒不够 2 秒，不能让用户对着黑屏
+   * 干等 —— {@link PREBUFFER_TIMEOUT_MS} 到点后无论攒了多少都放行。
+   */
+  _checkPrebuffer() {
+    if (this.prebuffered || this.destroyed || this.failed) return
+    const v = this.media
+    if (!v) return
+    let buffered = 0
+    if (v.buffered.length) {
+      // 直播场景通常只有一段；取最长的那段作为余量
+      for (let i = 0; i < v.buffered.length; i++) {
+        buffered = Math.max(buffered, v.buffered.end(i) - v.buffered.start(i))
+      }
+    }
+    if (buffered >= PREBUFFER_SECONDS) {
+      this._releasePrebuffer()
+    }
+  }
+
+  /** 放行起播（幂等）。 */
+  _releasePrebuffer() {
+    if (this.prebuffered) return
+    this.prebuffered = true
+    if (this.prebufferTimer) {
+      clearTimeout(this.prebufferTimer)
+      this.prebufferTimer = null
+    }
+    if (this.destroyed || this.failed) return
+    const v = this.media
+    if (v && v.paused) {
+      v.play().catch(() => {})
     }
   }
 
@@ -541,6 +632,21 @@ export default class WsFlvStream {
       return
     }
     const pcm = decodeG711(data, law)
+
+    /*
+     * 预缓冲期间不出声。
+     *
+     * <p>视频要攒够 {@link PREBUFFER_SECONDS} 才放行起播，而音频是直接排到
+     * Web Audio 时间轴上的 —— 若这里照排，用户会先听到 2 秒声音、
+     * 然后画面才开始，音画整体错位。宁可丢掉这 2 秒音频：
+     * 监控场景默认静音起播，等用户点音量时画面早已在播、后续音频自然对齐。
+     */
+    if (!this.prebuffered) {
+      // 起播后要从「那一块」重新锚定时间轴，否则累积的旧基准会让新块全被判迟到
+      this.audioClockBase = null
+      this.firstAudioPts = null
+      return
+    }
 
     if (!this.audioCtx) {
       const Ctx = window.AudioContext || window.webkitAudioContext
@@ -663,8 +769,10 @@ export default class WsFlvStream {
     this.destroyed = true
     if (this.retryTimer) clearTimeout(this.retryTimer)
     if (this.syncTimer) clearInterval(this.syncTimer)
+    if (this.prebufferTimer) clearTimeout(this.prebufferTimer)
     this.retryTimer = null
     this.syncTimer = null
+    this.prebufferTimer = null
 
     if (this.ws) {
       this.ws.onclose = null

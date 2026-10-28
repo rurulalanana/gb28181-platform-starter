@@ -75,4 +75,16 @@ public class StreamVo {
 
     /** 回放 / 下载时对应的录像文件路径。 */
     private String filePath;
+
+    /**
+     * 当前观众数（来自 ZLM 的读者计数，含录制器）。
+     *
+     * <p>运维排障时最常问的两个问题就是「这路到底有没有人在看」与
+     * 「能不能关」—— 把它暴露出来，看列表就知道，不必再去翻日志。
+     *
+     * <p>统计的是 <b>ZLM 侧</b>的读者：ws-flv / http-flv / hls /
+     * webrtc 等所有协议加录制器。实测对 ws-flv 是准确的
+     * （连着时 1、断开后 0），因此它就是「有没有人看」的权威来源。
+     */
+    private Integer readers;
 }

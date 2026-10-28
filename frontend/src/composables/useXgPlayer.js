@@ -194,7 +194,18 @@ export function useXgPlayer(containerRef) {
       url: objectUrl,
       // 回放走「伪点播」：只有 isLive=false 才会渲染进度条与时间插件
       isLive: !vod,
-      autoplay: true,
+      /*
+       * 直播<b>不</b>自动播放：改由 WsFlvStream 攒够预缓冲后主动调 play()。
+       *
+       * <p>原来这里是 {@code true}，浏览器一看到有数据就开播 —— 而那时
+       * buffer 里往往只有 0.1 秒，任何网络抖动都会 waiting，
+       * 用户看到的就是「播两秒卡一下」。预缓冲逻辑见
+       * {@code WsFlvStream.PREBUFFER_SECONDS}。
+       *
+       * <p>回放（vod）保持自动播放：它的数据来自 MP4 文件、按需 Range 拉取，
+       * 不存在「到达速率跟不上」的问题，没有预缓冲的必要。
+       */
+      autoplay: !!vod,
       // 直播默认静音：浏览器只允许静音自动播放；点音量按钮即可出声。
       // xgplayer 的顶层配置项是 autoplayMuted（不是 muted）。
       autoplayMuted: true,
