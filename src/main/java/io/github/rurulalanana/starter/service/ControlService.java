@@ -5,6 +5,11 @@ import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpBuilder;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.PtzEncoder;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.deviceaccess.DeviceAccessProvider;
+
+import io.github.rurulalanana.deviceaccess.DeviceContext;
+import io.github.rurulalanana.deviceaccess.DeviceKind;
+import io.github.rurulalanana.starter.entity.GbDevice;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -31,9 +36,19 @@ public class ControlService {
     private static final int DEFAULT_ADDRESS = 1;
     /** 辅助开关编号：雨刷固定为 1（标准未定义，业界惯例）。 */
     private static final int WIPER_SWITCH_ID = 1;
+    /**
+     * 转给厂商 SDK 的云台速度（统一 0~255 口径）。
+     *
+     * <p>取中上值 5 而非满速：SDK 的方向控制是「按住就走」的连续动作，
+     * 满速下轻微超调就会把机位带到画面外侧，而界面上的方向键本来就是
+     * 点一下走一点。国标侧默认也是 129（中值），两边口径保持一致。
+     */
+    private static final int PTZ_SDK_SPEED = 129;
 
     private final Gb28181SipClientProvider clientProvider;
     private final DeviceService deviceService;
+    /** 非国标设备的接入实现（大华 SDK 等）；国标设备不走这里。 */
+    private final DeviceAccessRegistry accessRegistry;
 
     private Gb28181SipClient client() {
         Gb28181SipClient client = clientProvider.client();
@@ -84,9 +99,22 @@ public class ControlService {
      *
      * <p>XML 由 {@code xmlBuilder} 用<b>通道编码</b>构造（保证 {@code <DeviceID>}
      * 符合规范），SIP 层用<b>设备编码</b>寻址。
+     *
+     * <p><b>这里是唯一的下行出口</b>：所有控制类接口（云台、预置位、
+     * 录像控制、布撤防、重启…）最终都经过本方法。因此非国标设备的分流
+     * 只需要在这一点上判断 —— 不需要在每个 {@code public} 方法里写 if。
+     * 放在调用方逐个判断会让遗漏成为必然（新增一个命令就忘了处理）。
      */
     private void sendControl(String channelId, java.util.function.Function<String, String> xmlBuilder) {
         Target t = target(channelId);
+        // 非国标设备没有 MANSCDP，交回对应 provider 自己处理
+        DeviceAccessProvider p = providerOf(t.sipTarget());
+        if (p != null) {
+            // 目前只有云台类命令在 SDK 侧有实现；其余命令显式拒绝，
+            // 而不是静默丢弃 —— 静默失败会让用户以为「点了没反应」。
+            throw BizException.badRequest("该设备通过 " + p.kind().code()
+                    + " 接入，此控制命令暂未适配；请在设备本体上操作");
+        }
         client().sendMessage(t.sipTarget(), xmlBuilder.apply(t.deviceId()));
     }
 
@@ -95,11 +123,115 @@ public class ControlService {
      *
      * <p>PTZ 命令码由 {@link PtzEncoder} 生成，与 {@code <DeviceID>} 无关，
      * 因此只需保证 SIP 层寻址正确、{@code <DeviceID>} 写通道编码。
+     *
+     * <p>非国标设备（大华 SDK）在这里分流：SDK 的方向控制是独立 API，
+     * 没有 PTZCmd 字节串的概念，不能再往下走 MANSCDP 分支。
      */
     private void sendPtz(String channelId, String ptzCmd) {
         Target t = target(channelId);
+        DeviceAccessProvider p = providerOf(t.sipTarget());
+        if (p != null) {
+            String dir = ptzCmdToDirection(ptzCmd);
+            p.ptz(contextOf(t.sipTarget()), t.deviceId(), dir, PTZ_SDK_SPEED);
+            return;
+        }
         client().sendMessage(t.sipTarget(),
                 ManscdpBuilder.ptzControl(client().nextSn(), t.deviceId(), ptzCmd));
+    }
+
+    /**
+     * 取该设备对应的接入实现；国标设备返回 {@code null}（走原生链路）。
+     *
+     * <p>先按「设备编码」查，查不到再按通道反查所属设备 —— 与 {@link #target}
+     * 的回退口径保持一致，否则「通道编码传进来、设备编码与之不同」的场景会
+     * 被判成国标设备而往 SIP 里发。
+     */
+    private DeviceAccessProvider providerOf(String deviceId) {
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            String owner = deviceService.deviceIdOfChannel(deviceId);
+            device = owner == null ? null : deviceService.findDevice(owner);
+        }
+        if (device == null) {
+            return null;
+        }
+        DeviceKind kind = DeviceKind.of(device.getSource());
+        return accessRegistry.provider(kind).orElse(null);
+    }
+
+    /** 设备记录 → 接入上下文（不打印密码，见 {@link DeviceContext#toString()}）。 */
+    private DeviceContext contextOf(String deviceId) {
+        GbDevice d = deviceService.findDevice(deviceId);
+        if (d == null) {
+            String owner = deviceService.deviceIdOfChannel(deviceId);
+            d = owner == null ? null : deviceService.findDevice(owner);
+        }
+        if (d == null) {
+            throw BizException.notFound("设备不存在：" + deviceId);
+        }
+        return new DeviceContext(d.getDeviceId(), d.getRemoteIp(),
+                d.getRemotePort() == null ? 0 : d.getRemotePort(),
+                d.getUsername(), d.getPassword(),
+                d.getChannelCount() == null ? 0 : d.getChannelCount());
+    }
+
+    /**
+     * 把 PTZ 命令码翻回方向词。
+     *
+     * <p>{@link PtzEncoder} 输出的是 GB 规范的 <b>8 字节十六进制串</b>：
+     * <pre>
+     *   A5 | 0F | 地址低8 | 指令码 | 数据1 | 数据2 | 数据3+地址高4 | 校验
+     *   下标0  2      4        6        8       10        12          14
+     * </pre>
+     * 方向位与变倍位都在<b>指令码</b>（hex 下标 6~7）里，按位组合：
+     * <ul>
+     *   <li>{@code 0x01} 右、{@code 0x02} 左、{@code 0x04} 下、{@code 0x08} 上</li>
+     *   <li>{@code 0x10} 变倍放大、{@code 0x20} 变倍缩小</li>
+     *   <li>{@code 0x00} 停止</li>
+     * </ul>
+     * 方向可以叠加（如 {@code 0x09} = 上 + 右），因此这里拼成
+     * {@code upright} 这类组合词，而不是只取一个方向 —— 丢了半个方向会让
+     * 斜向操作在 SDK 侧变成纯直行，用户立刻能感觉到「按了斜着不走」。
+     *
+     * <p>与其在编码侧再开一套「语义化 API」，不如在这里按位反解：
+     * 规则只有一张位表，复制两份反而会走偏。
+     */
+    private static String ptzCmdToDirection(String hex) {
+        if (hex == null || hex.isBlank()) {
+            return "stop";
+        }
+        try {
+            String h = hex.trim().replace("0x", "").replace(" ", "").replace("-", "");
+            if (h.length() < 8) {
+                return "stop";
+            }
+            int cmd = Integer.parseInt(h.substring(6, 8), 16);
+            if (cmd == 0) {
+                return "stop";
+            }
+            if ((cmd & PtzEncoder.ZOOM_IN) != 0) {
+                return "zoomin";
+            }
+            if ((cmd & PtzEncoder.ZOOM_OUT) != 0) {
+                return "zoomout";
+            }
+            StringBuilder sb = new StringBuilder();
+            if ((cmd & PtzEncoder.UP) != 0) {
+                sb.append("up");
+            } else if ((cmd & PtzEncoder.DOWN) != 0) {
+                sb.append("down");
+            }
+            if ((cmd & PtzEncoder.LEFT) != 0) {
+                sb.append("left");
+            } else if ((cmd & PtzEncoder.RIGHT) != 0) {
+                sb.append("right");
+            }
+            return sb.length() == 0 ? "stop" : sb.toString();
+        } catch (RuntimeException e) {
+            // 解析不了就按「停」—— 比随便猜一个方向安全
+            log.debug("无法从 PTZ 命令码反解方向，按 stop 处理: {}", hex);
+            return "stop";
+        }
     }
 
     // ==================== 云台 ====================

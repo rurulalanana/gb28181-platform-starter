@@ -20,6 +20,7 @@ import io.github.rurulalanana.starter.mapper.GbDeviceGroupMapper;
 import io.github.rurulalanana.starter.service.ChannelRecordPolicy;
 import io.github.rurulalanana.starter.service.ControlService;
 import io.github.rurulalanana.starter.service.DeviceCollectService;
+import io.github.rurulalanana.starter.service.DeviceProvisionService;
 import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.PresetService;
 import io.github.rurulalanana.starter.service.RecordService;
@@ -92,8 +93,48 @@ public class DeviceController {
     private final ChannelRecordPolicy recordPolicy;
     private final GbDeviceGroupMapper groupMapper;
     private final Gb28181Properties props;
+    /** 非国标设备（SDK 直连）的纳管与目录同步。 */
+    private final DeviceProvisionService provisionService;
 
     // ==================== 设备 ====================
+
+    /**
+     * 纳管一台 SDK 直连设备（大华 NetSDK）。
+     *
+     * <p><b>为什么需要这个接口</b>：国标设备的 {@code gb_device} 行是设备
+     * REGISTER 推上来的，平台从不主动建；而 SDK 直连设备不会注册，
+     * 必须由运维录入地址与凭据。
+     *
+     * <p>录入后它就是一条普通的 {@code gb_device} 行（{@code source=dahua}），
+     * 设备列表、通道列表、点播、云台、录像接口全部照旧可用 ——
+     * 前端不需要区分类型。
+     */
+    @PostMapping("/adddahua")
+    public ApiResponse<DeviceVo> addDahua(@RequestParam String serial,
+                                          @RequestParam String host,
+                                          @RequestParam(defaultValue = "37777") Integer port,
+                                          @RequestParam String username,
+                                          @RequestParam String password,
+                                          @RequestParam(required = false) String name) {
+        StpUtil.checkLogin();
+        GbDevice d = provisionService.addDahua(serial, host,
+                port == null ? 37777 : port, username, password, name);
+        return ApiResponse.ok(deviceView(d));
+    }
+
+    /**
+     * 探测 SDK 直连设备并同步通道目录。
+     *
+     * <p>国标设备走 {@link #fetchCatalog}（下发 Catalog 查询，等设备应答）；
+     * SDK 设备走本接口（平台主动去问，同步返回结果）。
+     */
+    @PostMapping("/refreshsdk")
+    public ApiResponse<FetchResultVo> refreshSdk(@RequestParam String serial) {
+        StpUtil.checkLogin();
+        int channels = provisionService.refreshCatalog(serial);
+        return ApiResponse.ok(FetchResultVo.ok(serial,
+                "已同步 " + channels + " 个通道"));
+    }
 
     /** 设备列表。 */
     @GetMapping("/list")

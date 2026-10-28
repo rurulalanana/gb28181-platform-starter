@@ -22,6 +22,12 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <sip.module.version>1.0.14</sip.module.version>
     <zlm.module.version>1.0.10</zlm.module.version>
+    <!-- 大华设备接入（厂商无关契约 + NetSDK 实现）。
+         命名约定 sdk-<厂商>：将来接海康/宇视就是平级的 sdk-hikvision / sdk-uniview。 -->
+    <sdk-dahua.module.version>1.0.0</sdk-dahua.module.version>
+    <!-- 大华 NetSDK 的 Java 部分，需先 install 到本地仓库（不在中央仓库）。
+         版本必须与 sdk-dahua 里的一致，否则运行时会缺类。 -->
+    <netsdk.version>3.061</netsdk.version>
     <mybatis-plus.version>3.5.11</mybatis-plus.version>
     <aws.sdk.version>2.28.11</aws.sdk.version>
   </properties>
@@ -40,6 +46,40 @@
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>gb28181-sip</artifactId>
       <version>${sip.module.version}</version>
+    </dependency>
+
+    <!-- 大华接入：契约（deviceaccess 包）+ 厂商实现（dahua 包）。
+         平台只用其中的 deviceaccess 包（接口），不直接引用 dahua 包的类；
+         netsdk / jna 在该模块里是 provided，不会传递到这里 ——
+         因此没装 SDK 的机器也能正常编译与运行国标链路。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>sdk-dahua</artifactId>
+      <version>${sdk-dahua.module.version}</version>
+    </dependency>
+
+    <!--
+      大华 NetSDK 的 Java 部分（class 文件）。
+
+      为什么必须在这里显式声明：sdk-dahua 模块里 netsdk 是 provided，
+      不传递；但大华 provider 在运行时会直接调用 com.netsdk.lib.*，
+      缺了会在第一次用大华设备时抛 NoClassDefFoundError。
+
+      用 compile 而不是 provided：本平台交付形态是单 jar 部署
+      （前端产物都打进 jar 了），运维不应再手工摆 classpath。
+
+      **原生库不在这里** —— 它们由 sdk-dahua 的 jar 按 profile 携带
+      （linux64/*.so 或 win64/*.dll），见 sdk-dahua/docs/原生库打包.md。
+      本依赖只提供 4.7 MB 的 class，不含任何 .so/.dll。
+
+      获取方式（不在中央仓库）：见 docs/大华SDK接入.md §8。
+      未安装时构建会失败 —— 需要大华功能就必须先装；
+      不需要时把本依赖与 sdk-dahua 依赖一起注释掉即可。
+    -->
+    <dependency>
+      <groupId>com.netsdk</groupId>
+      <artifactId>netsdk</artifactId>
+      <version>${netsdk.version}</version>
     </dependency>
 
     <!-- 流媒体服务模块（内嵌 ZLMediaKit，自带各平台原生库） -->

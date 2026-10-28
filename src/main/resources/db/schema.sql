@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS gb_device (
     media_transport_mode VARCHAR(8) DEFAULT 'passive',
     stream_index       VARCHAR(32)  DEFAULT 'auto',
     charset            VARCHAR(16)  DEFAULT 'GB2312',
+    username           VARCHAR(64),
     password           VARCHAR(64),
     catalog_interval   INTEGER      DEFAULT 3600,
     subscribe_interval INTEGER      DEFAULT 0,
@@ -509,7 +510,10 @@ ALTER TABLE gb_operation_log ADD COLUMN IF NOT EXISTS params VARCHAR(1024);
 ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS media_transport_mode VARCHAR(8) DEFAULT 'passive';
 -- 老库升级：补充码流索引列（点播时选择主/子码流）
 ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS stream_index VARCHAR(32) DEFAULT 'auto';
-
+-- 老库升级：SDK 直连（大华 NetSDK）需要的登录用户名。
+-- 国标 Digest 认证只校验密码，所以这一列一直是空的；SDK 登录两个都必填。
+-- source 字段复用既有的 gb_device.source：'gb28181'(或历史值 'device') / 'dahua'。
+ALTER TABLE gb_device ADD COLUMN IF NOT EXISTS username VARCHAR(64);
 -- 老库升级：级联上行推流的传输方式（auto 跟随上级 SDP / tcp / udp）
 -- 上级 INVITE 声明 UDP 但它那侧 UDP 入站被防火墙拦时，改成 tcp 即可，
 -- 否则表现是「本端日志一切正常、上级一直报 none rtp data receive」。

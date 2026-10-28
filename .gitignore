@@ -30,3 +30,13 @@ src/main/resources/application-*.local.yaml
 
 # Playwright 排障脚本（本地临时目录，不入库）
 .tmp-*/
+
+# ============ 第三方厂商 SDK（严禁入库） ============
+# 大华 NetSDK 的 Java 源码 + 原生库（libdhnetsdk.so / *.dll）受厂商许可约束，
+# 不允许随公开仓库分发。本仓库是公开的，因此整个 sdk/ 目录一律不入库。
+#
+# 【2026-10 起 SDK 已迁到 sdk-dahua 仓库】本仓库不再存放 SDK：
+#   原生库 → sdk-dahua/lib/<platform>/（按 profile 打进 sdk-dahua 的 jar）
+#   打包说明 → sdk-dahua/docs/原生库打包.md
+# 本规则保留是为了拦住历史残留（旧的工作副本里可能还有 sdk/）。
+sdk/

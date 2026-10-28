@@ -85,6 +85,18 @@ public class GbDevice implements Serializable {
     private String streamIndex;
 
     private String charset;
+
+    /**
+     * 设备登录用户名。
+     *
+     * <p><b>为什么需要单独一列</b>：国标设备的 Digest 认证只校验密码
+     * （各厂商 username 填法不一，强制校验会误拦设备），所以这里一直是空的；
+     * 而 SDK 直连（大华 NetSDK）的登录是<b>用户名 + 密码</b>必填，
+     * 塞进 {@code name}/{@code extra} 都会让语义变浑。
+     */
+    private String username;
+
+    /** 设备登录密码（国标为 SIP 接入密码；SDK 直连为设备密码）。 */
     private String password;
 
     /** 目录抓取周期（秒），0 表示不周期抓取。 */
