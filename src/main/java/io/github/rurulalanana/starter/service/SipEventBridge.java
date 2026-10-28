@@ -62,23 +62,54 @@ public class SipEventBridge implements SipCallback {
 
     // ==================== 注册 / 心跳 ====================
 
+    /**
+     * 这个来源值不值得继续打交道。
+     *
+     * <p>SIP 端口开在公网后，扫描器会不断发 REGISTER / MESSAGE。它们的编号是
+     * 随手编的（{@code .} / {@code 059} / {@code 9999}），而平台原来会接着做
+     * 「自动采集」——向那个公网 IP 发 Catalog/DeviceInfo/DeviceStatus 的 MESSAGE，
+     * 对方不答应，每条都要等满 32 秒事务超时才罢休。
+     *
+     * <p><b>为什么不直接用 {@code registry} 判断</b>：注册表已经把那台「设备」
+     * 当合法来源收进去了，用它判断等于没判。
+     *
+     * <p><b>只在格式不合法时才查库</b>（合法 20 位编码直接放行）：扫描器每分钟
+     * 才几次，一次带索引的单行查询可忽略；而合法设备完全不增加开销。
+     * 这样手工添加的自定义编号（库里已有记录）仍然会被采集。
+     */
+    private boolean acceptable(String deviceId) {
+        if (io.github.rurulalanana.gb28181.sip.constant.GbId.isValidDeviceId(deviceId)) {
+            return true;
+        }
+        boolean known = deviceService.findDevice(deviceId) != null;
+        if (!known) {
+            log.debug("跳过非法设备编码（公网扫描器常见）: {}", deviceId);
+        }
+        return known;
+    }
+
     @Override
     public void onRegister(RegisterEvent event) {
         String deviceId = event.getDeviceId();
         asyncExecutor.run("设备注册落库", () -> deviceService.onRegister(event));
-        // 注册完成后自动采集：目录/信息/状态
         if (event.isUnregistered()) {
             // 注销后清节流，下次上线立即重新采集
             collectService.forget(deviceId);
             // 同时丢弃未收口的目录批次，避免旧数据被当成新一轮结果
             catalogPager.forget(deviceId);
-        } else {
+            return;
+        }
+        // 注册完成后自动采集：目录/信息/状态
+        if (acceptable(deviceId)) {
             collectService.collectOnOnline(deviceId, false);
         }
     }
 
     @Override
     public void onKeepAlive(KeepAliveEvent event) {
+        if (!acceptable(event.getDeviceId())) {
+            return;
+        }
         // 平台重启后注册表为空，靠心跳自愈重建会话，否则后续下行信令全部失败
         boolean healed = registryHealer.healOnKeepAlive(event);
         asyncExecutor.run("设备心跳落库", () -> deviceService.onKeepAlive(event));

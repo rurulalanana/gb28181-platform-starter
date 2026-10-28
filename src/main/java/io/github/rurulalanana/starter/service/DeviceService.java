@@ -200,6 +200,34 @@ public class DeviceService {
 
     // ==================== 注册 / 心跳 ====================
 
+    /**
+     * 未知设备是否可以落库。
+     *
+     * <p><b>为什么必须有这道闸</b>：SIP 端口开在公网后，扫描器会不停地往这里
+     * 发 REGISTER（实测一天几十次，来源分布在各国的云主机）。它们用的是
+     * 随手编的编号（{@code .} / {@code 059} / {@code 9999} / {@code 1000}），
+     * 而我们之前<b>照单全收</b>，于是设备列表里混进一堆指向公网 IP 的假设备，
+     * 在线统计被稀释，目录采集还会主动向这些 IP 发 MESSAGE（拿不到应答，
+     * 每台每次都要等满 32 秒事务超时）。
+     *
+     * <p>判据用 GB/T 28181 附录 E 的编码规则（20 位数字）—— 真实设备不可能
+     * 不满足。
+     *
+     * <p><b>只拦「新建」</b>：库里已有的记录一律放行，这样手工添加的自定义编号
+     * （{@code source} 不是 {@code device} 的历史数据）不会被这次收紧锁死，
+     * 也不会因为规则的引入把在用的设备踢出去。
+     */
+    private boolean mayCreate(String deviceId, GbDevice existing) {
+        if (existing != null) {
+            return true;
+        }
+        boolean valid = io.github.rurulalanana.gb28181.sip.constant.GbId.isValidDeviceId(deviceId);
+        if (!valid) {
+            log.debug("忽略非法设备编码的注册/心跳（公网扫描器常见）: {}", deviceId);
+        }
+        return valid;
+    }
+
     /** 设备注册或续注册。 */
     @Transactional
     public void onRegister(RegisterEvent event) {
@@ -209,6 +237,9 @@ public class DeviceService {
         }
         boolean unregister = event.isUnregistered();
         GbDevice device = findDevice(deviceId);
+        if (!mayCreate(deviceId, device)) {
+            return;
+        }
         String oldStatus = device == null ? null : device.getStatus();
         if (device == null) {
             device = new GbDevice();
@@ -258,6 +289,9 @@ public class DeviceService {
             return;
         }
         GbDevice device = findDevice(deviceId);
+        if (!mayCreate(deviceId, device)) {
+            return;
+        }
         if (device == null) {
             // 心跳先于注册到达（平台重启后设备不会重新 REGISTER，只会继续心跳）：
             // 直接建一条完整记录，地址、注册时间、心跳时间都要一并写入，

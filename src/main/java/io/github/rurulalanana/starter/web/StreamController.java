@@ -246,12 +246,24 @@ public class StreamController {
         }
     }
 
-    /** 按 ZLM 流名查会话（兼容传裸通道编号）。 */
+    /**
+     * 按会话键 / ZLM 流名 / 裸通道编码查会话。
+     *
+     * <p><b>三种都要认</b>：{@code /stream/start} 与 {@code /stream/list} 返回给
+     * 前端的 {@code streamId} 是<b>会话键</b> {@code <设备编码>/<通道编码>}，
+     * 调用方自然会把同一个值传给 {@code /stream/info}。原来这里只按
+     * 「通道编码」和「ZLM 流名」查，于是用接口自己吐出来的 streamId 回查
+     * 恒 404（实测 {@code 直播流不存在：3402…/3402…}），前后端对不上。
+     */
     private RtpSession findSessionByStreamId(String streamId) {
         if (streamId == null || streamId.isBlank()) {
             return null;
         }
-        RtpSession session = streamService.session(streamId);
+        RtpSession session = streamService.sessionByKey(streamId);
+        if (session != null) {
+            return session;
+        }
+        session = streamService.session(streamId);
         if (session != null) {
             return session;
         }

@@ -107,11 +107,21 @@ public class DecodeController {
         return sb.toString();
     }
 
+    /**
+     * 按会话键 / 裸通道编码 / ZLM 流名查会话。
+     *
+     * <p>与会话键对齐，理由同 {@code StreamController#findSessionByStreamId}：
+     * 接口对外给出的 streamId 就是会话键，回查必须认它。
+     */
     private RtpSession findSession(String streamId) {
         if (streamId == null || streamId.isBlank()) {
             return null;
         }
-        var session = streamService.session(streamId);
+        var session = streamService.sessionByKey(streamId);
+        if (session != null) {
+            return session;
+        }
+        session = streamService.session(streamId);
         if (session != null) {
             return session;
         }
