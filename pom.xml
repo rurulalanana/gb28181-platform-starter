@@ -17,6 +17,38 @@
   <name>gb28181-platform-starter</name>
   <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
 
+  <!--
+    随 sdk-dahua 仓库携带的本地 Maven 仓库，用于 com.netsdk:netsdk。
+
+    【为什么本模块也要声明】<repositories> 只沿 parent 继承，不沿聚合传递。
+    本模块的 parent 是 spring-boot-starter-parent，拿不到 sdk-dahua 里那份声明。
+    而本模块又需要 netsdk 的 class（大华 provider 运行时会调用 com.netsdk.lib.*），
+    缺了会在第一次用大华设备时抛 NoClassDefFoundError。
+
+    不声明会怎样：本地仓库里已经有 netsdk 了，但 Maven 通过 _remote.repositories
+    记着「这个构件来自 sdk-dahua-bundled」；本模块的仓库列表里没有它，
+    于是判定为「不可用」，报
+      Cannot access aliyun in offline mode and the artifact
+      com.netsdk:netsdk:jar:3.061 has not been downloaded from it before
+
+    路径是相对的（../sdk-dahua），与本项目「四个仓库并列」的布局一致。
+    单独 clone 本仓库本来就无法构建（还依赖 sip / sip-zlm / sdk-dahua），
+    因此不引入新的限制。
+  -->
+  <repositories>
+    <repository>
+      <id>sdk-dahua-bundled</id>
+      <name>sdk-dahua 随仓库携带的本地构件</name>
+      <url>file:///${project.basedir}/../sdk-dahua/lib/netsdk-repo</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
+  </repositories>
+
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
