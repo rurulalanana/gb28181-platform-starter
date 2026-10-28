@@ -365,6 +365,41 @@ export function useXgPlayer(containerRef) {
     media.addEventListener('volumechange', syncVolume)
     syncVolume()
 
+    /*
+     * 播放中途进入缓冲时，把状态切回「缓冲中…」。
+     *
+     * <p><b>为什么必须补这一段</b>：原来只有下面 `playing` 里置「播放中」，
+     * 之后再不更新。于是一旦中途重新缓冲（MSE 欠载、公网抖动），
+     * 状态角标仍写着「播放中」，而画面正中央转着播放器自己的加载圈 ——
+     * 两个指示互相矛盾，用户无法判断是「在播但卡了」还是「平台状态显示错了」。
+     *
+     * <p><b>为什么要 600ms 防抖</b>：`waiting` 在正常播放里也会零星触发
+     * （每次换片、每个 GOP 边界之后都可能来一下，几十毫秒即恢复）。
+     * 直接用会让角标在「播放中/缓冲中」之间高频闪烁，比不显示更糟。
+     * 只有真正卡住超过 600ms 才是用户需要知道的事。
+     *
+     * <p>`playing` 会再次触发（下面那个 handler 置回「播放中」），所以
+     * 这里不需要配套的恢复逻辑，只需在恢复时取消这个定时器。
+     */
+    let rebufferTimer = null
+    const cancelRebuffer = () => {
+      if (rebufferTimer) {
+        clearTimeout(rebufferTimer)
+        rebufferTimer = null
+      }
+    }
+    media.addEventListener('waiting', () => {
+      if (disposed) return
+      cancelRebuffer()
+      rebufferTimer = setTimeout(() => {
+        rebufferTimer = null
+        if (disposed) return
+        // 已暂停不是「缓冲」，那是用户/播放器有意停住
+        if (!media.paused) state.value = '缓冲中…'
+      }, 600)
+    })
+    media.addEventListener('playing', cancelRebuffer)
+
     p.on('playing', () => {
       if (disposed) return
       playing.value = true

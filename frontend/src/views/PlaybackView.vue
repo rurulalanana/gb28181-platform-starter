@@ -1165,32 +1165,54 @@ function addSeconds(timeStr, seconds) {
 }
 
 /**
- * 拖动/点击进度条定位。
+ * 拖动/点击进度条定位：发 SIP {@code INFO} 让设备自己跳。
  *
- * <h3>为什么不发设备的 npt 跳转</h3>
- * 标准附录 D 的 {@code PLAY RTSP/1.0 + Range: npt=<秒>-} 看着是正解，实测却不行：
- * 本次现场的下级平台（LiveGBS）对这条 INFO <b>回 200 OK 但不跳转</b> ——
- * SIP 层没有任何错误、抓包看报文完全合规，画面却一直往下播。
- * 用户看到的正是「点进度条毫无反应」。
+ * <h3>为什么可以直接发 npt</h3>
+ * 标准附录 D 的 {@code PLAY RTSP/1.0 + Range: npt=<秒>-} 就是正解，
+ * WVP-GB28181-pro 的 {@code playSeekCmd} 也是这么实现的（逐字对比过，
+ * 连 {@code Content-Type: application/MANSRTSP} 都一样）。
  *
- * <p>（同一通道的 PAUSE 是生效的：抓包可见设备停推、ZLM 缓冲区停止增长。
- * 所以不是 INFO 通道的问题，而是该设备不支持 npt 定位。）
+ * <p><b>之前这里改成「停流 + 重新 INVITE」是误判</b>：那时 INFO 的
+ * 对话框 tag 取反了（To 用了自己、From 用了对端），报文落在对话框之外，
+ * 设备宽容地回 200 OK 却不执行。修好 tag 之后 npt 一直是生效的，
+ * 只是没人回来改这里。
  *
- * <p>改用「按目标时间重新 INVITE」：它就是首次播放走的同一条路径，
- * 只是把 {@code t=} 的起点换成目标时刻，<b>必然生效</b>。
- * 代价是一次重新协商（约 2~3 秒），换来「点哪儿播哪儿」永远成立。
+ * <p>实测证据（同一次会话里发 {@code Range: npt=3600-}）：
+ * 画面 OSD 从 {@code 00:00:17} 直接跳到 {@code 01:00:18}，正好 +3600 秒。
+ *
+ * <p>与停流重开相比：
+ * <ul>
+ *   <li>耗时：INFO 是毫秒级；重新 INVITE 要 2~3 秒协商 + 设备重新起推</li>
+ *   <li>不中断：RTP 通道不断，进度条不会闪回 0</li>
+ *   <li>不打扰设备：不会反复拆建会话（部分设备有并发会话数限制）</li>
+ * </ul>
  */
 async function seekTo(sec) {
   const row = current.value
   if (!row) return
-  await restartAt(Math.max(0, Math.floor(Number(sec) || 0)))
+  const offset = Math.max(0, Math.floor(Number(sec) || 0))
+  try {
+    await playbackApi.control({
+      serial: serial.value,
+      code: code.value,
+      command: 'seek',
+      range: offset
+    })
+  } catch (e) {
+    //
+    // 设备不支持 npt（少数老型号）或会话已被回收：退回重新协商。
+    // 这只作为兜底 —— 正常设备走上面的 INFO 就行，不应该常走这里。
+    //
+    ElMessage.warning(e.message || '设备不支持跳转，正在按目标时间重新拉流…')
+    await restartAt(offset)
+  }
 }
 
 /**
- * 从本段第 {@code offsetSeconds} 秒重新开始播放。
+ * 从本段第 {@code offsetSeconds} 秒重新开始播放（停会话 → 重新 INVITE）。
  *
- * <p>停旧会话 → 带新起点重新 INVITE。用于拖动定位与「继续播放」：
- * 两者都需要设备真正移动到某个时刻，而唯一可靠的手段就是重新协商。
+ * <p>现在只作为<b>兜底路径</b>使用：设备不支持 npt、或媒体源已失效时。
+ * 正常的拖动定位与「继续播放」都走 SIP INFO，不再拆会话。
  */
 async function restartAt(offsetSeconds) {
   const row = current.value
@@ -1335,34 +1357,34 @@ async function control(command, extra = {}) {
 }
 
 /**
- * 继续播放：<b>停掉旧会话再整段重开</b>，而不是只发一条 SIP PLAY。
+ * 继续播放：优先发 SIP {@code PLAY npt=now-}，失败再重新协商。
  *
- * <p>为什么不能「发条 PLAY 让它继续」：暂停 = 向设备发 SIP PAUSE，
- * 设备立刻停推 RTP。而 ZLM 对没有数据的 RTP 会话有硬超时
- * （日志里的 {@code RtpProcess timeout}，实测十几秒），一旦超时就<b>注销媒体源</b>。
- * 此后设备即使被要求继续推，平台侧也不再有可用的媒体源 ——
- * 表现就是「点继续以后画面动几秒就卡死」，而日志里没有任何错误。
+ * <p><b>为什么先试 INFO</b>：「继续」本质上只是让设备接着推，
+ * 发一条 INFO 是毫秒级的；而停会话 + 重新 INVITE 要 2~3 秒协商，
+ * 用户按下「继续」后要盯着黑屏，体验差距很明显。
+ * PAUSE / PLAY 的对话框 tag 已实测正确，正常设备会立即续推。
  *
- * <p>所以这里走最短的可靠路径：停会话 → 重新 INVITE → 跳回原进度。
- * 代价是多几秒重新协商，换来的是「继续」永远可用；
- * 相比赌「媒体源还活着」，这个代价值得付。
+ * <p><b>为什么要留重开兜底</b>：暂停期间设备停推 RTP，ZLM 对没有数据的
+ * RTP 会话有硬超时（实测十几秒到 100 秒），一过就注销媒体源 ——
+ * 此后设备即使续推，平台侧也没有可用的源。这种情况 INFO 会「发成功但
+ * 没画面」，由播放器的看门狗（12 秒无关键帧 / 20 秒无字节）
+ * 触发 {@code onStall} → {@link rebuildStream} 重新协商，用户感知只是慢几秒。
  *
- * <p>进度要<b>先记下来</b>：重开会把 position 归零。
+ * <p>所以这里不再主动拆会话：拆会话本身就是「体验很差」的来源。
  */
 async function resumePlayback() {
   const row = current.value
   if (!row) return
-  /*
-   * 暂停后「继续」必须重新协商，不能只发一条 SIP PLAY。
-   *
-   * <p>暂停 = 向设备发 PAUSE，设备立刻停推 RTP；而 ZLM 对没有数据的 RTP
-   * 会话有硬超时（实测约 100 秒），一过就<b>注销媒体源</b>。此后设备即使
-   * 被要求继续推，平台侧也没有可用的源 —— 表现是「点继续后画面不再更新」，
-   * 日志里只有一行 {@code RtpProcess timeout}。
-   *
-   * <p>所以走与拖动定位同一条可靠路径：按当前进度重新 INVITE。
-   */
-  await restartAt(Math.floor(player.position.value || 0))
+  try {
+    await playbackApi.control({
+      serial: serial.value,
+      code: code.value,
+      command: 'play'   // 不带 range → 后端发 PLAY npt=now-（从当前位置续推）
+    })
+  } catch (e) {
+    ElMessage.warning(e.message || '续播指令失败，正在重新拉流…')
+    await restartAt(Math.floor(player.position.value || 0))
+  }
 }
 
 /* ==================== 进度显示 ==================== */

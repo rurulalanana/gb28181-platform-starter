@@ -288,21 +288,26 @@
         <div class="preview-stage">
           <div class="video-box">
             <div ref="videoContainer" class="video-container" />
+            <!--
+              播放状态角标：叠在画面左上角。
+
+              【为什么从右栏挪进来】
+              原来它在右侧云台面板顶部占一行（状态标签 + 分隔线，共约 65px）。
+              而右栏高度决定整个弹窗的行高（两栏等高），那 65px 全部
+              变成了视频上下的黑边 —— 为了一个不到 40px 标签，画面矮了一圈。
+              挪进画面后，它与视频同域：“这路流现在什么状态”本来就是在
+              说画面本身，而不是云台面板的属性。
+
+              【视觉】暗底胶囊 + 彩色圆点，不遮挡画面且不挡鼠标（pointer-events: none）。
+              播放中低调（绿），中间态呼吸（琥珀），异常醒目（红）。
+            -->
+            <div class="video-state" :class="`is-${stateType}`">
+              <span class="video-state-dot" />
+              <span class="video-state-text">{{ state }}</span>
+            </div>
           </div>
         </div>
         <div class="preview-side">
-          <!--
-            状态 + 播放方式。
-            el-tag 与 el-select 的高度不同（tag 24px / select 32px），
-            默认基线对齐会一高一低；这里统一用 align-items: center 居中，
-            并给右侧留出滚动条宽度的补偿，避免下拉框贴住滚动条。
-          -->
-          <div class="preview-status">
-            <el-tag :type="stateType" size="small" effect="dark" class="status-tag">
-              {{ state }}
-            </el-tag>
-          </div>
-          <div class="preview-sep" />
           <!--
             云台面板只在通道被标为可云台（球机 / 半球 / 遥控枪机）时提供。
             类型未知或固定枪机时不显示 —— 面板里的方向键对固定枪机无效，
@@ -1148,6 +1153,12 @@ onUnmounted(() => player.stop())
 .preview-side {
   border-left: 1px solid var(--border-color);
   padding-left: 18px;
+  /*
+   * 顶部留白：状态角标挪进画面后，右栏第一个元素就是云台方向盘，
+   * 不加这一行它会紧贴弹窗 body 的上边缘，看起来像被裁掉一截。
+   * 只留 8px：这里每多 1px，视频上下黑边各多 0.5px（两栏等高）。
+   */
+  padding-top: 8px;
   min-height: 0;
   /*
    * 兜底上限：只在视口真的装不下时才出滚动条。
@@ -1228,55 +1239,68 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 状态行：状态标签 + 播放方式下拉。
+ * 播放状态角标：叠在画面左上角（替代原先占右栏一行的状态标签）。
  *
- * 【为什么要显式给高度和 padding】
- * el-tag（24px）与 el-select（32px）高度不同，只写 align-items: center
- * 时两者在行内居中但整行高度随内容跳动，和下面的内容贴得很紧。
- * 这里固定 32px 行高（与 select 一致）、上下各留 6px，
- * 标签和下拉框就在同一条水平线上，也与下方分隔线拉开距离。
+ * 用 absolute 而不是把标签塞进播放器控件：xgplayer 的控制栏在底部，
+ * 左上角是它的空白区，叠在这里不会与任何按钮抢位置；
+ * pointer-events: none 保证它不拦截画面上的点击 / 双击全屏。
+ * 暗底半透明 + 细描边：亮画面上不被吞掉，暗画面上也不突兀。
  */
-.preview-status {
-  display: flex;
+.video-state {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 3;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 32px;
-  padding: 6px 0 12px;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  background: rgba(8, 13, 20, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  pointer-events: none;
 }
 
-/* 状态标签：固定宽度，避免文案变化（播放中 / 容错重建…）时左右抖动 */
-.status-tag {
+.video-state-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-state-dot {
   flex: 0 0 auto;
-  min-width: 76px;
-  justify-content: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* 默认灰：没有明确语义的过渡文案（如「已停止」）也能看到状态点在 */
+  background: rgba(255, 255, 255, 0.45);
 }
 
 /*
- * 播放方式下拉：吃掉剩余宽度。
- * 右侧留 2px 补偿滚动条（scrollbar-width: thin 时约 8px 中已含在 padding 里），
- * 避免下拉框贴着滚动条边缘。
+ * 三档语义色，与 usePlayerStateType 的返回值一一对应。
+ * 只给圆点上色、文案保持白：整块变绿/变红会让角标太抢眼，盖过画面本身。
  */
-.proto-select {
-  flex: 1;
-  min-width: 0;
-  margin-right: 2px;
+.video-state.is-success .video-state-dot {
+  background: #52d47a;
 }
 
-/* 轻量分隔线：比 el-divider 的上下 24px 紧凑得多 */
-.preview-sep {
-  height: 1px;
-  background: var(--border-color);
-  margin-bottom: 14px;
+/* 中间态（连接中 / 缓冲中 / 协商中…）：琥珀 + 呼吸，表达「正在等」 */
+.video-state.is-info .video-state-dot {
+  background: #f0b64a;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.video-state.is-danger .video-state-dot {
+  background: #ff7875;
 }
 
 /*
  * 云台面板在预览弹窗里空间有限：把共享组件默认的 16px 间距收一点。
  * （只影响本弹窗，LiveView 的右侧面板保持原样。）
- *
- * 取 18px 而不是更小的值：右栏高度跟视频齐平（约 474px），
- * 折叠项都收起时内容约 415px，底部本来就留给展开折叠项；
- * 间距再压下去反而会显得元素粘在一起。
  */
 .preview-side :deep(.ptz-panel) {
   gap: 18px;
