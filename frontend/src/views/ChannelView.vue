@@ -215,10 +215,17 @@
             <el-button link type="primary" @click="preview(row)">
               <el-icon><VideoPlay /></el-icon> 播放
             </el-button>
+            <!--
+              「停止」只在通道确实有推流时出现。
+              原来是一直显示、无流时置灰 —— 但十几个通道里通常只有一两路在推，
+              满屏灰按钮会让人以为功能坏了（点了没反应的按钮比没有按钮更糟）。
+              判据用 streamId：后端在开流时写入、会话关闭时清除、
+              平台重启时由 resetStaleChannelStates() 收敛，不会长期残留。
+            -->
             <el-button
+              v-if="row.streamId"
               link
               type="primary"
-              :disabled="!row.streamId"
               title="停止该通道的推流"
               @click="stopStream(row)"
             >
@@ -587,6 +594,14 @@ async function startPlay() {
       return
     }
   }
+  /*
+   * 会话已建立，同步到行上，让操作列的「停止」立刻出现。
+   *
+   * <p>不写这一行的话，用户点「播放」后设备已经在推流，但列表里没有停止入口 ——
+   * 只有刷新页面才看得到（列表数据来自 channellist，不轮询）。
+   * 那条路上用户会以为「停不了」，只能去实时预览页找。
+   */
+  row.streamId = streamId
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
   if (!hasPlayUrl(proto.value, urls)) {
     ElMessage.error('未获取到播放地址')
@@ -879,9 +894,16 @@ async function toggleOndemand(row, enable) {
 /** 停止该通道的推流。 */
 async function stopStream(row) {
   try {
-    await streamApi.stop({ serial: row.deviceId, code: row.id })
+    const res = await streamApi.stop({ serial: row.deviceId, code: row.id })
+    // 无论后端有没有真的停掉会话，本行都不该再显示「停止」：
+    // ok=false 表示本来就没有会话（例如被 45 秒空闲巡检关掉了，
+    // 而列表数据不轮询，本地还以为在推流）。
     row.streamId = null
-    ElMessage.success('已停止推流')
+    if (res?.ok === false) {
+      ElMessage.info('该通道当前没有推流')
+    } else {
+      ElMessage.success('已停止推流')
+    }
   } catch (e) {
     ElMessage.error(e.message || '停止失败')
   }
@@ -1066,17 +1088,20 @@ onUnmounted(() => player.stop())
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 24px;
   /*
-   * 两栏等高（grid 默认 stretch）。
+   * 两栏等高，且行高必须<b>只由左栏（视频）决定</b>。
    *
-   * 右栏内容（折叠项都收起时约 382px）本来就比视频（约 474px）矮，
-   * 让它们等高后：
-   *   - 右栏高度 = 视频高度，是整数，不会有「内容 382 / 容器 382 却报
-   *     383」的 subpixel 假溢出（那种情况滚动条会一直挂着，很碍眼）；
-   *   - 两栏底边对齐，视觉上成一块整体。
+   * <p>grid 的行高默认取「两栏内容高度的较大值」。右栏是云台面板，
+   * 内容高度随预置位数量变化（3 个预置位就能到 641px，比 16:9 的视频
+   * 474px 高出一截）—— 一旦它成为较大值，行高就被拉高，视频按自己的
+   * 16:9 停在顶部，<b>下方凭空多出 167px 空白</b>，视觉上像播放器坏了。
    *
-   * 之前设 align-items: start 是因为右栏那时有 678px（折叠项全展开）、
-   * 会把整行撑高、视频下方留白。现在折叠项默认收起，不存在这个问题；
-   * 用户手动展开导致右栏变高时，由 .preview-side 的 overflow 在栏内滚动。
+   * <p>只靠 {@code .preview-side} 的 {@code overflow-y: auto} 解决不了：
+   * 容器高度本身来自自己的内容时，{@code scrollHeight == clientHeight}，
+   * 滚动条永远不会启用（实测就是这样，右栏从没真正滚动过）。
+   * 真正去掉它对行高的贡献靠下面右栏的 {@code contain: size}。
+   *
+   * <p>{@code stretch} 仍要保留：行高定下来之后，右栏要拉伸到那个高度，
+   * 它内部的 overflow 才有意义（否则右栏只有内容高，滚动同样不生效）。
    */
   align-items: stretch;
   /*
@@ -1124,13 +1149,25 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 右栏：宽度固定，高度跟随行高（= 视频高度）。
- * 展开折叠项后内容变长时在本栏内滚动，不会撑大弹窗。
+ * 右栏：宽度固定，高度跟着视频走（grid 拉伸到行高），内容超出就在栏内滚动。
+ *
+ * 【contain: size 是这里的关键】
+ * 它告诉浏览器「这个元素的尺寸不参考自身内容」。于是右栏对网格行高的
+ * 贡献为 0，行高只剩左栏视频那一段：
+ *   无 contain 时：右栏内容 641px → 行高 641px，视频 474px，下方空 167px；
+ *   有 contain 时：行高 474px → 右栏拉成 474px，内部滚动 641-474=167px。
+ *
+ * 这正是「预置位多了以后播放器下面出现大空白」的修法 —— 预置位是从
+ * 设备实时查回来的，数量不可控（3 个就够把右栏顶到 641px），
+ * 所以不能指望它「比视频矮」。
+ * 注意 {@code contain: size} 必须配 {@code overflow-y: auto} 才有意义，
+ * 否则内容直接被裁掉且无法访问。窄视口下面会重置掉它（那里是单列堆叠）。
  */
 .preview-side {
   border-left: 1px solid var(--border-color);
   padding-left: 18px;
   min-height: 0;
+  contain: size;
   overflow-y: auto;
   /* 细滚动条，避免在 340px 的栏里显得笨重 */
   scrollbar-width: thin;
@@ -1158,6 +1195,11 @@ onUnmounted(() => player.stop())
     padding-left: 0;
     border-top: 1px solid var(--border-color);
     padding-top: 14px;
+    /*
+     * 单列堆叠时高度不再由视频约束，必须撤掉 contain：
+     * 否则右栏尺寸被当成 0，面板内容会被裁掉且滚不出来。
+     */
+    contain: none;
     overflow-y: visible;
   }
 }
