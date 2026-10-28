@@ -123,7 +123,8 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { userApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
@@ -223,15 +224,8 @@ async function toggleEnable(row) {
 }
 
 async function removeOne(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除用户「${row.username}」？`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(`确定删除用户「${row.username}」？`, '删除确认',
+    { confirmButtonText: '删除' }))) return
   try {
     await userApi.remove(row.id)
     ElMessage.success('已删除')

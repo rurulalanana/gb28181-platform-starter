@@ -866,7 +866,8 @@
 <script setup>
 import { computed, markRaw, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import {
   Cloudy,
   CopyDocument,
@@ -1336,15 +1337,11 @@ async function saveConfig(row) {
 
 /** 恢复默认：删除库里的覆盖值，回落 application.yml。 */
 async function resetConfig(row) {
-  try {
-    await ElMessageBox.confirm(
-      `将「${cfgLabel(row.key)}」恢复为默认值 ${row.defaultValue}？\n\n这会删除数据库中的自定义值，改为使用 application.yml 的配置。`,
-      '恢复默认',
-      { type: 'warning', confirmButtonText: '恢复', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `将「${cfgLabel(row.key)}」恢复为默认值 ${row.defaultValue}？\n\n这会删除数据库中的自定义值，改为使用 application.yml 的配置。`,
+    '恢复默认',
+    { confirmButtonText: '恢复' }
+  ))) return
   cfgSaving.value = row.key
   try {
     const saved = await configApi.reset(row.key)
@@ -1372,15 +1369,11 @@ async function resetConfig(row) {
  * 服务起来后旧 token 依然有效，无需重新登录。
  */
 async function restartServer() {
-  try {
-    await ElMessageBox.confirm(
-      '确定重启平台服务？\n\n服务将优雅停机并由守护进程自动拉起（约 10 秒），期间功能暂停。\n若服务没有守护进程（裸 java -jar 启动），重启后不会自动恢复。',
-      '重启确认',
-      { type: 'warning', confirmButtonText: '重启', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    '确定重启平台服务？\n\n服务将优雅停机并由守护进程自动拉起（约 10 秒），期间功能暂停。\n若服务没有守护进程（裸 java -jar 启动），重启后不会自动恢复。',
+    '重启确认',
+    { confirmButtonText: '重启' }
+  ))) return
   restarting.value = true
   try {
     await systemApi.restart(true)
@@ -1547,15 +1540,11 @@ async function submitAcl() {
 }
 
 async function removeAcl(row) {
-  try {
-    await ElMessageBox.confirm(
-      `删除规则「${aclKindLabel(row.kind)} ${row.value}」？\n\n删除后该来源将立即恢复为可注册（或不再受此规则保护）。`,
-      '删除接入控制规则',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `删除规则「${aclKindLabel(row.kind)} ${row.value}」？\n\n删除后该来源将立即恢复为可注册（或不再受此规则保护）。`,
+    '删除接入控制规则',
+    { confirmButtonText: '删除' }
+  ))) return
   try {
     await aclApi.remove(row.id)
     ElMessage.success('规则已删除')
@@ -1674,15 +1663,11 @@ async function probeTls() {
 }
 
 async function disableTls() {
-  try {
-    await ElMessageBox.confirm(
-      '停用后 HTTPS 端口将不再提供服务，仍在用 https:// 访问的用户会立刻断连。\n\n证书文件会保留，重新启用时无需再次上传。',
-      '停用 HTTPS',
-      { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    '停用后 HTTPS 端口将不再提供服务，仍在用 https:// 访问的用户会立刻断连。\n\n证书文件会保留，重新启用时无需再次上传。',
+    '停用 HTTPS',
+    { confirmButtonText: '停用' }
+  ))) return
   tlsDisabling.value = true
   try {
     tlsStatus.value = (await tlsApi.disable()) || {}

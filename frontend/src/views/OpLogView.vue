@@ -114,7 +114,8 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { opLogApi } from '@/api'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -171,15 +172,8 @@ function search() {
 }
 
 async function clearAll() {
-  try {
-    await ElMessageBox.confirm('确定清空全部操作日志？该操作不可恢复。', '清空确认', {
-      type: 'warning',
-      confirmButtonText: '清空',
-      cancelButtonText: '取消'
-    })
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction('确定清空全部操作日志？该操作不可恢复。', '清空确认',
+    { confirmButtonText: '清空' }))) return
   try {
     const data = await opLogApi.clear()
     ElMessage.success(`已清空 ${data?.deleted ?? 0} 条`)

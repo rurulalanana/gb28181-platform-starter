@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
@@ -47,7 +48,7 @@ public class RecordController {
                                             @RequestParam(required = false) String streamid,
                                             @RequestParam(defaultValue = "0") Integer interval) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         if (recordService.isRecording(channelId)) {
             throw BizException.badRequest("该通道已在录像中：" + channelId);
         }
@@ -67,7 +68,7 @@ public class RecordController {
                                               @RequestParam(required = false) String code,
                                               @RequestParam(required = false) String streamid) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         GbRecord record = recordService.stopCloudRecord(channelId);
         RecordFileListVo vo = new RecordFileListVo();
         vo.setChannelId(channelId);
@@ -87,7 +88,7 @@ public class RecordController {
                                               @RequestParam(required = false) String code,
                                               @RequestParam(required = false) String streamid) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         boolean recording = recordService.isRecording(channelId);
         List<CloudRecordVo> list = new ArrayList<>();
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {

@@ -1,7 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
 import cn.dev33.satoken.stp.StpUtil;
-import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.service.ControlService;
@@ -44,7 +43,7 @@ public class DecodeController {
                                             @RequestParam String streamid,
                                             @RequestParam(defaultValue = "config") String transport) {
         StpUtil.checkLogin();
-        var session = findSession(streamid);
+        var session = streamService.findSession(streamid);
         if (session == null) {
             throw BizException.badRequest("视频源流不存在，请先调用 stream/start：" + streamid);
         }
@@ -105,31 +104,5 @@ public class DecodeController {
         }
         sb.append("</Decode></Control>");
         return sb.toString();
-    }
-
-    /**
-     * 按会话键 / 裸通道编码 / ZLM 流名查会话。
-     *
-     * <p>与会话键对齐，理由同 {@code StreamController#findSessionByStreamId}：
-     * 接口对外给出的 streamId 就是会话键，回查必须认它。
-     */
-    private RtpSession findSession(String streamId) {
-        if (streamId == null || streamId.isBlank()) {
-            return null;
-        }
-        var session = streamService.sessionByKey(streamId);
-        if (session != null) {
-            return session;
-        }
-        session = streamService.session(streamId);
-        if (session != null) {
-            return session;
-        }
-        for (var s : streamService.sessions()) {
-            if (streamId.equals(s.getStream())) {
-                return s;
-            }
-        }
-        return null;
     }
 }

@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
@@ -7,7 +8,6 @@ import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
-import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.dto.StreamStartRequest;
 import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.service.RecordService;
@@ -29,7 +29,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -113,29 +112,8 @@ public class StreamController {
             @RequestParam(required = false) String serial,
             @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        List<StreamVo> all = streamService.liveList();
-        List<StreamVo> filtered = new ArrayList<>();
-        for (StreamVo s : all) {
-            String channelId = s.getChannelId();
-            if (serial != null && !serial.isBlank() && !serial.equals(s.getDeviceId())) {
-                continue;
-            }
-            if (code != null && !code.isBlank() && !code.equals(channelId)) {
-                continue;
-            }
-            if (q != null && !q.isBlank()) {
-                String needle = q.trim().toLowerCase();
-                String name = s.getChannelName() == null ? "" : s.getChannelName();
-                if (!channelId.toLowerCase().contains(needle) && !name.toLowerCase().contains(needle)) {
-                    continue;
-                }
-            }
-            filtered.add(s);
-        }
-        StreamListVo vo = new StreamListVo();
-        vo.setStreamCount(filtered.size());
-        vo.setStreams(limit > 0 ? PageQuery.slice(filtered, start, limit) : filtered);
-        return ApiResponse.ok(vo);
+        return ApiResponse.ok(StreamService.filterStreams(
+                streamService.liveList(), start, limit, serial, code, q));
     }
 
     /** 单条直播流信息。 */
@@ -143,7 +121,7 @@ public class StreamController {
     public ApiResponse<StreamVo> info(@RequestParam String streamid,
                                       @RequestParam(defaultValue = "false") Boolean touch) {
         StpUtil.checkLogin();
-        RtpSession session = findSessionByStreamId(streamid);
+        RtpSession session = streamService.findSession(streamid);
         if (session == null) {
             throw BizException.notFound("直播流不存在：" + streamid);
         }
@@ -236,7 +214,7 @@ public class StreamController {
 
     /** 通道编码：未指定 code 时视为设备直连（设备编码即通道编码）。 */
     private String channelOf(String deviceId, String code) {
-        return code == null || code.isBlank() ? deviceId : code;
+        return DeviceRef.channelOf(deviceId, code);
     }
 
     /** 校验媒体服务可用。 */
@@ -244,35 +222,6 @@ public class StreamController {
         if (streamService.mediaService() == null) {
             throw BizException.badRequest("媒体服务未启动");
         }
-    }
-
-    /**
-     * 按会话键 / ZLM 流名 / 裸通道编码查会话。
-     *
-     * <p><b>三种都要认</b>：{@code /stream/start} 与 {@code /stream/list} 返回给
-     * 前端的 {@code streamId} 是<b>会话键</b> {@code <设备编码>/<通道编码>}，
-     * 调用方自然会把同一个值传给 {@code /stream/info}。原来这里只按
-     * 「通道编码」和「ZLM 流名」查，于是用接口自己吐出来的 streamId 回查
-     * 恒 404（实测 {@code 直播流不存在：3402…/3402…}），前后端对不上。
-     */
-    private RtpSession findSessionByStreamId(String streamId) {
-        if (streamId == null || streamId.isBlank()) {
-            return null;
-        }
-        RtpSession session = streamService.sessionByKey(streamId);
-        if (session != null) {
-            return session;
-        }
-        session = streamService.session(streamId);
-        if (session != null) {
-            return session;
-        }
-        for (RtpSession s : streamService.sessions()) {
-            if (streamId.equals(s.getStream())) {
-                return s;
-            }
-        }
-        return null;
     }
 
     /** 从库记录还原返回体（会话已不在内存时使用）。 */

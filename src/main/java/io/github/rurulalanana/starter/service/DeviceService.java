@@ -9,7 +9,8 @@ import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.starter.common.CharsetFix;
 import io.github.rurulalanana.starter.common.Numbers;
-import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.common.Queries;
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
@@ -162,7 +163,7 @@ public class DeviceService {
      * 也可能是其下挂通道，故此处按「通道 → 设备」顺序回退查找。
      */
     public GbChannel resolveChannel(String serial, String code) {
-        String id = (code == null || code.isBlank()) ? serial : code;
+        String id = DeviceRef.channelOf(serial, code);
         GbChannel channel = findChannel(id);
         if (channel != null) {
             return channel;
@@ -1029,17 +1030,10 @@ public class DeviceService {
     /** 状态变更记录查询。 */
     public List<GbStatusLog> statusLogs(String deviceId, String channelId,
                                         String startTime, String endTime) {
-        LambdaQueryWrapper<GbStatusLog> q = Wrappers.<GbStatusLog>lambdaQuery()
-                .eq(deviceId != null && !deviceId.isBlank(), GbStatusLog::getDeviceId, deviceId)
-                .eq(channelId != null && !channelId.isBlank(), GbStatusLog::getChannelId, channelId);
-        LocalDateTime from = TimeFormats.parse(startTime);
-        LocalDateTime to = TimeFormats.parse(endTime);
-        if (from != null) {
-            q.ge(GbStatusLog::getCreateTime, from);
-        }
-        if (to != null) {
-            q.le(GbStatusLog::getCreateTime, to);
-        }
+        LambdaQueryWrapper<GbStatusLog> q = Queries.deviceAndChannel(
+                Wrappers.<GbStatusLog>lambdaQuery(),
+                GbStatusLog::getDeviceId, GbStatusLog::getChannelId, deviceId, channelId);
+        Queries.timeRange(q, GbStatusLog::getCreateTime, startTime, endTime);
         return statusLogMapper.selectList(q.orderByDesc(GbStatusLog::getCreateTime));
     }
 
@@ -1072,17 +1066,10 @@ public class DeviceService {
     /** 位置记录查询，按时间倒序。 */
     public List<GbPositionLog> positionLogs(String deviceId, String channelId,
                                              String startTime, String endTime) {
-        LambdaQueryWrapper<GbPositionLog> q = Wrappers.<GbPositionLog>lambdaQuery()
-                .eq(deviceId != null && !deviceId.isBlank(), GbPositionLog::getDeviceId, deviceId)
-                .eq(channelId != null && !channelId.isBlank(), GbPositionLog::getChannelId, channelId);
-        LocalDateTime from = TimeFormats.parse(startTime);
-        LocalDateTime to = TimeFormats.parse(endTime);
-        if (from != null) {
-            q.ge(GbPositionLog::getCreateTime, from);
-        }
-        if (to != null) {
-            q.le(GbPositionLog::getCreateTime, to);
-        }
+        LambdaQueryWrapper<GbPositionLog> q = Queries.deviceAndChannel(
+                Wrappers.<GbPositionLog>lambdaQuery(),
+                GbPositionLog::getDeviceId, GbPositionLog::getChannelId, deviceId, channelId);
+        Queries.timeRange(q, GbPositionLog::getCreateTime, startTime, endTime);
         return positionLogMapper.selectList(q.orderByDesc(GbPositionLog::getCreateTime));
     }
 

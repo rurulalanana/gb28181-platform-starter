@@ -110,7 +110,8 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -232,15 +233,11 @@ function onSnapError(row) {
 
 /** 删除该通道的全部云端录像。 */
 async function removeChannel(row) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除通道「${row.customName || row.name || row.code}」的全部云端录像？文件将同时删除，不可恢复。`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `确定删除通道「${row.customName || row.name || row.code}」的全部云端录像？文件将同时删除，不可恢复。`,
+    '删除确认',
+    { confirmButtonText: '删除' }
+  ))) return
   try {
     const data = await cloudRecordApi.removeChannel({ serial: row.serial, code: row.code })
     ElMessage.success(`已删除 ${data?.deleted ?? 0} 条录像`)

@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.github.rurulalanana.gb28181.sip.event.ManscdpEvent;
 import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Queries;
 import io.github.rurulalanana.starter.common.Numbers;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbAlarm;
@@ -99,19 +100,12 @@ public class AlarmService {
     /** 报警列表查询。 */
     public List<GbAlarm> list(String serial, String code, String startTime, String endTime,
                               Integer priority, Integer method) {
-        LambdaQueryWrapper<GbAlarm> q = Wrappers.<GbAlarm>lambdaQuery()
-                .eq(StringUtils.hasText(serial), GbAlarm::getDeviceId, serial)
-                .eq(StringUtils.hasText(code), GbAlarm::getChannelId, code)
-                .eq(priority != null, GbAlarm::getPriority, priority)
+        LambdaQueryWrapper<GbAlarm> q = Queries.deviceAndChannel(
+                Wrappers.<GbAlarm>lambdaQuery(),
+                GbAlarm::getDeviceId, GbAlarm::getChannelId, serial, code);
+        q.eq(priority != null, GbAlarm::getPriority, priority)
                 .eq(method != null, GbAlarm::getMethod, method);
-        LocalDateTime from = TimeFormats.parse(startTime);
-        LocalDateTime to = TimeFormats.parse(endTime);
-        if (from != null) {
-            q.ge(GbAlarm::getStartTime, from);
-        }
-        if (to != null) {
-            q.le(GbAlarm::getStartTime, to);
-        }
+        Queries.timeRange(q, GbAlarm::getStartTime, startTime, endTime);
         return alarmMapper.selectList(q.orderByDesc(GbAlarm::getStartTime));
     }
 

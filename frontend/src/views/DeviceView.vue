@@ -250,7 +250,8 @@
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { useRouter } from 'vue-router'
 import { deviceApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -573,15 +574,11 @@ async function doSave() {
 }
 
 async function remove(row) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除设备 ${row.id}？该操作会同时删除其通道数据。`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `确定删除设备 ${row.id}？该操作会同时删除其通道数据。`,
+    '删除确认',
+    { confirmButtonText: '删除' }
+  ))) return
   try {
     await deviceApi.remove(row.id)
     ElMessage.success('已删除')

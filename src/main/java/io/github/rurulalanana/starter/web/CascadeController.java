@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -555,7 +556,7 @@ public class CascadeController {
                                        @RequestParam(defaultValue = "true") Boolean share) {
         StpUtil.checkLogin();
         // code 为空时说明调用方把通道编码传在 serial 上（兼容老调用）
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         String deviceId = code == null || code.isBlank() ? null : serial;
         cascadeService.shareNode(cascadeId, deviceId, channelId,
                 Boolean.TRUE.equals(share));

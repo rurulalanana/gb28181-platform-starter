@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
@@ -486,6 +487,6 @@ public class ControlController {
         if (serial == null || serial.isBlank()) {
             throw BizException.badRequest("缺少参数 serial");
         }
-        return code == null || code.isBlank() ? serial : code;
+        return DeviceRef.channelOf(serial, code);
     }
 }

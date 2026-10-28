@@ -364,7 +364,8 @@
 
 <script setup>
 import { nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { Connection, Picture } from '@element-plus/icons-vue'
 import { cascadeApi, deviceApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
@@ -792,15 +793,8 @@ async function saveChannels() {
 }
 
 async function removeOne(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除级联「${row.name || row.serial}」？`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(`确定删除级联「${row.name || row.serial}」？`, '删除确认',
+    { confirmButtonText: '删除' }))) return
   try {
     await cascadeApi.remove(row.id)
     ElMessage.success('已删除')

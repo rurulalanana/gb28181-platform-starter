@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.PlayUrls;
 import io.github.rurulalanana.starter.common.ApiResponse;
@@ -135,7 +136,7 @@ public class CloudRecordController {
             @RequestParam(defaultValue = "12") Integer interrupt,
             @RequestParam(required = false) Integer latest) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         List<GbRecord> records = recordService.cloudRecords(channelId, null, null);
         // key=YYYYMM, value=当月每天是否有录像的 0/1 串
         Map<String, String> m = new LinkedHashMap<>();
@@ -157,7 +158,7 @@ public class CloudRecordController {
                                                   @RequestParam(required = false) String code,
                                                   @RequestParam String period) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         CloudMonthVo vo = new CloudMonthVo();
         vo.setFlag(recordService.monthFlags(channelId, period));
         return ApiResponse.ok(vo);
@@ -169,7 +170,7 @@ public class CloudRecordController {
                                                 @RequestParam(required = false) String code,
                                                 @RequestParam String period) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         LocalDateTime day = TimeFormats.parse(period);
         if (day == null) {
             throw BizException.badRequest("日期格式应为 YYYYMMDD：" + period);
@@ -204,7 +205,7 @@ public class CloudRecordController {
                                     @RequestParam String period) {
         StpUtil.checkLogin();
         StpUtil.checkRoleOr("admin");
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         GbRecord record = recordService.findByPeriod(channelId, period);
         if (record == null) {
             throw BizException.notFound("录像不存在：" + period);
@@ -220,7 +221,7 @@ public class CloudRecordController {
                                                 @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
         StpUtil.checkRoleOr("admin");
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         int deleted = 0;
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {
             recordService.deleteFile(r);
@@ -239,7 +240,7 @@ public class CloudRecordController {
                                               @RequestParam String period) {
         StpUtil.checkLogin();
         StpUtil.checkRoleOr("admin");
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         LocalDateTime day = TimeFormats.parse(period);
         if (day == null) {
             throw BizException.badRequest("日期格式应为 YYYYMMDD：" + period);
@@ -260,7 +261,7 @@ public class CloudRecordController {
                                           @RequestParam String period,
                                           @RequestParam Boolean important) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         GbRecord record = recordService.findByPeriod(channelId, period);
         if (record == null) {
             throw BizException.notFound("录像不存在：" + period);

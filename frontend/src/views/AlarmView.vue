@@ -78,7 +78,8 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { alarmApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -141,15 +142,8 @@ async function removeOne(row) {
 }
 
 async function clearAll() {
-  try {
-    await ElMessageBox.confirm('确定清空全部报警记录？', '清空确认', {
-      type: 'warning',
-      confirmButtonText: '清空',
-      cancelButtonText: '取消'
-    })
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction('确定清空全部报警记录？', '清空确认',
+    { confirmButtonText: '清空' }))) return
   try {
     const data = await alarmApi.clear()
     ElMessage.success(`已清空 ${data?.deleted ?? 0} 条`)

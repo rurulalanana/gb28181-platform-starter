@@ -244,7 +244,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -584,17 +585,13 @@ async function doSave() {
   // 光靠视觉标「今天」还不够 —— 保存时再确认一次，代价很小。
   if (form.enable && !planCoversToday()) {
     const todayLabel = DAYS[todayIndex.value]?.label || '今天'
-    try {
-      await ElMessageBox.confirm(
-        `该计划没有覆盖「今天（${todayLabel}）」，今天不会因本计划自动录像。\n\n` +
-        '（若该通道已在通道管理里手动开启云端录像，则不受影响，仍会录制。）\n\n' +
-        '如果只想在其它星期录，可以继续保存；如果搞错了行，请点「取消」回去调整。',
-        '今天不会自动录像',
-        { type: 'warning', confirmButtonText: '仍然保存', cancelButtonText: '回去调整' }
-      )
-    } catch (e) {
-      return
-    }
+    if (!(await confirmAction(
+      `该计划没有覆盖「今天（${todayLabel}）」，今天不会因本计划自动录像。\n\n` +
+      '（若该通道已在通道管理里手动开启云端录像，则不受影响，仍会录制。）\n\n' +
+      '如果只想在其它星期录，可以继续保存；如果搞错了行，请点「取消」回去调整。',
+      '今天不会自动录像',
+      { confirmButtonText: '仍然保存', cancelButtonText: '回去调整' }
+    ))) return
   }
   saving.value = true
   try {
@@ -631,15 +628,8 @@ async function toggleEnable(row, enable) {
 }
 
 async function removePlan(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除录像计划「${row.name}」？`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(`确定删除录像计划「${row.name}」？`, '删除确认',
+    { confirmButtonText: '删除' }))) return
   try {
     await cloudRecordApi.planRemove({ id: row.id })
     ElMessage.success('已删除')

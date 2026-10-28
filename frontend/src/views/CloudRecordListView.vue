@@ -176,7 +176,8 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
@@ -410,15 +411,11 @@ async function toggleImportant(record) {
 }
 
 async function removeOne(record) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除该录像（${fmtCompactTs(record.startAt)}）？文件将同时删除。`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `确定删除该录像（${fmtCompactTs(record.startAt)}）？文件将同时删除。`,
+    '删除确认',
+    { confirmButtonText: '删除' }
+  ))) return
   try {
     await cloudRecordApi.remove({ serial: serial.value, code: code.value, period: record.startAt })
     ElMessage.success('已删除')
@@ -430,15 +427,11 @@ async function removeOne(record) {
 }
 
 async function removeDaily() {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除 ${period.value} 当天的全部录像？`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `确定删除 ${period.value} 当天的全部录像？`,
+    '删除确认',
+    { confirmButtonText: '删除' }
+  ))) return
   try {
     const data = await cloudRecordApi.removeDaily({
       serial: serial.value,

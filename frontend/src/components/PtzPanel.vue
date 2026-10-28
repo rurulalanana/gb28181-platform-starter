@@ -272,7 +272,8 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '@/utils/confirm'
 import { controlApi, deviceApi } from '@/api'
 
 const props = defineProps({
@@ -470,15 +471,11 @@ async function savePreset(row) {
 
 /** 删除预置位（需确认：删了要重新去现场调机位才能恢复）。 */
 async function removePreset(row) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除预置位 ${row.presetId}？删除后需要重新调整机位才能恢复。`,
-      '删除预置位',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch (e) {
-    return
-  }
+  if (!(await confirmAction(
+    `确定删除预置位 ${row.presetId}？删除后需要重新调整机位才能恢复。`,
+    '删除预置位',
+    { confirmButtonText: '删除' }
+  ))) return
   const ok = await cmd('preset', { command: 'remove', preset: row.presetId },
     `已删除预置位 ${row.presetId}`)
   if (ok) {

@@ -13,10 +13,12 @@ import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.StreamIndex;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
+import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbChannel;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.mapper.GbStreamMapper;
+import io.github.rurulalanana.starter.vo.StreamListVo;
 import io.github.rurulalanana.starter.vo.StreamVo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -447,6 +449,48 @@ public class StreamService {
      */
     public RtpSession sessionByKey(String sessionKey) {
         return platform.sessionManager().getByKey(sessionKey);
+    }
+
+    /**
+     * 按<b>任意一种</b>外部标识定位会话。
+     *
+     * <p>接口对外的 {@code streamId} 有三种历史形态，调用方会原样传回来：
+     * <ol>
+     *   <li>会话键 {@code <设备编码>/<通道编码>} —— 列表/启动接口返回的就是它；</li>
+     *   <li>裸通道编码 —— 直连摄像机场景，设备编码即通道编码；</li>
+     *   <li>ZLM 流名 —— 早期版本返回过，外部脚本仍在用。</li>
+     * </ol>
+     * 三种都要认，且<b>顺序不能变</b>：会话键最精确，其次是通道编码，最后才遍历流名。
+     *
+     * <p><b>为什么必须集中在一处</b>：这个方法原本在 {@code StreamController}、
+     * {@code PlaybackController}、{@code DecodeController} 里各有一份拷贝
+     * （分别叫 {@code findSessionByStreamId} / {@code findSession}），
+     * 三份的实现悄悄走偏了 —— {@code /stream/info} 那两份只认后两种形态，
+     * 于是拿列表接口自己返回的 {@code streamId} 回查恒 404
+     * （{@code 直播流不存在：3402…/3402…}），而回放侧因为多写了一步
+     * {@code sessionByKey} 所以正常。同一件事写三遍，就一定会有一遍是错的。
+     *
+     * @param streamId 会话键 / 通道编码 / 流名
+     * @return 会话；找不到或入参为空时返回 {@code null}
+     */
+    public RtpSession findSession(String streamId) {
+        if (streamId == null || streamId.isBlank()) {
+            return null;
+        }
+        RtpSession session = sessionByKey(streamId);
+        if (session != null) {
+            return session;
+        }
+        session = session(streamId);
+        if (session != null) {
+            return session;
+        }
+        for (RtpSession s : sessions()) {
+            if (streamId.equals(s.getStream())) {
+                return s;
+            }
+        }
+        return null;
     }
 
     /** 录像服务（ZLM 录制器）；未启用时返回 {@code null}。 */
@@ -976,6 +1020,50 @@ public class StreamService {
             }
         }
         return out;
+    }
+
+    /**
+     * 按 {@code serial} / {@code code} / {@code q} 过滤流列表并按游标切片。
+     *
+     * <p><b>为什么抽出来</b>：直播 {@code /stream/list} 与回放
+     * {@code /playback/streamlist} 的这段过滤原本各写了一份，除了列表来源
+     * （{@code liveList} / {@code playbackList}）外逐行相同。两份拷贝不会永远
+     * 保持同步 —— 本次筛查时就发现它们在 {@code limit=0}（不分页）的处理上已经
+     * 不一致了：一边特判、另一边直接切片。
+     *
+     * @param all    源列表
+     * @param start  偏移量
+     * @param limit  每页条数；{@code <= 0} 表示不分页
+     * @param serial 设备编码过滤，可为空
+     * @param code   通道编码过滤，可为空
+     * @param q      关键字（通道编码 / 通道名），可为空
+     */
+    public static StreamListVo filterStreams(List<StreamVo> all, int start, int limit,
+                                             String serial, String code, String q) {
+        List<StreamVo> filtered = new ArrayList<>();
+        String needle = (q == null || q.isBlank()) ? null : q.trim().toLowerCase();
+        for (StreamVo s : all) {
+            if (serial != null && !serial.isBlank() && !serial.equals(s.getDeviceId())) {
+                continue;
+            }
+            if (code != null && !code.isBlank() && !code.equals(s.getChannelId())) {
+                continue;
+            }
+            if (needle != null) {
+                String channelId = s.getChannelId() == null ? "" : s.getChannelId();
+                String name = s.getChannelName() == null ? "" : s.getChannelName();
+                if (!channelId.toLowerCase().contains(needle)
+                        && !name.toLowerCase().contains(needle)) {
+                    continue;
+                }
+            }
+            filtered.add(s);
+        }
+        StreamListVo vo = new StreamListVo();
+        vo.setStreamCount(filtered.size());
+        // slice 内部已把 limit<=0 处理为「不分页」，此处无需再判一次
+        vo.setStreams(PageQuery.slice(filtered, start, limit));
+        return vo;
     }
 
     private String deviceNameOf(String deviceId) {

@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
@@ -287,7 +288,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchInfo(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.queryDeviceInfo(code == null || code.isBlank() ? serial : code);
+        controlService.queryDeviceInfo(DeviceRef.channelOf(serial, code));
         return ApiResponse.ok(FetchResultVo.ok(serial));
     }
 
@@ -296,7 +297,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchStatus(@RequestParam String serial,
                                                   @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         controlService.queryDeviceStatus(channelId);
         return ApiResponse.ok(FetchResultVo.ok(channelId));
     }
@@ -307,7 +308,7 @@ public class DeviceController {
                                                   @RequestParam(required = false) String code,
                                                   @RequestParam("config_type") String configType) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         controlService.queryConfig(channelId, configType);
         return ApiResponse.ok(FetchResultVo.ok(channelId));
     }
@@ -317,7 +318,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchPreset(@RequestParam String serial,
                                                   @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         controlService.queryPresets(channelId);
         return ApiResponse.ok(FetchResultVo.ok(channelId));
     }
@@ -337,7 +338,7 @@ public class DeviceController {
     public ApiResponse<PresetListVo> presetList(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         return ApiResponse.ok(presetService.list(channelId));
     }
 
@@ -346,7 +347,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchHomePosition(@RequestParam String serial,
                                                         @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.queryHomePosition(code == null || code.isBlank() ? serial : code);
+        controlService.queryHomePosition(DeviceRef.channelOf(serial, code));
         return ApiResponse.ok(FetchResultVo.ok(serial));
     }
 
@@ -355,7 +356,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchCruiseList(@RequestParam String serial,
                                                       @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.queryCruiseTrack(code == null || code.isBlank() ? serial : code, 0);
+        controlService.queryCruiseTrack(DeviceRef.channelOf(serial, code), 0);
         return ApiResponse.ok(FetchResultVo.ok(serial));
     }
 
@@ -365,7 +366,7 @@ public class DeviceController {
                                                        @RequestParam(required = false) String code,
                                                        @RequestParam(defaultValue = "0") Integer number) {
         StpUtil.checkLogin();
-        controlService.queryCruiseTrack(code == null || code.isBlank() ? serial : code, number);
+        controlService.queryCruiseTrack(DeviceRef.channelOf(serial, code), number);
         FetchResultVo vo = FetchResultVo.ok(serial);
         vo.setNumber(number);
         return ApiResponse.ok(vo);
@@ -376,7 +377,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchPtzPosition(@RequestParam String serial,
                                                        @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.queryPtzPosition(code == null || code.isBlank() ? serial : code);
+        controlService.queryPtzPosition(DeviceRef.channelOf(serial, code));
         return ApiResponse.ok(FetchResultVo.ok(serial));
     }
 
@@ -385,7 +386,7 @@ public class DeviceController {
     public ApiResponse<FetchResultVo> fetchSdCardStatus(@RequestParam String serial,
                                                         @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        controlService.querySdCardStatus(code == null || code.isBlank() ? serial : code);
+        controlService.querySdCardStatus(DeviceRef.channelOf(serial, code));
         return ApiResponse.ok(FetchResultVo.ok(serial));
     }
 
@@ -394,7 +395,7 @@ public class DeviceController {
     public ApiResponse<ChannelNavigateVo> getChannelNavigate(@RequestParam String serial,
                                                              @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         controlService.queryCruiseTrack(channelId, 0);
         ChannelNavigateVo vo = new ChannelNavigateVo();
         vo.setDeviceId(channelId);

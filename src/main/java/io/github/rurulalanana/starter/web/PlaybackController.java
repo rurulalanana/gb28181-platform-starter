@@ -1,5 +1,6 @@
 package io.github.rurulalanana.starter.web;
 
+import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaService;
 import io.github.rurulalanana.gb28181.sip.zlm.RecordItem;
@@ -8,7 +9,6 @@ import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.TimeFormats;
-import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.dto.PlaybackStartRequest;
 import io.github.rurulalanana.starter.entity.GbDeviceRecord;
 import io.github.rurulalanana.starter.entity.GbStream;
@@ -92,7 +92,7 @@ public class PlaybackController {
              */
             @RequestParam(defaultValue = "20") Integer timeout) {
         StpUtil.checkLogin();
-        String channelId = code == null || code.isBlank() ? serial : code;
+        String channelId = DeviceRef.channelOf(serial, code);
         // serial 是设备编码（SIP 寻址），channelId 是通道编码（<DeviceID>）。
         // 录像挂在通道上，但 SIP 只认注册实体 —— 两者不能混用。
         String deviceId = code == null || code.isBlank()
@@ -548,34 +548,22 @@ public class PlaybackController {
     }
 
     /** 回放流列表。 */
-    @GetMapping("/streamlist")    public ApiResponse<StreamListVo> streamList(
+    @GetMapping("/streamlist")
+    public ApiResponse<StreamListVo> streamList(
             @RequestParam(defaultValue = "0") int start,
             @RequestParam(defaultValue = "100") int limit,
             @RequestParam(required = false) String serial,
             @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
-        List<StreamVo> all = streamService.playbackList();
-        List<StreamVo> filtered = new ArrayList<>();
-        for (StreamVo s : all) {
-            if (serial != null && !serial.isBlank() && !serial.equals(s.getDeviceId())) {
-                continue;
-            }
-            if (code != null && !code.isBlank() && !code.equals(s.getChannelId())) {
-                continue;
-            }
-            filtered.add(s);
-        }
-        StreamListVo vo = new StreamListVo();
-        vo.setStreamCount(filtered.size());
-        vo.setStreams(PageQuery.slice(filtered, start, limit));
-        return ApiResponse.ok(vo);
+        return ApiResponse.ok(StreamService.filterStreams(
+                streamService.playbackList(), start, limit, serial, code, null));
     }
 
     /** 单条回放流信息。 */
     @GetMapping("/streaminfo")
     public ApiResponse<PlaybackVo> streamInfo(@RequestParam String streamid) {
         StpUtil.checkLogin();
-        RtpSession session = findSession(streamid);
+        RtpSession session = streamService.findSession(streamid);
         if (session == null) {
             throw BizException.notFound("回放流不存在：" + streamid);
         }
@@ -600,9 +588,9 @@ public class PlaybackController {
      */
     private RtpSession resolveSession(String streamid, String serial, String code) {
         if (streamid != null && !streamid.isBlank()) {
-            return findSession(streamid);
+            return streamService.findSession(streamid);
         }
-        String channel = (code == null || code.isBlank()) ? serial : code;
+        String channel = DeviceRef.channelOf(serial, code);
         if (channel == null || channel.isBlank()) {
             return null;
         }
@@ -700,35 +688,7 @@ public class PlaybackController {
         if (streamid != null && !streamid.isBlank()) {
             return channelOf(streamid);
         }
-        return (code == null || code.isBlank()) ? serial : code;
-    }
-
-    /**
-     * 按流标识查会话。
-     *
-     * <p>支持三种形式：复合标识 {@code <设备编码>/<通道编码>}、
-     * 裸通道编码（设备直连）、以及流名。
-     */
-    private RtpSession findSession(String streamid) {
-        if (streamid == null || streamid.isBlank()) {
-            return null;
-        }
-        // 复合标识优先：直接按会话键命中
-        RtpSession session = streamService.sessionByKey(streamid);
-        if (session != null) {
-            return session;
-        }
-        // 裸通道编码（设备直连）
-        session = streamService.session(streamid);
-        if (session != null) {
-            return session;
-        }
-        for (RtpSession s : streamService.sessions()) {
-            if (streamid.equals(s.getStream())) {
-                return s;
-            }
-        }
-        return null;
+        return DeviceRef.channelOf(serial, code);
     }
 
     /**
