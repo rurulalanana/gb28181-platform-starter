@@ -212,7 +212,12 @@
         -->
         <el-table-column label="操作" min-width="252" align="center" class-name="op-col" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="preview(row)">
+            <el-button
+              link
+              type="primary"
+              title="打开预览并自动播放"
+              @click="preview(row)"
+            >
               <el-icon><VideoPlay /></el-icon> 播放
             </el-button>
             <!--
@@ -230,14 +235,6 @@
               @click="stopStream(row)"
             >
               <el-icon><VideoPause /></el-icon> 停止
-            </el-button>
-            <el-button
-              link
-              type="primary"
-              title="上屏到实时预览（自动播放）"
-              @click="playOnWall(row)"
-            >
-              <el-icon><VideoCamera /></el-icon> 上屏
             </el-button>
             <el-button
               link
@@ -266,12 +263,17 @@
     <!--
       尺寸对齐参考站（LiveGBS）的播放弹窗：那边视频区实测 878×494（16:9），
       云台面板 303 宽贴在右侧，弹窗整体约 1200px 宽。
-      这里取 1280px 上限（视口小时按 94vw 收缩），视频栏因此比参考站更宽一些。
+
+      这里取 1520px 上限（视口小时按 96vw 收缩）。为什么比参考站宽这么多：
+      右侧云台面板固定 340px（比参考站宽，因为多了预置位/设备/高级三页），
+      而弹窗高度由它决定（约 643px）—— 视频要长到同样高，栏宽需要
+      643 × 16/9 ≈ 1143px。弹窗窄于这个值时视频只能变矮，多出来的部分
+      就是黑边。放宽弹窗是唯一能「把黑边压小而不裁切画面」的手段。
     -->
     <el-dialog
       v-model="previewDialog"
       :title="'实时预览 · ' + (previewTarget?.customName || previewTarget?.name || previewTarget?.id || '')"
-      width="min(1280px, 94vw)"
+      width="min(1520px, 96vw)"
       top="5vh"
       class="preview-dialog"
       @close="closePreview"
@@ -279,9 +281,9 @@
     >
       <div class="preview-wrap">
         <!--
-          视频外层负责撑满栏高并居中；.video-box 自身保持 16:9，
-          因此在宽而矮的弹窗里会上下留白、在窄而高的弹窗里左右留白，
-          不会拉伸变形。
+          视频栏：整块黑底，视频 16:9 居中。
+          行高由右侧云台面板决定，视频比它矮时多出来的部分是播放器的黑边，
+          不是页面空白（详见 .preview-stage 的样式说明）。
         -->
         <div class="preview-stage">
           <div class="video-box">
@@ -524,14 +526,6 @@ async function ensureMediaPort() {
   } catch (e) {
     // 忽略
   }
-}
-
-/**
- * 上屏到实时预览：跳转过去并带上 ?play=<设备编码>/<通道编码>，
- * 预览页挂载后会自动把这个通道铺到第一个空闲画面格。
- */
-function playOnWall(row) {
-  router.push({ path: '/live', query: { play: `${row.deviceId}/${row.id}` } })
 }
 
 /** 打开预览并自动播放。 */
@@ -1082,26 +1076,15 @@ onUnmounted(() => player.stop())
    * 视频栏吃掉剩余宽度，云台面板固定 340px。
    *
    * 参考站是 303px，但它的云台面板只有方向盘 + 变倍 + 信息表；
-   * 我们多了 4 个折叠的运维功能（预置位/设备功能/高级操作/语音喊话），
+   * 我们多了 Tab 页形式的运维功能（预置位/设备/高级/语音喊话），
    * 320px 时标题文字与展开箭头离得很近，所以放宽到 340px。
    */
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 24px;
   /*
-   * 两栏等高，且行高必须<b>只由左栏（视频）决定</b>。
-   *
-   * <p>grid 的行高默认取「两栏内容高度的较大值」。右栏是云台面板，
-   * 内容高度随预置位数量变化（3 个预置位就能到 641px，比 16:9 的视频
-   * 474px 高出一截）—— 一旦它成为较大值，行高就被拉高，视频按自己的
-   * 16:9 停在顶部，<b>下方凭空多出 167px 空白</b>，视觉上像播放器坏了。
-   *
-   * <p>只靠 {@code .preview-side} 的 {@code overflow-y: auto} 解决不了：
-   * 容器高度本身来自自己的内容时，{@code scrollHeight == clientHeight}，
-   * 滚动条永远不会启用（实测就是这样，右栏从没真正滚动过）。
-   * 真正去掉它对行高的贡献靠下面右栏的 {@code contain: size}。
-   *
-   * <p>{@code stretch} 仍要保留：行高定下来之后，右栏要拉伸到那个高度，
-   * 它内部的 overflow 才有意义（否则右栏只有内容高，滚动同样不生效）。
+   * 行高由两栏内容高度的较大值决定 —— 这里是<b>右栏</b>（约 641px）。
+   * 视频按 16:9 只能到 474px，所以左栏会比视频高；由下面的
+   * .preview-stage 用黑底居中处理，不再是白空白。
    */
   align-items: stretch;
   /*
@@ -1112,25 +1095,27 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 左栏是「舞台」：宽度交给视频自己决定，这里只负责居中。
+ * 左栏 = 播放器画面区，而不是「容器 + 空白」。
  *
- * 【为什么不再固定 .preview-wrap 的高度】
- * 之前给 wrap 设了 height: 74vh（视口 900 时 666px），而视频按栏宽 874
- * 算出来只需要 492px —— 上下各空 87px，凭空多出 174px 空白，
- * 右侧云台面板又被这个虚高的行高撑开、内容溢出被裁掉。
- * 现在改成「高度由视频宽度决定」，两栏自然等高，没有任何多余留白。
+ * 【为什么要黑底】
+ * 两栏行高由右栏（云台面板）决定，视频按 16:9 只有 474px，
+ * 容器却有 641px。之前的做法是让视频贴顶，下方留 167px <b>白空白</b> ——
+ * 看着就像播放器坏了。
+ * 现在容器整块是黑的，视频在中间；多出来的部分是播放器的黑边，
+ * 与任何视频网站里 16:9 片源放进更高容器时的表现一致。
  *
- * 【align-items: flex-start 不能省】
- * flex 容器默认 align-items: stretch，会把 .video-box 拉伸到容器高度。
- * 而容器高度又来自 grid 的 stretch（跟 wrap 等高）—— 结果是视频被拉成
- * 874×678（比例 1.29，画面变形），aspect-ratio 完全失效。
- * 改成 flex-start 后 video-box 保持自己的 16:9，容器高度也跟着它走。
+ * 【为什么不用 height: 100% 拉高视频】
+ * 要么横向裁切（object-fit: cover）把画面切掉 —— 监控场景不可接受；
+ * 要么拉伸变形。两种都比黑边差。
  */
 .preview-stage {
   min-width: 0;
   display: flex;
   justify-content: center;
-  align-items: flex-start;
+  align-items: center;
+  background: #000;
+  border-radius: 4px;
+  overflow: hidden;
 }
 
 /*
@@ -1149,28 +1134,69 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 右栏：宽度固定，高度跟着视频走（grid 拉伸到行高），内容超出就在栏内滚动。
+ * 右栏：高度自然（由云台面板内容决定），<b>正常视口下不滚动</b>。
  *
- * 【contain: size 是这里的关键】
- * 它告诉浏览器「这个元素的尺寸不参考自身内容」。于是右栏对网格行高的
- * 贡献为 0，行高只剩左栏视频那一段：
- *   无 contain 时：右栏内容 641px → 行高 641px，视频 474px，下方空 167px；
- *   有 contain 时：行高 474px → 右栏拉成 474px，内部滚动 641-474=167px。
+ * 上两版都在跟滚动条较劲：先给 wrapper 定死 74vh（凭空多出 174px 空白），
+ * 再用 contain: size + overflow-y: auto 把溢出挤进栏内（滚动条常驻）。
+ * 真正的结论是：弹窗本来就放得下 —— 面板 641px，加 header/footer 共约
+ * 760px，常见视口（≥800）不需要滚动。之前之所以出现滚动条，是因为
+ * 强行把行高压到视频高度（474）后再让面板去适应它。
  *
- * 这正是「预置位多了以后播放器下面出现大空白」的修法 —— 预置位是从
- * 设备实时查回来的，数量不可控（3 个就够把右栏顶到 641px），
- * 所以不能指望它「比视频矮」。
- * 注意 {@code contain: size} 必须配 {@code overflow-y: auto} 才有意义，
- * 否则内容直接被裁掉且无法访问。窄视口下面会重置掉它（那里是单列堆叠）。
+ * max-height + overflow 保留作为<b>矮视口兜底</b>（<768px 那种）：
+ * 那时确实物理放不下，滚动是唯一选择；正常视口下这两条都不生效。
  */
 .preview-side {
   border-left: 1px solid var(--border-color);
   padding-left: 18px;
   min-height: 0;
-  contain: size;
+  /*
+   * 兜底上限：只在视口真的装不下时才出滚动条。
+   *
+   * 面板实测 663px，加弹窗 header（约 54）与 footer（约 64）共约 780，
+   * 再加 top: 5vh —— 视口 ≥ 840px 时完全放得下，这里不会触发。
+   *
+   * 取 100vh-150 而不是更紧的值：之前写 200 时算出来正好等于面板高度，
+   * scrollHeight 比 clientHeight 多一个子像素就常驻滚动条（实测踩到）。
+   */
+  max-height: calc(100vh - 150px);
   overflow-y: auto;
-  /* 细滚动条，避免在 340px 的栏里显得笨重 */
+  /* 不预留滚动条槽位：不滚动时不会凭空少 15px 宽 */
+  scrollbar-gutter: auto;
   scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+/* 细滚动条（仅矮视口兜底时出现），不抢焦点、不占领视宽 */
+.preview-side::-webkit-scrollbar {
+  width: 6px;
+}
+.preview-side::-webkit-scrollbar-track {
+  background: transparent;
+}
+.preview-side::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+.preview-side::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/*
+ * 预览弹窗里的预置位表格调矮（默认 248）。
+ *
+ * <p>为什么只在这里改：表格高度直接决定右栏总高，而右栏总高又决定
+ * 左栏的黑边 —— 右栏每高 16px，黑边上下各多 8px。248 是给
+ * 实时预览页（LiveView，右侧常驻面板、空间充裕）用的；
+ * 在弹窗里压到 176（约 3 行 + 表头）就能把右栏拉到接近视频高度。
+ *
+ * <p>代价是预置位多于一页时要滚表格。但那正是「列表滚动」该有的样子 ——
+ * 滚动条出现在一个明确的列表框里，而不是整片面板外面。
+ *
+ * <p>{@code !important} 是因为 el-table 的 {@code height} 属性会写成内联
+ * style，普通规则的优先级盖不住它。
+ */
+.preview-side :deep(.preset-table) {
+  height: 176px !important;
 }
 
 /*
@@ -1184,6 +1210,7 @@ onUnmounted(() => player.stop())
 
   .preview-stage {
     display: block;
+    background: none;
   }
 
   .preview-stage .video-box {
@@ -1195,11 +1222,7 @@ onUnmounted(() => player.stop())
     padding-left: 0;
     border-top: 1px solid var(--border-color);
     padding-top: 14px;
-    /*
-     * 单列堆叠时高度不再由视频约束，必须撤掉 contain：
-     * 否则右栏尺寸被当成 0，面板内容会被裁掉且滚不出来。
-     */
-    contain: none;
+    max-height: none;
     overflow-y: visible;
   }
 }
