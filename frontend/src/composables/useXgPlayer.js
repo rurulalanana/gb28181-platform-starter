@@ -277,6 +277,29 @@ export function useXgPlayer(containerRef) {
       media,
       // 回放不做音画同步：位置/倍速由设备侧控制（见 WsFlvStream 的 vod 说明）
       vod: !!vod,
+      /*
+       * 预缓冲攒够 → 用播放器自己的 API 起播。
+       *
+       * <p><b>不能直接 media.play()</b>：直播 autoplay 为 false（为了等预缓冲），
+       * xgplayer 内部仍认为自己在暂停态。绕过它播放 video 元素，
+       * 画面会动但中央的大播放按钮一直盖着 —— 用户看到「视频在播却有个播放图标」。
+       * 走 {@code p.play()} 后，播放器状态与控制栏一起更新。
+       *
+       * <p>回放（vod）不需要：它 autoplay=true，本来就在播。
+       */
+      onPrebuffered: () => {
+        if (disposed || vod) return
+        const pl = player.value
+        if (!pl) return
+        try {
+          // play() 返回 Promise：用户后续点了暂停时这里可能 reject，忽略即可
+          const r = pl.play()
+          if (r && typeof r.catch === 'function') r.catch(() => {})
+        } catch (e) {
+          // 播放器已销毁等边缘情况：退回直接播 video，至少画面能动
+          media.play().catch(() => {})
+        }
+      },
       onError: (msg, retryable) => {
         if (disposed) return
         /*
@@ -1033,6 +1056,17 @@ function baseUiConfig(mode = 'live') {
   if (mode === 'live') {
     // 直播没有「暂停」「倍速」语义，连按钮一起去掉
     ignores.push('play', 'playbackRate')
+    /*
+     * 中央那个大播放按钮是 start 插件，与控制栏的 play 是两个组件。
+     *
+     * <p>必须一起去掉：直播不允许暂停（{@code closeVideoClick: true}
+     * 已让点画面不暂停），所以这个按钮在本页<b>没有任何作用</b>。
+     * 更重要的是 —— 直播的 {@code autoplay} 是 false（等 ws-flv 攒预缓冲），
+     * 播放器初始处于「暂停」态，start 插件就会把大按钮画在正中央；
+     * 预缓冲结束、业务层调 play() 之前的那一两秒里，用户看到的是
+     * 「视频已经在播，中间却盖着一个播放图标」，纯属误导。
+     */
+    ignores.push('start')
   }
   return {
     ignores,

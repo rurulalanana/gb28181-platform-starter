@@ -98,14 +98,25 @@ export default class WsFlvStream {
    * @param {HTMLVideoElement} opts.media 播放器持有的 video 元素
    * @param {(msg: string) => void} [opts.onError] 不可恢复的错误回调
    * @param {(info: object) => void} [opts.onStats] 播放信息回调（码率、分辨率等）
+   * @param {() => void} [opts.onPrebuffered] 预缓冲攒够、可以起播时回调一次
    * @param {boolean} [opts.vod] 是否为录像回放（伪点播）模式
    */
-  constructor({ url, mediaSource, media, onError, onStats, vod }) {
+  constructor({ url, mediaSource, media, onError, onStats, onPrebuffered, vod }) {
     this.url = url
     this.mediaSource = mediaSource
     this.media = media
     this.onError = onError || (() => {})
     this.onStats = onStats || (() => {})
+    /**
+     * 预缓冲完成回调。
+     *
+     * <p><b>为什么要回调出去而不是直接调 {@code video.play()}</b>：
+     * 直播的 {@code autoplay} 已关掉（为了等预缓冲），此时 xgplayer 内部
+     * 认为自己是「暂停」状态 —— 直接 play video 元素不会通知它，
+     * 结果就是<b>画面在播、中央却盖着一个大播放按钮</b>。
+     * 必须由业务层通过播放器自己的 API 起播，状态才会同步。
+     */
+    this.onPrebuffered = onPrebuffered || (() => {})
     /**
      * 录像回放模式。
      *
@@ -569,7 +580,14 @@ export default class WsFlvStream {
     }
   }
 
-  /** 放行起播（幂等）。 */
+  /**
+   * 放行起播（幂等）。
+   *
+   * <p><b>不直接调 {@code media.play()}</b>：直播的 {@code autoplay} 为 false，
+   * xgplayer 内部仍是「暂停」状态；绕过它去播 video 元素，画面会动，
+   * 但控制栏认为在暂停 —— 中央那个大播放按钮就一直盖在画面上。
+   * 因此只通知业务层，由它调播放器自己的 {@code play()}，两边状态才一致。
+   */
   _releasePrebuffer() {
     if (this.prebuffered) return
     this.prebuffered = true
@@ -578,10 +596,7 @@ export default class WsFlvStream {
       this.prebufferTimer = null
     }
     if (this.destroyed || this.failed) return
-    const v = this.media
-    if (v && v.paused) {
-      v.play().catch(() => {})
-    }
+    this.onPrebuffered()
   }
 
   /** 清掉过旧的缓冲，直播只需要保留最近一小段。 */
