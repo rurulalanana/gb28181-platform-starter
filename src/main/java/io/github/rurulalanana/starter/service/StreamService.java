@@ -382,7 +382,10 @@ public class StreamService {
      * @return 是否找到并关闭了会话
      */
     public boolean stop(String deviceId, String channelId) {
-        return platform.mediaService().stop(deviceId, channelId);
+        boolean ok = platform.mediaService().stop(deviceId, channelId);
+        // 顺手清心跳记录：会话都没了，留着只会让下次同通道点播「一开始就像有人在看」
+        clearViewTouch(deviceId + "/" + channelId);
+        return ok;
     }
 
     /** 停止某通道的流（设备直连：设备编码即通道编码）。 */
@@ -901,22 +904,85 @@ public class StreamService {
                 if (keepAlive.contains(session.getChannelId())) {
                     continue;
                 }
-                if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
+                int readers = mediaServer.readerCount(session.getZlmApp(), session.getStream());
+                if (readers > 0) {
                     continue;
                 }
-                log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", grace / 1000, session.getSessionKey());
+                /*
+                 * ZLM 读者数为 0 时，再问一次前端有没有在心跳。
+                 *
+                 * <p><b>为什么需要这层兜底</b>：本平台的直播是浏览器<b>直连</b>
+                 * ZLM 的 48089 端口拉 ws-flv，这条连接完全不经过 Java 侧 ——
+                 * 「有没有人在看」Java 无从得知，只能全信 ZLM 的读者数。
+                 * 而读者数是轮询 {@code mk_media_source_for_each} 归并出来的：
+                 * HLS/TS 这类按需生成的协议源在某些时刻尚未建立，若播放器
+                 * 正好落在那个窗口里就会读到 0，从而<b>误杀正在观看的流</b> ——
+                 * 用户观感是「看着看着突然断了，重连又能看」。
+                 *
+                 * <p>前端播放器每 {@link #VIEW_TOUCH_INTERVAL_MS} 上报一次心跳，
+                 * 只要还在心跳就说明真的有人在看，绝不能关。
+                 */
+                if (hasRecentTouch(session.getSessionKey())) {
+                    log.debug("空闲流巡检：ZLM 读者数为 0，但前端仍在心跳，保留会话 {}",
+                            session.getSessionKey());
+                    continue;
+                }
+                log.info("空闲流巡检：{} 秒内无观看者（readerCount=0 且无前端心跳），关闭会话 {}",
+                        grace / 1000, session.getSessionKey());
                 // 先记冷却再关流：设备不认 BYE 时它会继续推，
                 // 不记冷却就会被孤儿流巡检立刻认领回来，形成无限循环。
                 // 按会话键记（不是 SSRC —— 会话的 ssrc 是 SDP 通告值，
                 // 与设备实际推流用的 RTP SSRC 不同，实测关流 11 秒后又被认领回来）。
                 sessions.markReaped(session.getSessionKey());
                 sessions.closeByKey(session.getSessionKey());
+                clearViewTouch(session.getSessionKey());
                 closed++;
             } catch (Exception e) {
                 log.debug("关闭空闲流失败: {}", e.getMessage());
             }
         }
         return closed;
+    }
+
+    // ==================== 观看心跳 ====================
+
+    /**
+     * 前端播放器的心跳间隔（毫秒），与前端 {@code useXgPlayer} 保持一致。
+     *
+     * <p>真正的存储与判定在<b>媒体层</b>（{@code Gb28181MediaService}）——
+     * 因为关流有两个入口：ZLM 的无人观看回调与这里的空闲巡检，两者必须
+     * 共用同一份判断，否则会出现「巡检保住了、ZLM 回调几秒后又关掉」的
+     * 自相矛盾行为。本类只做转发。
+     */
+    public static final long VIEW_TOUCH_INTERVAL_MS = 20_000L;
+
+    /**
+     * 记录一次前端观看心跳。
+     *
+     * <p>由 {@code GET /stream/info?touch=true} 触发。播放期间定时调用，
+     * 停止播放就不再调用 —— 于是「多久没心跳」就是「没人看了多久」。
+     *
+     * @param sessionKey 会话键（{@code 设备/通道}，回放另带类型后缀）
+     */
+    public void touchView(String sessionKey) {
+        Gb28181MediaService media = platform.mediaService();
+        if (media != null && sessionKey != null && !sessionKey.isBlank()) {
+            media.touchView(sessionKey);
+        }
+    }
+
+    /** 该会话最近是否有前端心跳（媒体层判定，见 {@link #touchView}）。 */
+    private boolean hasRecentTouch(String sessionKey) {
+        Gb28181MediaService media = platform.mediaService();
+        return media != null && media.hasRecentView(sessionKey);
+    }
+
+    /** 清掉某会话的心跳记录（会话关闭/停止时调用，避免残留）。 */
+    public void clearViewTouch(String sessionKey) {
+        Gb28181MediaService media = platform.mediaService();
+        if (media != null) {
+            media.clearViewTouch(sessionKey);
+        }
     }
 
     /**

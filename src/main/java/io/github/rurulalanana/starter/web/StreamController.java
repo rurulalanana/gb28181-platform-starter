@@ -116,7 +116,15 @@ public class StreamController {
                 streamService.liveList(), start, limit, serial, code, q));
     }
 
-    /** 单条直播流信息。 */
+    /**
+     * 单条直播流信息。
+     *
+     * @param touch {@code true} 表示这次调用是<b>播放器的心跳</b>，
+     *              顺便给该会话续期。前端在播放期间按固定间隔调用它，
+     *              空闲流巡检据此判断「是否真的还有人在看」——
+     *              详见 {@code StreamService#reapIdleStreams} 里的说明。
+     *              不播放时前端不再调用，心跳自然过期。
+     */
     @GetMapping("/info")
     public ApiResponse<StreamVo> info(@RequestParam String streamid,
                                       @RequestParam(defaultValue = "false") Boolean touch) {
@@ -124,6 +132,9 @@ public class StreamController {
         RtpSession session = streamService.findSession(streamid);
         if (session == null) {
             throw BizException.notFound("直播流不存在：" + streamid);
+        }
+        if (Boolean.TRUE.equals(touch)) {
+            streamService.touchView(session.getSessionKey());
         }
         return ApiResponse.ok(streamService.describe(session));
     }

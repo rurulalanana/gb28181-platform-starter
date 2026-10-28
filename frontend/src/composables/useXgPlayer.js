@@ -30,7 +30,20 @@ import { ref, shallowRef } from 'vue'
 import Player from 'xgplayer'
 import 'xgplayer/dist/index.min.css'
 import WsFlvStream from '@/player/WsFlvStream'
-import { webrtcApi } from '@/api'
+import { streamApi, webrtcApi } from '@/api'
+
+/**
+ * 观看心跳间隔（毫秒），必须与后端 {@code StreamService.VIEW_TOUCH_INTERVAL_MS} 一致。
+ *
+ * <p><b>为什么需要心跳</b>：本平台的直播是浏览器<b>直连</b> ZLM 拉 ws-flv，
+ * 这条连接完全不经过 Java 侧，后端无从得知「有没有人在看」，只能信 ZLM 的
+ * 读者数。而读者数是轮询归并出来的，若某个时刻读到 0，空闲流巡检就会
+ * <b>误杀正在观看的流</b>（观感是「看着看着突然断了，重连又能看」）。
+ *
+ * <p>播放期间按此间隔上报一次，停止播放就不再上报 ——
+ * 于是「多久没心跳」就是「没人看了多久」，巡检不会再误杀。
+ */
+const VIEW_TOUCH_INTERVAL_MS = 20000
 
 export function useXgPlayer(containerRef) {
   const playing = ref(false)
@@ -93,6 +106,37 @@ export function useXgPlayer(containerRef) {
   let currentProtoSwitch = null
 
   /**
+   * 观看心跳定时器。
+   *
+   * <p>见文件顶部 {@link VIEW_TOUCH_INTERVAL_MS} 的说明：后端靠它在
+   * 「ZLM 读者数读到 0」时确认「其实还有人在看」，从而不误关流。
+   */
+  let touchTimer = null
+
+  /** 立即上报一次心跳，并（重新）开始定时上报。 */
+  function startViewTouch(streamId) {
+    stopViewTouch()
+    if (!streamId) return
+    const ping = () => {
+      /*
+       * 失败静默：网络抖动不该给用户弹提示。
+       * 这次续期没成功也不致命 —— 下一轮还会重试，且宽限期远大于心跳间隔。
+       */
+      streamApi.info(streamId, true).catch(() => {})
+    }
+    // 先立刻打一次：巡检间隔只有 20 秒，不能等到第一个 20 秒过去才有记录
+    ping()
+    touchTimer = setInterval(ping, VIEW_TOUCH_INTERVAL_MS)
+  }
+
+  function stopViewTouch() {
+    if (touchTimer) {
+      clearInterval(touchTimer)
+      touchTimer = null
+    }
+  }
+
+  /**
    * 播放。
    *
    * @param {string} streamId 流标识 `<设备编码>/<通道编码>`
@@ -118,6 +162,15 @@ export function useXgPlayer(containerRef) {
     stop()
     disposed = false
     currentStream.value = streamId
+    /*
+     * 告诉后端「有人开始看这个会话了」。
+     *
+     * <p>放在 {@code stop()} 之后：stop 会清掉上一路的心跳，
+     * 这里重新起一个，避免多格预览时所有格子共用一个定时器。
+     * 解码失败重建（{@code opts._rebuild}）也会走到这里，重复启动无副作用
+     * （startViewTouch 内部先 stopViewTouch）。
+     */
+    startViewTouch(streamId)
     const proto = opts.proto || protocol.value
     protocol.value = proto
     // 用户主动点播才算「重新开始」，重置解码重试计数；
@@ -892,6 +945,8 @@ export function useXgPlayer(containerRef) {
   /** 停止并释放资源。 */
   function stop() {
     disposed = true
+    // 停止上报心跳：后端据此判定「没人看了」，可以回收流
+    stopViewTouch()
     // 先标记「正在销毁」：销毁会触发 media 的 pause/ratechange，
     // 不标记就会被当成用户操作发 SIP 指令（见 applyVodControls 的说明）
     const prev = player.value
