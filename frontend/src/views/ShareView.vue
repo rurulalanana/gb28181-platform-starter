@@ -36,7 +36,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useXgPlayer } from '@/composables/useXgPlayer'
+import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 
@@ -48,7 +48,7 @@ const error = ref('')
 const proto = ref(LIVE_DEFAULT_PROTOCOL)
 
 const videoContainer = ref(null)
-const player = useXgPlayer(videoContainer)
+const player = useLivePlayer(videoContainer)
 const playState = computed(() => player.state.value)
 const playStateType = usePlayerStateType(playState)
 

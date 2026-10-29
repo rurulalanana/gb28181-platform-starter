@@ -31,6 +31,7 @@ import { ElMessage } from 'element-plus'
 import Player from 'xgplayer'
 import 'xgplayer/dist/index.min.css'
 import WsFlvStream from '@/player/WsFlvStream'
+import { LivePlayerEngine, isLivePlayerAvailable } from '@/player/LivePlayerEngine'
 import { log } from '@/player/FlvDiag'
 import { webrtcApi } from '@/api'
 
@@ -110,6 +111,17 @@ export function useXgPlayer(containerRef) {
   let currentProtoSwitch = null
 
   /**
+   * 本次点播是否已从 LivePlayer 退回自研引擎。
+   *
+   * <p>退回后本次点播内不再试 LivePlayer —— 否则每次解码重建都要重付
+   * 一遍 12 秒超时。用户重新点播（非内部重建）时重置。
+   */
+  let engineFellBack = false
+
+  /** 当前 LivePlayer 引擎实例（销毁时单独收尾）。 */
+  let livePlayerEngine = null
+
+  /**
    * 播放。
    *
    * @param {string} streamId 流标识 `<设备编码>/<通道编码>`
@@ -139,9 +151,12 @@ export function useXgPlayer(containerRef) {
     currentStream.value = streamId
     const proto = opts.proto || protocol.value
     protocol.value = proto
-    // 用户主动点播才算「重新开始」，重置解码重试计数；
-    // 内部重建（解码失败自愈）要继续沿用计数，否则会变成无限重试。
-    if (!opts._rebuild) decodeRetryCount = 0
+    // 用户主动点播才算「重新开始」，重置解码重试计数与引擎回退标记；
+    // 内部重建（解码失败自愈）两者都要沿用，否则重建会重复付引擎超时。
+    if (!opts._rebuild) {
+      decodeRetryCount = 0
+      engineFellBack = false
+    }
     // 回放参数要跨重建保留，否则解码重试后进度条/拖动就失效了
     if (opts.vod !== undefined) currentVod = opts.vod
     /*
@@ -254,6 +269,136 @@ export function useXgPlayer(containerRef) {
   }
 
   /**
+   * 直播 FLV 通路入口。
+   *
+   * <p><b>优先 LivePlayer（video.js + flv.js）</b>，失败退回自研
+   * {@link WsFlvStream}。理由见 {@link playLivePlayerEngine}。
+   *
+   * <p>回放（{@code vod}）固定走自研引擎：它要伪点播（进度条 → SIP npt、
+   * 倍速 → 设备 Scale、暂停 → SIP PAUSE），LivePlayer 没有这套钩子。
+   *
+   * @param {string} url FLV 地址
+   * @param {function} onFatal 彻底失败回调
+   * @param {object|null} vod 回放参数
+   * @param {function} [onStall] 流通但无视频轨回调
+   * @param {function} [onStable] 稳定播放回调
+   * @param {function} [onLowBandwidth] 带宽不足回调
+   */
+  async function playFlv(url, onFatal, vod, onStall, onStable, onLowBandwidth) {
+    if (!url) {
+      state.value = '缺少播放地址'
+      return
+    }
+    const canUseLP = !vod && !engineFellBack && isLivePlayerAvailable()
+    if (canUseLP) {
+      const ok = await playLivePlayerEngine(url, vod)
+      if (ok) return
+      // 本次点播内不再重试 LivePlayer，避免每次重建都白付一遍超时
+      engineFellBack = true
+    }
+    await playOwnEngine(url, onFatal, vod, onStall, onStable, onLowBandwidth)
+  }
+
+  /**
+   * 用 LivePlayer（video.js 9 + flv.js）播放直播 FLV。
+   *
+   * <h3>为什么它是主引擎</h3>
+   *
+   * <p>同一条 ws-flv 链路的真机对照（1280×720 H.264 + AAC）：
+   *
+   * <table border="1">
+   *   <tr><th></th><th>LivePlayer</th><th>自研 WsFlvStream</th></tr>
+   *   <tr><td>起播</td><td>1015 ms</td><td>2~3 s</td></tr>
+   *   <tr><td>稳态缓冲</td><td><b>15.5 秒</b></td><td>2~3 秒</td></tr>
+   *   <tr><td>丢帧</td><td>3 / 211</td><td>明显更多</td></tr>
+   * </table>
+   *
+   * <p>缓冲深 5 倍是「观感更稳」的直接原因 —— 证明瓶颈在缓冲策略而非带宽。
+   *
+   * <h3>音频必须关掉（hasaudio=false）</h3>
+   *
+   * <p>不关的话<b>整路流播不出来</b>：G.711A 流报
+   * {@code Unsupported audio codec idx: 7}，AAC 流报
+   * {@code code=4 audio decoder initialization failed}。
+   * 因为 flv.js 把音频一起交给 MSE，而 ZLM 转出的音频描述符 Chrome 不认。
+   *
+   * <p>所以「FLV 无声、有画面」这个组合是可接受的代价；需要声音时：
+   * 选 WebRTC（PCMA 透传，实测有声音）或 HTTP-FLV（走自研引擎 + Web Audio）。
+   *
+   * @returns {Promise<boolean>} true = 已成功起播；false = 应退回自研引擎
+   */
+  async function playLivePlayerEngine(url, vod) {
+    const el = createHost()
+    if (!el) return false
+    state.value = '连接中…'
+    playing.value = false
+
+    return new Promise((resolve) => {
+      let settled = false
+      let readyTimer = null
+      const finish = (ok) => {
+        if (settled) return
+        settled = true
+        if (readyTimer) clearTimeout(readyTimer)
+        resolve(ok)
+      }
+
+      const engine = new LivePlayerEngine({
+        url,
+        el,
+        muted: true,
+        vod,
+        hasAudio: false,
+        onDebug: (stage, extra) => log('lp', { stage, ...(extra || {}) }),
+        onReady: () => {
+          if (disposed) return finish(true)
+          playing.value = true
+          state.value = '播放中'
+          finish(true)
+        },
+        onStats: (info) => {
+          if (disposed) return
+          videoInfo.value = info
+          stats.value = info
+        },
+        onError: (msg) => {
+          if (disposed) return finish(false)
+          log('err', { where: 'liveplayer-fallback', msg })
+          finish(false)
+        }
+      })
+      livePlayerEngine = engine
+
+      /*
+       * 起播超时：12 秒还没有画面就退回自研引擎。
+       *
+       * <p>LivePlayer 遇到不支持的编码时会<b>静默不动</b>（H.265 实测如此：
+       * readyState 一直 0、连 error 事件都不发），没有看门狗就永远黑屏。
+       */
+      readyTimer = setTimeout(() => {
+        if (settled || disposed) return
+        if (engine._readyFired) return
+        log('err', {
+          where: 'liveplayer-timeout',
+          ct: engine.currentTime(),
+          hasVideoEl: !!engine.videoEl,
+          htmlLen: el.innerHTML.length
+        })
+        finish(false)
+      }, 12000)
+
+      engine
+        .start()
+        .then((mounted) => {
+          if (!mounted && !settled) finish(false)
+        })
+        .catch(() => {
+          if (!settled) finish(false)
+        })
+    })
+  }
+
+  /**
    * 直播通路：自研 ws-flv（视频喂 MSE，G.711 喂 Web Audio）。
    *
    * @param {object|null} vod 录像回放参数；非空时进入「伪点播」模式
@@ -262,7 +407,7 @@ export function useXgPlayer(containerRef) {
    *        调用方可借此把自己那侧的「重建预算」也还回去
    * @param {function} [onLowBandwidth] 带宽持续不足时回调，参数含实测 kbps 与推进比
    */
-  async function playFlv(url, onFatal, vod, onStall, onStable, onLowBandwidth) {
+  async function playOwnEngine(url, onFatal, vod, onStall, onStable, onLowBandwidth) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -1175,6 +1320,15 @@ export function useXgPlayer(containerRef) {
     }
     for (const t of waitTimers) clearTimeout(t)
     waitTimers.length = 0
+    // LivePlayer 引擎单独收尾：它的销毁是 render(null) 而不是 media 操作
+    if (livePlayerEngine) {
+      try {
+        livePlayerEngine.destroy()
+      } catch (e) {
+        // 忽略
+      }
+      livePlayerEngine = null
+    }
     if (stream) {
       stream.destroy()
       stream = null

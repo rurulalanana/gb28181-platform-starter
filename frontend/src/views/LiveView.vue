@@ -247,7 +247,7 @@ import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
-import { useXgPlayer } from '@/composables/useXgPlayer'
+import { useLivePlayer } from '@/composables/useLivePlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
@@ -491,7 +491,7 @@ function playerOf(tile) {
   if (!players[tile.id]) {
     // 播放器渲染到容器 div 内，传入容器 ref 供播放器创建 video
     const containerRef = ref(containerRefs[tile.id])
-    const api = useXgPlayer(containerRef)
+    const api = useLivePlayer(containerRef)
     players[tile.id] = { api, tile, containerRef }
     // 播放器状态同步到格子（替代轮询）
     stoppers[tile.id] = watch(

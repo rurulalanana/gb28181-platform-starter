@@ -69,7 +69,9 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
     /** 前端为了「播放即点播」会 POST，但语义上只是取流地址，不改变任何持久状态。 */
     private static final Set<String> PLAYBACK_START_PATHS = new HashSet<>(Arrays.asList(
             "/api/v1/stream/start",
-            "/api/v1/webrtc/play"
+            "/api/v1/webrtc/play",
+            // LivePlayer 内置 Webrtc tech 的 SRS 风格端点（裸 SDP 入 / base64 出）
+            "/api/v1/webrtc/srs"
     ));
 
     /**

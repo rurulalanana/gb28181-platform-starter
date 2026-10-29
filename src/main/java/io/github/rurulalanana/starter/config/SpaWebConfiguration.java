@@ -34,7 +34,7 @@ import java.time.Duration;
 public class SpaWebConfiguration implements WebMvcConfigurer {
 
     /** 一级路径白名单：这些前缀下的请求交给静态资源处理器，不做 SPA 回退。 */
-    private static final String STATIC_PREFIXES = "api|assets|record|error|jessibuca";
+    private static final String STATIC_PREFIXES = "api|assets|record|error|jessibuca|js";
 
     private final Gb28181Properties props;
 
@@ -117,6 +117,20 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         // 所以用 7 天而非 immutable：升级 SDK 后最多脏缓存一周。
         registry.addResourceHandler("/jessibuca/**")
                 .addResourceLocations("classpath:/static/jessibuca/")
+                .setCacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePublic());
+
+        /*
+         * 第三方播放器脚本（liveplayer-lib.min.js 1.2MB + 组件 160KB）。
+         *
+         * <p><b>必须单独注册 + 进白名单</b>：{@code /js/x.min.js} 是「目录 + 带扩展名」
+         * 的两段路径，会被 SPA 兜底规则 {@code /{path}/**} 吃掉（{@code **} 不受
+         * 「无扩展名」限制），结果前端拿到一段 {@code index.html}，
+         * 表现为 {@code videojs} 未定义、整个直播页面起不来。
+         *
+         * <p>文件名固定、无内容哈希，故用 7 天缓存而非 immutable。
+         */
+        registry.addResourceHandler("/js/**")
+                .addResourceLocations("classpath:/static/js/")
                 .setCacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePublic());
 
         /*

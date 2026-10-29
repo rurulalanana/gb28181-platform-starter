@@ -372,7 +372,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_PROTOCOL_SHORT, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
-import { useXgPlayer } from '@/composables/useXgPlayer'
+import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -420,7 +420,7 @@ const mediaHttpPort = ref(null)
 
 /** 播放器容器（xgplayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
-const player = useXgPlayer(videoContainer)
+const player = useLivePlayer(videoContainer)
 
 /*
  * 协议下拉跟随播放器实际使用的协议（WebRTC 失败会自动回退到 FLV）。

@@ -163,15 +163,16 @@ export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
  * <p>列在这里的都是<b>浏览器真能播</b>的通路：
  * <ul>
  *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s）、<b>最流畅</b>（UDP）。
- *       <b>G.711（PCMA/PCMU）设备有声音</b>：播放器用
- *       {@code setCodecPreferences} 把音频编码限制成 PCMA/PCMU，
- *       ZLM 直接透传，浏览器原生解码 —— 不需要任何 WASM。
- *       <b>但 AAC 设备（部分下级平台通道）没声音</b>：浏览器不支持
- *       AAC-in-WebRTC，ZLM 也没有 ffmpeg 可转码，这类通道要声音请切 FLV。
- *       另：H.265 设备 WebRTC 协商会失败，播放器自动回退到 FLV。</li>
- *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，<b>所有编码都有声音</b>
- *       （AAC 走 MSE，G.711 走 Web Audio），延迟 ≈ 3s（TCP 队头阻塞，
- *       必须靠深缓冲抹平）；</li>
+ *       媒体面完全交给 liveplayer 的 {@code Webrtc} tech，信令走本平台的
+ *       {@code /api/v1/webrtc/srs} 适配端点。
+ *       <b>G.711（PCMA/PCMU）通道有声音</b>（ZLM 原样透传，浏览器原生解码），
+ *       <b>H.265 也能播</b>（实测 2560×1440 稳定 25fps、488 帧丢 1 帧）。
+ *       <b>但 AAC 通道没声音</b>：浏览器不支持 AAC-in-WebRTC，
+ *       嵌入式 ZLM 也没有 ffmpeg 可转码，这类通道要声音只能换设备侧编码。</li>
+ *   <li>{@code wsflv} —— WebSocket-FLV，liveplayer（video.js + flv.js）。
+ *       <b>没有声音</b>：flv.js 不认 ZLM 转出的 G.711（{@code audio codec idx 7}），
+ *       AAC 也会在 MSE 初始化时失败，一并关掉后画面才稳。
+ *       优势是缓冲能攒到 15 秒以上，弱网下比 WebRTC 抗抖动；</li>
  *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，特性同 ws-flv，
  *       能穿代理/防火墙；</li>
  *   <li>{@code hls} —— 纯 HTTP、无需长连接，延迟 ≈ 3 个切片（ZLM 配 2s×3）。
@@ -180,17 +181,17 @@ export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
  * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
  */
 export const LIVE_PROTOCOLS = [
-  { value: 'webrtc', label: 'WebRTC（最流畅）' },
-  { value: 'wsflv', label: 'WebSocket-FLV（全有声）' },
-  { value: 'httpflv', label: 'HTTP-FLV（全有声）' },
-  { value: 'hls', label: 'HLS（无声音）' }
+  { value: 'webrtc', label: 'WebRTC（最流畅·支持声音）' },
+  { value: 'wsflv', label: 'WebSocket-FLV（静音·缓冲深）' },
+  { value: 'httpflv', label: 'HTTP-FLV（静音·可穿代理）' },
+  { value: 'hls', label: 'HLS（静音·延迟高）' }
 ]
 
 /** 协议对应的短标签（播放器控制栏空间小，用短名）。 */
 export const LIVE_PROTOCOL_SHORT = {
+  webrtc: 'WebRTC',
   wsflv: 'FLV',
   httpflv: 'HTTP-FLV',
-  webrtc: 'WebRTC',
   hls: 'HLS'
 }
 

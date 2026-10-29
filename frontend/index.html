@@ -9,6 +9,14 @@
     每次打开/刷新页面后端都会打一条 NoResourceFoundException 的 ERROR 日志。
   -->
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <!--
+    LivePlayer 的基础库（video.js 9 + flvjs + Hls/Webrtc tech）。
+    必须同步加载且**不能用 type="module"**：它以 UMD 形式挂 window.videojs，
+    而 `@liveqing/liveplayer-v3` 组件内部直接引用该全局。
+    组件本体（liveplayer-component.min.js）由 src/player/LivePlayerEngine.js
+    在首次使用时动态注入（它要求先有 window.Vue）。
+  -->
+  <script src="/js/liveplayer-lib.min.js"></script>
   <title>GB28181 视频监控平台</title>
 </head>
 <body>

@@ -74,6 +74,58 @@ public class WebRtcController {
     public ApiResponse<WebrtcPlayVo> play(@RequestParam String stream,
                                           @RequestParam(required = false) String peerId,
                                           @RequestBody String offerSdp) {
+        WebrtcPlayVo vo = negotiate(stream, peerId, offerSdp);
+        return ApiResponse.ok(vo);
+    }
+
+    /**
+     * SRS 风格（LivePlayer 的 {@code Webrtc} tech 专用）SDP 交换。
+     *
+     * <p><b>为什么要单开一个端点</b>：{@code @liveqing/liveplayer-v3} 内置的
+     * {@code Webrtc} tech 写死了这套约定（见 {@code liveplayer-lib.min.js}）：
+     * <pre>
+     * const xhr = new XMLHttpRequest();
+     * xhr.open('POST', url.replace('webrtc', 'http'), true);   // webrtc:// → http://
+     * xhr.send(btoa(pc.localDescription.sdp));                 // 请求体 = base64(offer)
+     * pc.setRemoteDescription({ type:'answer', sdp: atob(xhr.responseText) });
+     * </pre>
+     * 即：<b>两个方向都是 base64</b> —— 请求体是 base64 编码的 offer，
+     * 应答体必须是 base64 编码的 answer 纯文本。本项目原有的 {@code /play}
+     * 收发都是裸 SDP + JSON 包装，播放器解不出来，故此处适配。
+     *
+     * <p>地址拼法（前端 {@code useLivePlayer.js} 已按此生成）：
+     * {@code webrtc://<host>/api/v1/webrtc/srs?stream=<设备编码>/<通道编码>}
+     * —— 播放器把协议头替换成 {@code http} 后正是本接口。
+     *
+     * @param offerSdpBase64 base64 编码的 offer SDP
+     * @return base64 编码的 answer SDP；失败时返回空串（播放器按 error 处理）
+     */
+    @PostMapping(value = "/srs", consumes = "*/*", produces = "text/plain;charset=UTF-8")
+    public String srsWhep(@RequestParam String stream,
+                          @RequestParam(required = false) String peerId,
+                          @RequestBody String offerSdpBase64) {
+        try {
+            String offerSdp = new String(
+                    java.util.Base64.getMimeDecoder().decode(offerSdpBase64.trim()),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            WebrtcPlayVo vo = negotiate(stream, peerId, offerSdp);
+            return java.util.Base64.getEncoder()
+                    .encodeToString(vo.getSdp().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            // 播放器只认 HTTP 状态码，这里降级成空串让它走 error 分支
+            log.warn("WebRTC(SRS 风格) 交换失败: stream={} err={}", stream, e.getMessage());
+            return "";
+        }
+    }
+
+    /**
+     * 统一的 SDP 交换实现。
+     *
+     * @param stream  {@code <设备编码>/<通道编码>}
+     * @param peerId  对端标识，空则服务端分配
+     * @param offerSdp 浏览器 offer
+     */
+    private WebrtcPlayVo negotiate(String stream, String peerId, String offerSdp) {
         if (platform.webRtcService() == null || platform.mediaServer() == null) {
             throw BizException.badRequest("媒体服务未启动，无法进行 WebRTC 交换");
         }
@@ -135,7 +187,7 @@ public class WebRtcController {
             vo.setSdp(answer);
             vo.setStreamId(deviceId + "/" + channelId);
             vo.setWebrtc(platform.mediaServer().playUrls(zlmApp, zlmStream).getWebrtc());
-            return ApiResponse.ok(vo);
+            return vo;
         } catch (BizException e) {
             throw e;
         } catch (Exception e) {
