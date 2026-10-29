@@ -37,29 +37,34 @@
 import { FlvDemuxer, FMP4Remuxer, AudioCodecType } from 'xgplayer-transmuxer'
 import { decodeG711, G711_SAMPLE_RATE } from './g711'
 
-/** 直播缓冲保留时长（秒）：超过就从 SourceBuffer 里清掉，防止内存涨到爆。 */
-const BUFFER_KEEP_SECONDS = 30
+/**
+ * 直播缓冲保留时长（秒）：超过旧的部分就清掉，防止内存无限增长。
+ *
+ * <p><b>不要调小</b>：{@code SourceBuffer.remove()} 会打断 append 并让
+ * 解码器重置。缓冲深度是抗抖动的唯一依靠（见 {@link PREBUFFER_SECONDS}），
+ * 而它靠「不清理」才能攒住 —— 清得太勤等于把攒下的安全余量亲手丢掉。
+ */
+const BUFFER_KEEP_SECONDS = 45
 
 /**
  * 起播前要求的最小缓冲（秒）。
  *
- * <p><b>为什么必须预缓冲</b>：改造前播放器是 {@code autoplay} —— 拿到第一个
- * 关键帧、buffer 里有 0.1 秒数据就开始播。在带宽充足的局域网里没问题，
- * 但只要「到达速率」略低于「码率」，buffer 就<b>永远贴着 0</b>：
- * <pre>
- *   实测弱网（带宽 500 kbps / 码率 850 kbps）：
- *   buffered 余量长期 0.11 ~ 0.64 秒
- *   25 秒内出现 15 次 waiting（= 用户看到的一卡一卡）
- * </pre>
- * 因为只要网络有 0.2 秒的间隙，那 0.1 秒的缓冲就见底了。
+ * <p><b>这是「播两秒卡一下」的根治手段</b>。国标设备经 ZLM 转出 FLV 时，
+ * 数据到达速率<b>恰好等于码率</b>（实测 4.9 MB / 46 秒 ≈ 856 kbps，与视频
+ * 码率完全一致），所以 MSE 缓冲自己不会变厚 —— 播多快，数据就来多快。
  *
- * <p>先攒够 {@code PREBUFFER_SECONDS} 再起播，等于把「抖动容忍」从 0.1 秒
- * 提到 2 秒 —— 常见的一两秒网络抖动就完全无感了。
+ * <p>结果：缓冲深度取决于<b>起播时攒了多少</b>，之后只会被消耗。
+ * 改造前只攒 2 秒、起播又立刻 seek 到边缘丢掉 1 秒，稳态只剩 <b>0.48 秒</b>
+ * （实测 {@code buffered=[[0,31.8]]} 而 {@code ct=31.32}）。这个深度下，
+ * 任何一次 {@code remove()}、GC、解码尖峰都会把它吃干 → 转圈。
  *
- * <p><b>代价是起播变慢</b>：低码率流攒 2 秒约需 2~4 秒。监控场景下
- * 「晚 2 秒出画面」远比「画面一卡一卡」可接受，所以取 2 秒而不是更低。
+ * <p>4 秒是按「常见单次抖动 ≤ 2 秒」留的余量：即使真来一次 2 秒抖动，
+ * 也还剩下 2 秒，用户完全无感。
+ *
+ * <p><b>代价是起播变慢</b>：低码率流攒 4 秒约需 4~6 秒。监控场景下
+ * 「晚几秒出画面」远比「画面一卡一卡」可接受。
  */
-const PREBUFFER_SECONDS = 2
+const PREBUFFER_SECONDS = 4
 
 /**
  * 预缓冲的最长等待（毫秒）。
@@ -79,8 +84,43 @@ const PREBUFFER_TIMEOUT_MS = 8000
  * 比直接报错停下更糟。
  */
 const MAX_APPEND_QUEUE = 256
-/** 硬跳阈值（秒）：音画差超过它就直接改 currentTime。 */
-const HARD_SYNC_THRESHOLD = 0.5
+
+/**
+ * fMP4 分段时长（毫秒）：攒够这么久媒体数据就重封装一段写进 MSE。
+ *
+ * <p><b>这是「播两秒转圈一下」的根治点</b>。设备按帧推流（实测 74 个
+ * FLV 标签/秒），若一个标签刷一次就是 74 次/秒的 {@code appendBuffer}。
+ * 实测 MSE 写入跟不上播放：{@code buffered.end} 只以 0.5~0.8 倍实时增长，
+ * {@code currentTime} 按 1.0 倍前进，播着播着就跑到缓冲末尾之外，
+ * 解码器没数据 → {@code waiting} → 转圈。
+ *
+ * <p>400 毫秒是实测平衡点：写入频率降到约 2~3 次/秒（与 flv.js /
+ * mpegts.js 一致），又不会因为段太长而拉高延迟与内存。
+ */
+const SEGMENT_FLUSH_MS = 400
+
+/**
+ * 待刷队列的样本数上限：满这么多帧就刷一段。
+ *
+ * <p><b>为什么还需要按帧数兜底</b>：{@link SEGMENT_FLUSH_MS} 依赖样本上的
+ * {@code duration} 字段，而某些流（或封装器版本的差异）会把它给成 0 ——
+ * 此时 {@code pendingMs} 永远不涨，就只剩 {@link _scheduleFlush} 的定时器路径。
+ * 而<b>后台标签的 {@code setTimeout} 会被 Chrome 限流到约 1 次/分钟</b>，
+ * 于是完全不再写入 MSB，播放自然卡死（实测 appends = 0 / 20 秒）。
+ *
+ * <p>按帧数判定不依赖任何时间字段，是真正的兜底：8 帧在 15 fps 下约 530 毫秒。
+ */
+const SEGMENT_MAX_SAMPLES = 8
+
+/**
+ * 音画硬跳阈值（秒）：偏差超过它才改 {@code currentTime}。
+ *
+ * <p><b>从 0.5 放宽到 2.0</b>：G.711 音频走 Web Audio 绝对时钟，而视频
+ * 靠 MSE 缓冲 —— 两者本来就会差几百毫秒。原值 0.5 导致每几秒就对齐一次，
+ * 每次都是「画面一顿」；而监控画面本来就对唇音同步不敏感，
+ * 宁可放任 2 秒以内的偏差，也不要把画面打断。
+ */
+const HARD_SYNC_THRESHOLD = 2.0
 /** 软调阈值（秒）：超过它用播放速率追赶，避免频繁跳帧。 */
 const SOFT_SYNC_THRESHOLD = 0.2
 
@@ -89,19 +129,18 @@ const SOFT_SYNC_THRESHOLD = 0.2
 /**
  * 稳态目标延迟（秒）：播放位置与「已到达的最新数据」之间保留的余量。
  *
- * <p><b>为什么需要追帧</b>：MSE 的 {@code currentTime} 只会随播放自然推进，
- * 而 ZLM 持续以实时速度推数据，两者的差值（缓冲余量）只会越积越多 ——
- * 表现为「越看越延迟」。实测不追帧时，看 10 分钟能积出 8~15 秒延迟，
- * 云台控制后要等十几秒画面才动。
+ * <p><b>为什么需要保底余量而不是追到最小</b>：数据到达速率恰好等于码率
+ * （见 {@link PREBUFFER_SECONDS} 的实测），所以余量只会被消耗、很难自己变厚。
+ * 目标定得太低时，任何一次抖动都会直接吃干缓冲 → 转圈。
  *
- * <p><b>为什么留 1 秒而不是 0.6 秒</b>：ZLM 是<b>按批</b>落盘的 —— 一次
- * append 往往带来 0.5~2 秒的数据，因此 {@code buffered.end - currentTime}
- * 本身就在 0.1~2.4 秒之间<b>剧烈抖动</b>（实测 80 个采样点，标准差 &gt; 0.6）。
- * 目标定 0.6 时，正常抖动就会被误判成「余量过低」而反复降速，缓冲反而
- * 更容易被吃穿。1 秒既能跨过一个 GOP 边界的到达缺口，又让端到端延迟
- * 维持在 2 秒内。
+ * <p><b>从 1.0 提到 3.0</b>：1 秒在实测中依然反复见底（稳态只有 0.48 秒），
+ * 用户看到的就是「播两秒卡一下」。3 秒比常见单次抖动（≤ 2 秒）大一倍，
+ * 能真正把抖动吸收掉；代价是端到端延迟约 3~4 秒。
+ *
+ * <p><b>延迟敏感场景请用 WebRTC 协议</b>（同页切换即可，延迟 &lt; 0.5 秒）。
+ * FLV 通路的定位是「稳」，WebRTC 的定位是「快」。
  */
-const LIVE_TARGET_LATENCY = 1.0
+const LIVE_TARGET_LATENCY = 3.0
 
 /**
  * 硬跳阈值（秒）：缓冲余量超过它就丢帧直接跳到边缘前 {@link LIVE_TARGET_LATENCY}。
@@ -110,30 +149,25 @@ const LIVE_TARGET_LATENCY = 1.0
  * 它跟着帧走 —— 只要没有丢帧，OSD 就只会一秒一秒地走；一旦发生向前 seek，
  * 用户就会看到画面卡一下、右上角时间猛地跳到几秒之后。
  *
- * <p>因此它的取值不能只看「延迟」，要看「什么情况下丢帧用户能接受」：
- * <ul>
- *   <li>正常观看时<b>一次都不应该丢</b>（哪怕延迟多一两秒）；</li>
- *   <li>只有从后台切回来、或系统卡顿过，积压了几十秒时才值得一次跳完。</li>
- * </ul>
- * 实测正常观看的缓冲余量在 0.1~2.4 秒之间抖动（ZLM 按批落盘），
- * 取 5 秒就完全盖住了这个抖动区间 —— 日常零跳帧，只有真正的积压才触发。
+ * <p>取值思路：正常观看的余量会围绕 {@link LIVE_TARGET_LATENCY} 上下浮动，
+ * 这个阈值必须远高于浮动幅度；只有「切后台一小时」「系统卡顿几十秒」这类
+ * 真积压才值得一次跳完。
  *
- * <p>历史：取 1.6 时 40 秒跳了 26 次，取 3.0 时仍有 1 次；
- * 两者都会让 OSD “往前跳”，所以抬高到 5.0。
+ * <p>历史：取 1.6 时 40 秒跳了 26 次（OSD 一直在跳）；取 3.0 时仍有 1 次。
+ * 提到 8.0 后，正常观看完全不会触发。
  */
-const LIVE_MAX_LATENCY = 5.0
+const LIVE_MAX_LATENCY = 8.0
 
 /**
- * 从后台切回来时允许的硬跳阈值（秒）：比常驻阈值宽松。
+ * 从后台切回来时允许的硬跳阈值（秒）。
  *
  * <p>后台标签下 Chrome 会挂起哑音视频（本项目的音频走 Web Audio、
  * video 元素恒为静音），而 ZLM 这期间一直在推 —— 切回来时往往积压
  * 十几秒到几十秒。这种场景用户<b>预期</b>画面会跳到最新，不跳反而奇怪。
  *
- * <p>0.5 秒而不是 0：后台停留几秒、余量只多了 0.5 秒以上才值得跳，
- * 否则一次短暂切窗回来也要丢一帧，白白让 OSD 跳一下。
+ * <p>取 {@code 目标 + 2}：比正常浮动幅度大，避免一次短暂切窗回来就丢帧。
  */
-const LIVE_RESUME_JUMP_LATENCY = 0.5
+const LIVE_RESUME_JUMP_LATENCY = LIVE_TARGET_LATENCY + 2.0
 
 /**
  * 页面隐藏超过多久，切回来时才允许「立即硬跳」（毫秒）。
@@ -152,30 +186,29 @@ const LIVE_HIDDEN_RESUME_MS = 3000
 const LIVE_JUMP_COOLDOWN_MS = 5000
 
 /**
- * 软追帧倍速：余量在 {@code [目标, 硬跳阈值]} 之间时用它慢慢吃掉。
+ * 软追帧倍速：余量明显超过目标时用它慢慢吃掉。
  *
- * <p>取 1.08 而不是更大：1.08 倍速在监控画面上几乎看不出（人眼对监控这类
- * 静态场景的匀速变化不敏感），但 10 秒就能吃掉 0.8 秒余量。
- * 再大就会明显"快进感"，且音频走 Web Audio 是按 PTS 排程的，
- * 视频加速会造成音画分离。
+ * <p>取 1.05 而不是 1.08：倍速变化会让浏览器重算解码节奏，
+ * 在马赛克/硬解场景下可能丢帧；监控画面又对「快5%」毫无感知，
+ * 宁可追得慢一点、只在不急的时候追。
  */
-const LIVE_CHASE_RATE = 1.08
+const LIVE_CHASE_RATE = 1.05
 
 /**
  * 软追帧的死区（秒）：余量超过 {@code 目标 + 本值} 才开始加速。
  *
- * <p>0.3 而不是 0.15：余量本身就抖 ±0.6 秒，死区太窄会让倍速在
- * 1.00 / 1.08 之间反复跳，每次都触发 {@code ratechange}。
+ * <p>1.0 而不是 0.3：宽死区让倍速几乎一直在 1.00，
+ * 只在缓冲突发涨厚时才短暂加速 —— 越少改倍速，解码越稳。
  */
-const LIVE_CHASE_DEADBAND = 0.3
+const LIVE_CHASE_DEADBAND = 1.0
 
 /**
  * 追帧的目标下限（秒）：余量小于它时才降速回填。
  *
- * <p>调低到 0.5 而不是更高：降速回填每秒只能补 0.02 秒，
- * 靠它救不了大缺口，只能防「马上就要吃穿」的最后一下。
+ * <p>降速回填每秒只能补 0.02 秒，靠它救不了大缺口；
+ * 它的作用只是「马上要吃穿时再挤一点时间」。
  */
-const LIVE_MIN_LATENCY = 0.5
+const LIVE_MIN_LATENCY = 1.5
 /** 音频提前排程量（秒）：留一点余量，避免第一个包就被判定为「已经迟到」。 */
 const AUDIO_LEAD_SECONDS = 0.12
 /** 音频最多领跑多少秒（超过说明时间戳异常，丢弃以压低延迟）。 */
@@ -255,6 +288,17 @@ export default class WsFlvStream {
     /** 是否已经拿到关键帧：没有关键帧不能喂给解码器。 */
     this.gotKeyframe = false
     /**
+     * 待刷的视频样本队列（跨多次 demux 累积）。
+     *
+     * <p>见 {@link _handleVideo} 与 {@link SEGMENT_FLUSH_MS}：不能每个 FLV
+     * 标签就 remux 一次，否则 MSE 写入跟不上播放速度。
+     */
+    this.pendingSamples = []
+    /** 待刷队列已有的媒体时长（毫秒），用于判定何时刷一段。 */
+    this.pendingMs = 0
+    /** 兜底刷段定时器，见 {@link _scheduleFlush}。 */
+    this.flushTimer = null
+    /**
      * 预缓冲是否已完成。
      *
      * <p>见 {@link PREBUFFER_SECONDS} 的说明：攒够缓冲才允许起播。
@@ -305,6 +349,8 @@ export default class WsFlvStream {
     this.hiddenAt = 0
     /** 可见性监听器（销毁时解绑）。 */
     this._onVisibility = null
+    /** 上次尝试清理旧缓冲的时刻（毫秒），用于限流。见 {@link _evict}。 */
+    this.lastEvictAt = 0
 
     this._bindMediaSource()
   }
@@ -620,7 +666,21 @@ export default class WsFlvStream {
     audioTrack.reset()
   }
 
-  /** 视频分支：攒够一个周期就重封装成 fMP4 段。 */
+  /**
+   * 视频分支：把样本攒进待刷队列，按「时长」或「关键帧」切成 fMP4 段。
+   *
+   * <p><b>为什么不能一个 FLV 标签刷一次</b>（原来的做法）：</p>
+   * <p>设备按帧推流，每个标签就是一个视频帧，实测 <b>74 个标签/秒</b>。
+   * 若每个标签都 remux + {@code appendBuffer}，就是 74 次/秒的 MSE 写入 ——
+   * 每次都要新建 moof/mdat、走一遍 {%@code SourceBuffer} 状态机。实测结果：
+   * MSE 的写入速度<b>追不上播放速度</b>，{@code buffered.end} 只以 0.5~0.8 倍
+   * 实时增长，而 {@code currentTime} 按 1.0 倍前进，于是播着播着就跑到
+   * 缓冲末尾之外 —— 解码器没数据，触发 {@code waiting}，用户看到的就是
+   * 「播两秒转圈一下」（实测 {@code ct=11.94} 而 {@code buffered.end=11.6}）。</p>
+   *
+   * <p>改成攒 {@link SEGMENT_FLUSH_MS} 毫秒再刷一段后，写入频率降到约 2~3 次/秒，
+   * 与 flv.js / mpegts.js 的做法一致。顺带把 CPU 占用降一个数量级。</p>
+   */
   _handleVideo(videoTrack) {
     if (!this.sourceOpen || !videoTrack.hasSample()) return
 
@@ -642,6 +702,8 @@ export default class WsFlvStream {
       this.needInitSegment = true
     }
 
+    const samples = videoTrack.samples
+
     // 等关键帧再喂数据。
     //
     // 直播刚建立时，设备是从当前 GOP 的中间开始推流的，ZLM 拿到的第一个
@@ -652,12 +714,69 @@ export default class WsFlvStream {
     // （GOP 周期通常 2~5 秒）。解封装器内部会把最后一个样本缓存起来，
     // 下一批再放回来，所以这里清空 samples 不会丢帧。
     if (!this.gotKeyframe) {
-      if (!videoTrack.samples.some((s) => s.keyframe)) {
+      if (!samples.some((s) => s.keyframe)) {
         videoTrack.samples = []
         return
       }
       this.gotKeyframe = true
     }
+
+    /*
+     * 搬运样本到待刷队列。
+     *
+     * <p>遇到关键帧时先把之前攒的刷出去 —— 这样每一段的<b>首样本都是关键帧</b>，
+     * 解码器无论从哪一段开始都能独立解，seek/重建时不必回溯。
+     *
+     * <p>{@code videoTrack.samples = []}（而不是 {@code reset()}）：
+     * 只清样本、保留 {@code codec} / {@code width} 等轨道元信息，
+     * 否则下一次 remux 生成 init segment 时就没有编码参数了。
+     */
+    for (const s of samples) {
+      if (s.keyframe && this.pendingSamples.length) {
+        this._flushVideo()
+      }
+      this.pendingSamples.push(s)
+      this.pendingMs += s.duration || 0
+    }
+    videoTrack.samples = []
+
+    // 攒够一段时长（或帧数）就刷（长 GOP 下也不能一直等关键帧）
+    if (
+      this.pendingMs >= SEGMENT_FLUSH_MS ||
+      this.pendingSamples.length >= SEGMENT_MAX_SAMPLES
+    ) {
+      this._flushVideo()
+      return
+    }
+    this._scheduleFlush()
+  }
+
+  /**
+   * 兜底刷段：低帧率流（如 5 fps）下 400 毫秒可能只来一两个样本，
+   * 光靠 {@code pendingMs} 判定会攒太久、拉高延迟。这里用一个定时器
+   * 保证「最迟 {@link SEGMENT_FLUSH_MS} 之后一定刷一次」。
+   */
+  _scheduleFlush() {
+    if (this.flushTimer) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      if (this.destroyed || this.failed) return
+      this._flushVideo()
+    }, SEGMENT_FLUSH_MS)
+  }
+
+  /**
+   * 把待刷样本重封装成一段 fMP4 并写入 SourceBuffer。
+   *
+   * <p>样本会被直接塞回 {@code videoTrack.samples} 再交给 remuxer ——
+   * 这是 {@code FMP4Remuxer} 的接口约定（它从轨道对象上取样本，末尾自己清空）。
+   */
+  _flushVideo() {
+    if (!this.pendingSamples.length) return
+    const videoTrack = this.demuxer.videoTrack
+    videoTrack.samples = this.pendingSamples
+    this.pendingSamples = []
+    this.pendingMs = 0
 
     let result
     try {
@@ -819,42 +938,43 @@ export default class WsFlvStream {
     if (this.destroyed || this.failed) return
 
     /*
-     * 起播瞬间先追到直播边缘。
+     * 起播时<b>不要</b>再 seek。
      *
-     * <p>预缓冲攒了 {@link PREBUFFER_SECONDS}（2 秒）才放行，如果就此起播，
-     * 这 2 秒会原封不动变成用户的观看延迟。既然要的是「实时画面」，
-     * 攒够的那 2 秒里前面的 1.4 秒本来就不必看 —— 直接跳到边缘前
-     * {@link LIVE_TARGET_LATENCY}，起播延迟立刻从 2 秒降到 0.6 秒。
+     * <p>早先的实现会先跳到 {@code edge - 目标延迟} 再起播，理由是「预缓冲
+     * 攒的那几秒白看了」。但这是个致命的取舍错误：数据到达速率恰好等于码率
+     * （见 {@link PREBUFFER_SECONDS} 的实测），缓冲<b>只能靠起播时攒下的那一点
+     * 慢慢消耗</b>，跳过去等于把辛苦攒的余量当场倒掉。
      *
-     * <p>放在 onPrebuffered 之前：业务层收到回调就调 play() 了，
-     * 若之后再改 currentTime 会表现为"画面闪一下"。
+     * <p>实测后果：稳态缓冲只剩 0.48 秒，用户看到「播两秒卡一下」。
+     * 现在直接从当前 {@code currentTime} 起播，把攒下的 4 秒全带进播放。
      */
-    const v = this.media
-    if (v && v.buffered.length) {
-      const edge = v.buffered.end(v.buffered.length - 1)
-      const target = edge - LIVE_TARGET_LATENCY
-      if (target > v.currentTime + 0.05) {
-        try {
-          v.currentTime = target
-        } catch (e) {
-          // 忽略：seek 失败时退化为从头播，下一拍追帧会补上
-        }
-      }
-    }
     // 追帧计时从"真正开始播"算起，避免预缓冲那几秒被算进 2 秒观察期
     this.chaseStartAt = Date.now()
 
     this.onPrebuffered()
   }
 
-  /** 清掉过旧的缓冲，直播只需要保留最近一小段。 */
+  /** 清掉过旧的缓冲，直播只需要保留最近一段。 */
   _evict(aggressive = false) {
     const sb = this.sourceBuffer
     const v = this.media
     // 媒体已作废时 remove 同样会抛 InvalidStateError，直接跳过
     if (!sb || sb.updating || !v || v.error || !v.buffered.length) return
+    /*
+     * 限流：{@code remove()} 会把 `sb.updating` 置位并让 append 停下，
+     * 频繁调用等于周期性断供 —— 而缓冲深度本来就只有几秒。
+     * 10 秒试一次足够（45 秒才需要清理，一次清不完下轮接着清）。
+     */
+    const now = Date.now()
+    if (!aggressive && now - this.lastEvictAt < 10000) return
+    this.lastEvictAt = now
     const start = v.buffered.start(0)
-    const removeTo = v.currentTime - (aggressive ? 2 : BUFFER_KEEP_SECONDS)
+    /*
+     * 紧急回收（QuotaExceededError）也不能清太狠：
+     * 原来清到 {@code ct - 2}，一次丢掉近 30 秒缓冲，紧接着就是转圈。
+     * 保留 20 秒，只把更早的部分扔掉。
+     */
+    const removeTo = v.currentTime - (aggressive ? 20 : BUFFER_KEEP_SECONDS)
     if (removeTo - start > 1) {
       try {
         sb.remove(start, removeTo)
@@ -1177,9 +1297,11 @@ export default class WsFlvStream {
     if (this.retryTimer) clearTimeout(this.retryTimer)
     if (this.syncTimer) clearInterval(this.syncTimer)
     if (this.prebufferTimer) clearTimeout(this.prebufferTimer)
+    if (this.flushTimer) clearTimeout(this.flushTimer)
     this.retryTimer = null
     this.syncTimer = null
     this.prebufferTimer = null
+    this.flushTimer = null
     if (this._onVisibility) {
       try {
         document.removeEventListener('visibilitychange', this._onVisibility)

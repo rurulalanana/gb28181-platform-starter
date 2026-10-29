@@ -322,6 +322,31 @@ public class StreamService {
      */
     private final java.util.Set<String> downloadLocks = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /**
+     * 各会话「最近一次确认有观众」的时刻（毫秒）。
+     *
+     * <p><b>为什么不能只看一次采样</b>：{@code readerCount()} 是<b>瞬时</b>值。
+     * 实测（真机 + ws-flv 稳定观看）会出现读者数为 0 的时刻 ——
+     * 播放器重连的几百毫秒间隙、{@code SourceBuffer} 写入阻塞期间
+     * 浏览器暂停读取、以及 ZLM 多个协议源之间的状态瞬时不一致，
+     * 任何一次采样为 0 就直接关流，用户看到的是
+     * 「画面好好的，服务端把流关了」→ 前端重连 → 重新缓冲 → 反复 loop。
+     *
+     * <p>所以改成：读者数 &gt; 0 时记录时间戳；只有「连续 {@code grace} 毫秒
+     * 都看不到观众」才关。这样单次抖动会被下一次采样自动抹平，
+     * 而真正没人看的流最迟 {@code 2 × grace} 后仍会被回收。
+     *
+     * <p>会话结束时清理对应条目（见 {@link #forgetViewers}），避免长期占用内存。
+     */
+    private final java.util.Map<String, Long> lastViewerAt = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 忘记某会话的观看记录（会话关闭/重建时调用）。 */
+    public void forgetViewers(String sessionKey) {
+        if (sessionKey != null) {
+            lastViewerAt.remove(sessionKey);
+        }
+    }
+
     /** 标记该会话正被下载占用（重复调用无副作用）。 */
     public void lockForDownload(String sessionKey) {
         if (sessionKey != null && !sessionKey.isBlank()) {
@@ -915,6 +940,24 @@ public class StreamService {
                     continue;
                 }
                 if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
+                    // 看到观众就刷新时间戳：本次不关，且给下一次采样留出宽限
+                    lastViewerAt.put(session.getSessionKey(), now);
+                    continue;
+                }
+                /*
+                 * 读者数为 0 —— <b>不能据此立刻关流</b>。
+                 *
+                 * <p>这是瞬时采样，重连间隙、浏览器因 SourceBuffer 写入阻塞而
+                 * 暂停读取、ZLM 多协议源之间的状态瞬时不一致，都会让它读到 0。
+                 * 实测后果：用户正在看，服务端却判定「45 秒内无观看者」并关流，
+                 * 前端 WebSocket 断开 → 重连 → 重新缓冲，表现为
+                 * 「画面好好的突然 loading 一下」。
+                 *
+                 * <p>只有当「连续 {@code grace} 毫秒都没见过观众」时才真正关闭。
+                 * 这时长与宽限期同源，语义是「无人观看持续时长」。
+                 */
+                long lastSeen = lastViewerAt.getOrDefault(session.getSessionKey(), session.getCreatedAt());
+                if (now - lastSeen < grace) {
                     continue;
                 }
                 log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", grace / 1000, session.getSessionKey());
@@ -924,6 +967,8 @@ public class StreamService {
                 // 与设备实际推流用的 RTP SSRC 不同，实测关流 11 秒后又被认领回来）。
                 sessions.markReaped(session.getSessionKey());
                 sessions.closeByKey(session.getSessionKey());
+                // 会话已销毁：观看记录一并清掉，避免键位长期堆积
+                lastViewerAt.remove(session.getSessionKey());
                 closed++;
             } catch (Exception e) {
                 log.debug("关闭空闲流失败: {}", e.getMessage());
