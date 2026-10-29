@@ -1,0 +1,77 @@
+直播默认改用 WebRTC，FLV 降为「有声音」备选（含自动回退）
+
+## 结论先行
+
+「ws-flv 播两秒转圈一下」的**根本原因是传输层，不是代码质量**：
+
+| 通路 | 传输层 | 丢包后果 |
+|---|---|---|
+| WebRTC | **UDP** + NACK/FEC + 抖动缓冲 | 局部花屏，几百毫秒自愈，**不阻塞后续数据** |
+| FLV（ws / http） | **TCP** | 全部后续数据等重传（队头阻塞），**整幅画面停住** |
+
+国标设备经公网推流，丢包很常见。所以换 flv.js / mpegts.js / jessibuca
+都不会改变这个特性 —— 这也是之前反复调追帧参数始终收效有限的原因。
+
+真机实测（同一路 1280×720 流，60 秒）：
+- WebRTC：`currentTime` 与墙钟精确 1:1，**waiting 0 次**
+- FLV：无论怎么调缓冲/追帧，都会周期性卡顿
+
+## 改动
+
+### 1. 默认协议改为 WebRTC
+
+新增 LIVE_DEFAULT_PROTOCOL = 'webrtc'，LiveView / ChannelView / ShareView
+与 useXgPlayer 的初始值统一引用它（原来四处各写一份 ref('wsflv')）。
+
+菜单文案标注音频取舍，避免用户以为音频坏了：
+- WebRTC（最流畅，无声音）
+- WebSocket-FLV（有声音）
+- HTTP-FLV（有声音）
+- HLS（无声音）
+
+### 2. WebRTC 失败自动回退 FLV
+
+H.265 设备（本项目有 2560×1440 H.265 球机）WebRTC 协商不出编码、
+或 UDP 48000 被拦时，自动退回 FLV 一次，并把协议菜单同步成 FLV。
+
+playWebrtc 改为三态返回：true 成功 / false 真失败（该回退）/ null 已被外部停止。
+
+**踩到的坑**：最初用 `!disposed` 判断是否回退，但 playWebrtc 失败时
+内部已经调过 stop()，而 stop() 会把 disposed 置为 true —— 于是回退
+永远不触发（实测确实如此）。改用三态返回值，并用 null 区分
+「用户主动关掉」（不回退，否则会把已关闭的画面重新拉起来）。
+
+### 3. 协议下拉跟随实际协议
+
+WebRTC 回退到 FLV 后，若顶部下拉还写着 WebRTC，排查时会被错位带偏
+（典型误判「我选的 WebRTC 怎么还卡」）。LiveView 在 playTile 之后读
+player.protocol 同步；ChannelView 用 watch 同步。
+
+**踩到的坑**：LiveView 是电视墙，播放器存在 players 映射里而不是单个
+player 变量，最初写的 watch(() => player.protocol...) 引用了不存在的
+标识符，改为在 playTile 末尾读一次。
+
+### 4. README 同步
+
+说明为什么默认 WebRTC、代价是没有声音、以及 H.265 会自动回退。
+
+## 实测
+
+| 项 | 结果 |
+|---|---|
+| 默认协议 | WebRTC（wsOpened=0，完全不建 WebSocket） |
+| WebRTC 60 秒 | waiting 0 次，currentTime 与墙钟 1:1，1280×720 |
+| 模拟 WebRTC 不可用 | 自动回退 FLV，画面正常播放 |
+| 回退后菜单 | 正确显示「WebSocket-FLV（有声音）」 |
+| 服务端 | HTTP 200，0 ERROR |
+
+## 关于「换开源播放器」
+
+项目里其实已经有 jessibuca 的实现（composables/useVideoPlayer.js），
+但它目前是**死代码**，且 public/jessibuca/ 静态资源已不在仓库里
+（上游已归档）。另外服务器上**没有 ffmpeg**，所以 G.711 音频
+无法转成 AAC，flv.js / mpegts.js 这类只支持 AAC 的库会直接丢掉音频。
+
+结论：换库不解决 TCP 队头阻塞；若要「FLV + 有声音 + 更流畅」，
+jessibuca（WASM 软解，原生支持 G.711）是唯一候选，但它 CPU 更高、
+延迟 1~2 秒，且需要重新引入 SDK。当前先用 WebRTC 兜住体验。

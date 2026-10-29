@@ -367,11 +367,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_PROTOCOL_SHORT } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_PROTOCOL_SHORT, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
@@ -415,12 +415,25 @@ const detailTarget = ref(null)
 
 const previewDialog = ref(false)
 const previewTarget = ref(null)
-const proto = ref('wsflv')
+const proto = ref(LIVE_DEFAULT_PROTOCOL)
 const mediaHttpPort = ref(null)
 
 /** 播放器容器（xgplayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
 const player = useXgPlayer(videoContainer)
+
+/*
+ * 协议下拉跟随播放器实际使用的协议（WebRTC 失败会自动回退到 FLV）。
+ *
+ * <p>不同步的话预览弹窗里会一直显示 WebRTC，而画面实际走 FLV ——
+ * 排查时会被这个错位带偏。详见 LiveView 里同样的 watch 说明。
+ */
+watch(
+  () => player.protocol.value,
+  (p) => {
+    if (p && p !== proto.value) proto.value = p
+  }
+)
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)

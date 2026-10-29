@@ -38,13 +38,14 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
+import { LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 
 const route = useRoute()
 
 const info = ref(null)
 const loading = ref(false)
 const error = ref('')
-const proto = ref('wsflv')
+const proto = ref(LIVE_DEFAULT_PROTOCOL)
 
 const videoContainer = ref(null)
 const player = useXgPlayer(videoContainer)

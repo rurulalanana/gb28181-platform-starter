@@ -35,7 +35,7 @@ import { webrtcApi } from '@/api'
 export function useXgPlayer(containerRef) {
   const playing = ref(false)
   const state = ref('空闲')
-  const protocol = ref('wsflv')
+  const protocol = ref('webrtc')
   const currentStream = ref('')
   const stats = ref(null)
   /** 音频信息 `{ audioCodec: 'PCMA'|'PCMU', audioSampleRate }`。 */
@@ -149,7 +149,33 @@ export function useXgPlayer(containerRef) {
     if (currentProtoSwitch) currentProtoSwitch = { ...currentProtoSwitch, value: proto }
 
     if (proto === 'webrtc') {
-      await playWebrtc(streamId)
+      /*
+       * WebRTC 失败时自动退回 FLV。
+       *
+       * <p><b>典型的失败原因</b>：
+       * <ol>
+       *   <li><b>设备是 H.265</b> —— WebRTC 规范里没有 H.265，大部分浏览器
+       *       不会在 SDP 里协商出来，ZLM 没有可用编码 -> 轨道永远不到；</li>
+       *   <li>NAT / 防火墙把 UDP 48000 拦了，ICE 连不通。</li>
+       * </ol>
+       * 这两种情况下 FLV（TCP）都能工作，所以退回一次，
+       * 并把协议选择器同步成 FLV，不留“菜单写着 WebRTC、实际在放 FLV”的错位。
+       *
+       * <p>{@code _webrtcFallback} 防重入：只在第一次失败时退回，
+       * 否则两路都失败就成了踢皮球。
+       *
+       * <p><b>为什么判 {@code ok === false} 而不是 {@code !disposed}</b>：
+       * {@code playWebrtc} 失败时内部已经调过 {@code stop()}，而 stop() 会把
+       * {@code disposed} 置为 true —— 此时看 disposed 永远是 true，
+       * 回退就永远不会触发（实测确实如此）。所以用三态返回值：
+       * {@code true} 成功 / {@code false} 真失败（该回退）/ {@code null} 已被外部停止（不回退）。
+       */
+      const ok = await playWebrtc(streamId)
+      if (ok === false && !opts._webrtcFallback) {
+        protocol.value = 'wsflv'
+        if (currentProtoSwitch) currentProtoSwitch = { ...currentProtoSwitch, value: 'wsflv' }
+        await play(streamId, urls, { ...opts, proto: 'wsflv', _webrtcFallback: true })
+      }
     } else if (proto === 'hls') {
       await playHls(urls?.hls)
     } else {
@@ -775,7 +801,7 @@ export function useXgPlayer(containerRef) {
    */
   async function playWebrtc(streamId) {
     const el = createHost()
-    if (!el) return
+    if (!el) return false
     state.value = '协商中…'
 
     try {
@@ -868,11 +894,18 @@ export function useXgPlayer(containerRef) {
 
       playing.value = true
       state.value = '播放中'
+      return true
     } catch (e) {
-      if (disposed) return
+      /*
+       * {@code null} 而不是 {@code false}：已经 disposed 说明是外部主动停止
+       * （切换通道、关闭弹窗），不是 WebRTC 本身的问题 —— 回退到 FLV
+       * 会把用户已经关掉的画面重新拉起来，属于灵异行为。
+       */
+      if (disposed) return null
       state.value = '失败：' + (e.message || e)
       playing.value = false
       stop()
+      return false
     }
   }
 

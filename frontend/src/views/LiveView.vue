@@ -246,14 +246,14 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useXgPlayer } from '@/composables/useXgPlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
 
 const channels = ref([])
 const gridSize = ref(4)
 const filterText = ref('')
-const proto = ref('wsflv')
+const proto = ref(LIVE_DEFAULT_PROTOCOL)
 const mediaHttpPort = ref(null)
 
 /**
@@ -608,6 +608,19 @@ async function playTile(tile) {
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
     onStall: () => rebuildStalled(tile)
   })
+  /*
+   * 把顶部协议下拉同步成「播放器实际用的协议」。
+   *
+   * <p>WebRTC 协商失败（H.265 设备、UDP 被拦）时播放器会自动回退到 FLV；
+   * 若不同步，顶部会一直显示 <b>WebRTC</b> 而画面其实走 FLV ——
+   * 排查时会被这个错位带偏（典型误判：「我选的 WebRTC 怎么还是卡」）。
+   *
+   * <p>放在 play() 之后读而不是 watch：这里能确定 play 已走完（含回退），
+   * 一个值读一次就够，不需要长期监听每个格子的协议变化。
+   * el-select 的 change 只在用户操作时触发，程序化改值不会反过来再调一次。
+   */
+  const actual = player.protocol.value
+  if (actual && actual !== proto.value) proto.value = actual
 }
 
 /**

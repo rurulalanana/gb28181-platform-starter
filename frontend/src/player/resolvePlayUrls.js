@@ -141,24 +141,46 @@ function rewriteHost(url) {
 }
 
 /**
+ * 直播默认播放协议。
+ *
+ * <p><b>为什么是 WebRTC 而不是 FLV</b>：两者跑在不同传输层上，
+ * 性能差异是协议决定的，不是代码质量能弥补的：
+ * <ul>
+ *   <li><b>WebRTC 走 UDP</b>，带 NACK / FEC / 抖动缓冲。丢包只是局部花屏，
+ *       几百毫秒内自愈，不阻塞后续数据。</li>
+ *   <li><b>FLV 走 TCP</b>（无论是 ws-flv 还是 http-flv）。
+ *       TCP 是可靠传输 —— 一旦丢包，<b>所有后续数据都会等重传</b>
+ *       （队头阻塞），表现为整个画面停住。国标设备经公网推流时
+ *       丢失很常见，这就是「FLV 播两秒 loading 一下」的根本原因，
+ *       换 flv.js / mpegts.js / jessibuca 都不会改变这一点。</li>
+ * </ul>
+ *
+ * <p><b>代价：WebRTC 没有声音</b>：ZLM 的 WebRTC 需要 Opus，
+ * 而国标设备推的是 G.711（PCMA/PCMU），嵌入式 ZLM 不转码。
+ * 需要听声音时在同一个菜单里切到 FLV 即可（FLV 用 Web Audio 解 G.711）。
+ */
+export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
+
+/**
  * 直播可选的播放协议（统一在这里定义，避免各页面各写一份、改一处漏一处）。
  *
  * <p>列在这里的都是<b>浏览器真能播</b>的通路：
  * <ul>
- *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，延迟 ≈ 1s（默认）；</li>
- *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，延迟 ≈ 1s，能穿代理；</li>
- *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s），但抗丢包最差；</li>
+ *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s）、<b>最流畅</b>（UDP），
+ *       但<b>没有声音</b>，且不支持 H.265（失败时自动退回 FLV）；</li>
+ *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，<b>有声音</b>，
+ *       延迟 ≈ 3s（TCP 队头阻塞，必须靠深缓冲抹平）；</li>
+ *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，特性同 ws-flv，
+ *       能穿代理/防火墙；</li>
  *   <li>{@code hls} —— 纯 HTTP、无需长连接，延迟 ≈ 3 个切片（ZLM 配 2s×3）。
- *       <b>没有声音</b>：HLS/TS 规范要求音频为 AAC，而国标设备推的是
- *       G.711（PCMA/PCMU），ZLM 不会为 HLS 转码，所以切片里只有视频轨。
- *       菜单上必须写清楚，否则用户会以为是音频坏了。</li>
+ *       <b>没有声音</b>，且延迟最大，只在极端网络环境下当最后手段。</li>
  * </ul>
  * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
  */
 export const LIVE_PROTOCOLS = [
-  { value: 'wsflv', label: 'WebSocket-FLV' },
-  { value: 'httpflv', label: 'HTTP-FLV' },
-  { value: 'webrtc', label: 'WebRTC' },
+  { value: 'webrtc', label: 'WebRTC（最流畅，无声音）' },
+  { value: 'wsflv', label: 'WebSocket-FLV（有声音）' },
+  { value: 'httpflv', label: 'HTTP-FLV（有声音）' },
   { value: 'hls', label: 'HLS（无声音）' }
 ]
 

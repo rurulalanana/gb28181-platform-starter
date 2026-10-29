@@ -76,7 +76,14 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 
 > 技术栈：Vue 3 + Vite 6 + Element Plus + Pinia + Vue Router。
 > 构建产物直接进后端静态资源目录，**单 jar 部署**；SPA 路由回退由 `config/SpaWebConfiguration` 处理。
-> 浏览器播放支持 **WebSocket-FLV**（默认）与 **WebRTC** 两种通路，页面右上角可切换。
+> 浏览器播放支持 **WebRTC**（默认）与 **WebSocket-FLV / HTTP-FLV** 两种通路，页面右上角可切换。
+>
+> **默认为什么是 WebRTC**：WebRTC 走 UDP（带 NACK / 抖动缓冲），丢包只局部花屏、不阻塞后续数据；
+> FLV 走 TCP，一旦丢包**所有后续数据都要等重传**（队头阻塞），表现为「播两秒转圈一下」。
+> 这是传输层决定的，换 flv.js / mpegts.js / jessibuca 都不会改变。
+> 代价是 **WebRTC 没有声音**（ZLM 的 WebRTC 需要 Opus，国标设备推的是 G.711 且嵌入式 ZLM 不转码），
+> 需要声音时在同一个菜单切到 FLV（FLV 用 Web Audio 解 G.711）。
+> H.265 设备 WebRTC 协商会失败，播放器**自动回退**到 FLV 并把协议菜单同步成 FLV。
 
 ## REST API
 
@@ -405,7 +412,7 @@ rm -rf ~/.m2/repository/io/github/rurulalanana
 ## 已知限制（嵌入式 ZLMediaKit）
 
 1. **管理 API 路由未注册，但播放路由可用**：`/index/api/*`（如 `getMediaList`、`getServerConfig`）由 **MediaServer 可执行文件**注册，C API 嵌入模式下不存在。但播放路由由 ZLM 内置 HTTP 服务直接提供：
-   - ✅ **WebSocket-FLV**：`ws://<host>:8081/<设备编码>/<通道编码>.live.flv`（前端默认通路，mpegts.js 播放）
+   - ✅ **WebSocket-FLV**：`ws://<host>:8081/<设备编码>/<通道编码>.live.flv`（有声音，xgplayer + 自研 MSE 引擎）
    - ✅ **HTTP-FLV / HLS**：同路径（`.live.flv` / `/hls.m3u8`）
    - ✅ **WebRTC**：`POST /api/v1/webrtc/play` 交换 SDP，延迟最低
    - ❌ `/index/api/*` 管理接口返回 404（流状态改用 MK_EVENTS 回调）
