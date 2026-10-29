@@ -46,10 +46,14 @@
       光圈/聚焦是单步动作，一次点击下发一次即可。
     -->
     <!--
-      变倍：只在设备录像回放时可用。
-      直播下设备会忽略 FI 指令（画面不变化），按钮留着纯属误导 —— 见 mode prop 的说明。
+      变倍（FI 指令的 ZoomIn / ZoomOut）。
+
+      <p><b>为什么不按场景隐藏</b>：早期版本曾用 {@code mode} 判断只在回放时
+      显示，理由是「部分设备在实时推流时忽略变倍」。但设备录像回放并没有
+      云台面板（回放不控制云台），那样写等于让变倍在整个平台里都出不来。
+      所以恢复为常驻显示 —— 是否生效取决于具体设备，面板不替用户做判断。
     -->
-    <div v-if="mode === 'playback'" class="ptz-row ptz-zoom-row">
+    <div class="ptz-row ptz-zoom-row">
       <el-button-group class="zoom-group">
         <el-button
           size="small"
@@ -304,21 +308,7 @@ const props = defineProps({
    * 语音喊话都是运维动作（重启、格式化风险高），不放在实时预览页，
    * 需要时到通道管理页操作。
    */
-  simple: { type: Boolean, default: false },
-
-  /**
-   * 控制场景：{@code 'live'}（实时预览）或 {@code 'playback'}（设备录像回放）。
-   *
-   * <p><b>为什么变倍只在回放可用</b>：变倍是 {@code FI} 指令，设备在
-   * <b>实时推流时普遍忽略它</b>（实测多家设备均无响应 —— 直播画面不会因为
-   * 变倍而变化），只有在<b>回放会话</b>里设备才会真正执行。
-   * 因此直播场景下必须隐藏变倍按钮：留着它只会让用户以为功能坏了。
-   */
-  mode: {
-    type: String,
-    default: 'live',
-    validator: (v) => v === 'live' || v === 'playback'
-  }
+  simple: { type: Boolean, default: false }
 })
 
 /**

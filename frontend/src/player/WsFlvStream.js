@@ -106,20 +106,48 @@ const LIVE_TARGET_LATENCY = 1.0
 /**
  * 硬跳阈值（秒）：缓冲余量超过它就丢帧直接跳到边缘前 {@link LIVE_TARGET_LATENCY}。
  *
- * <p><b>为什么从 1.6 提到 3.0</b>：实测该值取 1.6 时，40 秒内触发了
- * <b>26 次</b>硬跳（几乎每 1.5 秒一次）—— 因为突发到达本身就把余量顶到
- * 2 秒以上。每次跳帧都会打断解码器并触发 {@code waiting}，实测卡顿从
- * 关掉追帧时的 2 次/40 秒涨到 16 次/40 秒。<b>跳帧比延迟更伤体验</b>，
- * 因此阈值必须明显高于「正常突发幅度」。
+ * <p><b>这个值直接决定「OSD 会不会往前跳」</b>。OSD 是设备烧进画面的，
+ * 它跟着帧走 —— 只要没有丢帧，OSD 就只会一秒一秒地走；一旦发生向前 seek，
+ * 用户就会看到画面卡一下、右上角时间猛地跳到几秒之后。
+ *
+ * <p>因此它的取值不能只看「延迟」，要看「什么情况下丢帧用户能接受」：
+ * <ul>
+ *   <li>正常观看时<b>一次都不应该丢</b>（哪怕延迟多一两秒）；</li>
+ *   <li>只有从后台切回来、或系统卡顿过，积压了几十秒时才值得一次跳完。</li>
+ * </ul>
+ * 实测正常观看的缓冲余量在 0.1~2.4 秒之间抖动（ZLM 按批落盘），
+ * 取 5 秒就完全盖住了这个抖动区间 —— 日常零跳帧，只有真正的积压才触发。
+ *
+ * <p>历史：取 1.6 时 40 秒跳了 26 次，取 3.0 时仍有 1 次；
+ * 两者都会让 OSD “往前跳”，所以抬高到 5.0。
  */
-const LIVE_MAX_LATENCY = 3.0
+const LIVE_MAX_LATENCY = 5.0
+
+/**
+ * 从后台切回来时允许的硬跳阈值（秒）：比常驻阈值宽松。
+ *
+ * <p>后台标签下 Chrome 会挂起哑音视频（本项目的音频走 Web Audio、
+ * video 元素恒为静音），而 ZLM 这期间一直在推 —— 切回来时往往积压
+ * 十几秒到几十秒。这种场景用户<b>预期</b>画面会跳到最新，不跳反而奇怪。
+ *
+ * <p>0.5 秒而不是 0：后台停留几秒、余量只多了 0.5 秒以上才值得跳，
+ * 否则一次短暂切窗回来也要丢一帧，白白让 OSD 跳一下。
+ */
+const LIVE_RESUME_JUMP_LATENCY = 0.5
+
+/**
+ * 页面隐藏超过多久，切回来时才允许「立即硬跳」（毫秒）。
+ *
+ * <p>切个窗口看资料、几秒钟就回来，不该因此丢帧；离开 3 秒以上，
+ * 积压已经明显到值得一次追齐。
+ */
+const LIVE_HIDDEN_RESUME_MS = 3000
 
 /**
  * 两次硬跳之间的最小间隔（毫秒）。
  *
  * <p>突发到达会让余量反复越线，没有冷却就会连续跳 —— 用户看到的是
- * 「画面一顿一顿地往前跳」。5 秒足够让流回到稳定节奏，也比人眼能容忍的
- * 「连续跳帧」间隔长得多。
+ * 「画面一顿一顿地往前跳」。
  */
 const LIVE_JUMP_COOLDOWN_MS = 5000
 
@@ -267,6 +295,16 @@ export default class WsFlvStream {
      * <p>0 表示从未跳过。
      */
     this.lastJumpAt = 0
+    /**
+     * 「刚从后台切回来」标记：为 true 时允许一次更激进的拍平。
+     *
+     * <p>见 {@link LIVE_RESUME_JUMP_LATENCY}。用一就清，不会常驻生效。
+     */
+    this.resumeJump = false
+    /** 页面转入后台的时刻（毫秒），0 表示当前在前台。 */
+    this.hiddenAt = 0
+    /** 可见性监听器（销毁时解绑）。 */
+    this._onVisibility = null
 
     this._bindMediaSource()
   }
@@ -276,6 +314,34 @@ export default class WsFlvStream {
     if (this.destroyed) return
     this._connect()
     this.syncTimer = setInterval(() => this._syncAudioVideo(), 500)
+    /*
+     * 可见性变化：记下转入后台的时刻，回到前台时开一次「拍平」窗口。
+     *
+     * <p><b>为什么需要它</b>：后台标签下 Chrome 会挂起哑音视频
+     * （本项目音频走 Web Audio、video 元素恒为静音），而 ZLM 这期间
+     * 一直在推 —— 切回来时余量往往已经积了十几秒。不回前台时不能跳
+     * （会与正常观看混淆），回前台时又必须跳（否则永远落后）。
+     *
+     * <p>开窗口而不是直接在这里改 {@code currentTime}：此刻
+     * {@code buffered} 末段可能还没铺开，交给下一拍 {@code _syncAudioVideo}
+     * 判定更安全。
+     */
+    this._onVisibility = () => {
+      if (this.destroyed) return
+      if (document.hidden) {
+        this.hiddenAt = Date.now()
+        return
+      }
+      if (this.hiddenAt && Date.now() - this.hiddenAt >= LIVE_HIDDEN_RESUME_MS) {
+        this.resumeJump = true
+        // 冷却也一并解除：后台积压的这几十秒必须一次追齐
+        this.lastJumpAt = 0
+      }
+      this.hiddenAt = 0
+    }
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', this._onVisibility)
+    }
     /*
      * 预缓冲兜底：到点无论攒了多少都起播。
      *
@@ -975,43 +1041,62 @@ export default class WsFlvStream {
     if (!Number.isFinite(latency)) return false
 
     /*
-     * 余量为负：{@code currentTime} 已经跑到已落盘数据之外。
+     * 余量为负：{@code currentTime} 已经跑到 {@code buffered.end} 之外。
      *
-     * <p>这不是异常 —— ZLM 按批 flush、{@code _evict()} 的 remove 又会
-     * 阻塞 append，两者都会让 {@code buffered.end} 暂时落后于播放位置。
+     * <p><b>这通常不是真的断流，而是 MSE 的 buffered 低估</b>。实测
+     * （Chrome，1280×720，硬解）：{@code buffered=[[236.8, 264.6]]} 而
+     * {@code currentTime=266.46}，同时 {@code readyState=4}、播放流畅、
+     * 58 秒内零 waiting —— 说明解码器手里确实有数据，只是
+     * {@code buffered} 在 {@code SourceBuffer.remove()} 之后没有如实反映
+     * 已解码区间。所以这个符号不能当作「缓冲吃穿」来判断。
      *
      * <p><b>但绝对不能直接 return false</b>：那样倍速会永远停在上一拍的
      * 0.98 / 1.08，再也恢复不了（实测卡在 0.98 后视频越播越慢，缓冲一路
-     * 被吃穿）。这里必须把速率交还给 1 倍，等数据追上即可。
+     * 被吃穿）。这里必须把速率交还给 1 倍，等 buffered 追上即可。
      */
     if (latency < 0) {
       this.setRate(v, 1)
       return true
     }
 
-    if (latency > LIVE_MAX_LATENCY) {
-      /*
-       * 硬跳。
-       *
-       * <p>跳到 {@code edge - TARGET} 而不是 {@code edge}：贴着边缘播会在
-       * 下一拍就变成「余量 0」，紧接着一次网络抖动就卡住。
-       *
-       * <p><b>冷却期</b>：突发到达会让余量反复越线，没有冷却就会连续跳，
-       * 用户看到的是「画面一顿一顿地往前跳」。冷却期内只软追不硬跳。
-       */
-      const now = Date.now()
-      if (this.lastJumpAt && now - this.lastJumpAt < LIVE_JUMP_COOLDOWN_MS) {
+    /*
+     * 硬跳判定。
+     *
+     * <p>两个时机允许丢帧：
+     * <ol>
+     *   <li>从后台切回来后的第一拍（{@code resumeJump}）：用户预期画面
+     *       直接跳到最新，余量只要超过 {@link LIVE_RESUME_JUMP_LATENCY} 就拍平；</li>
+     *   <li>余量真的大到离谱（&gt; {@link LIVE_MAX_LATENCY}）：系统卡顿、
+     *       长时间等待等极端情况，不跳就永远追不上。</li>
+     * </ol>
+     * 其余情况一律只软追 —— 因为丢帧的可见代价就是用户看到
+     * 「画面卡一下、右上角 OSD 时间往前跳好几秒」。
+     */
+    const now = Date.now()
+    const cooled = !this.lastJumpAt || now - this.lastJumpAt >= LIVE_JUMP_COOLDOWN_MS
+    const wantJump = latency > LIVE_MAX_LATENCY || (this.resumeJump && latency > LIVE_RESUME_JUMP_LATENCY)
+
+    if (wantJump) {
+      if (!cooled) {
+        // 冷却期内只软追，避免连续跳帧
         this.setRate(v, LIVE_CHASE_RATE)
         return true
       }
+      /*
+       * 跳到 {@code edge - TARGET} 而不是 {@code edge}：贴着边缘播会在
+       * 下一拍就变成「余量 0」，紧接着一次网络抖动就卡住。
+       */
       const target = edge - LIVE_TARGET_LATENCY
       if (target > v.currentTime + 0.05) {
         this.lastJumpAt = now
+        this.resumeJump = false
         v.currentTime = target
       }
       this.setRate(v, 1)
       return true
     }
+    // 本次已离开「刚回到前台」的窗口，之后只认常驻阈值
+    this.resumeJump = false
 
     if (latency > LIVE_TARGET_LATENCY + LIVE_CHASE_DEADBAND) {
       // 软追：略快一点把余量吃掉
@@ -1095,6 +1180,14 @@ export default class WsFlvStream {
     this.retryTimer = null
     this.syncTimer = null
     this.prebufferTimer = null
+    if (this._onVisibility) {
+      try {
+        document.removeEventListener('visibilitychange', this._onVisibility)
+      } catch (e) {
+        // 忽略
+      }
+      this._onVisibility = null
+    }
 
     if (this.ws) {
       this.ws.onclose = null
