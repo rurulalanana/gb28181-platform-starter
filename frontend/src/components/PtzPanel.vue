@@ -45,7 +45,11 @@
       <p>变倍要求「按住持续、松开停止」，所以用 pointerdown 而不是 click；
       光圈/聚焦是单步动作，一次点击下发一次即可。
     -->
-    <div class="ptz-row ptz-zoom-row">
+    <!--
+      变倍：只在设备录像回放时可用。
+      直播下设备会忽略 FI 指令（画面不变化），按钮留着纯属误导 —— 见 mode prop 的说明。
+    -->
+    <div v-if="mode === 'playback'" class="ptz-row ptz-zoom-row">
       <el-button-group class="zoom-group">
         <el-button
           size="small"
@@ -300,7 +304,21 @@ const props = defineProps({
    * 语音喊话都是运维动作（重启、格式化风险高），不放在实时预览页，
    * 需要时到通道管理页操作。
    */
-  simple: { type: Boolean, default: false }
+  simple: { type: Boolean, default: false },
+
+  /**
+   * 控制场景：{@code 'live'}（实时预览）或 {@code 'playback'}（设备录像回放）。
+   *
+   * <p><b>为什么变倍只在回放可用</b>：变倍是 {@code FI} 指令，设备在
+   * <b>实时推流时普遍忽略它</b>（实测多家设备均无响应 —— 直播画面不会因为
+   * 变倍而变化），只有在<b>回放会话</b>里设备才会真正执行。
+   * 因此直播场景下必须隐藏变倍按钮：留着它只会让用户以为功能坏了。
+   */
+  mode: {
+    type: String,
+    default: 'live',
+    validator: (v) => v === 'live' || v === 'playback'
+  }
 })
 
 /**
@@ -456,8 +474,10 @@ async function commitPresetName(row) {
 
 /** 调用预置位。 */
 async function callPreset(row) {
-  await cmd('preset', { command: 'goto', preset: row.presetId },
+  const ok = await cmd('preset', { command: 'goto', preset: row.presetId },
     `已调用预置位 ${row.presetId}`)
+  // 预置位是"整幅画面跳变"，最需要立即刷新，成功后再要一次关键帧
+  if (ok) requestKeyframe()
 }
 
 /**
@@ -550,8 +570,13 @@ function beginMove(command, event) {
     }
   }
   moving.value = true
+  // 记住这次按住的是"转方向"还是"变倍"，松手时决定要不要请求关键帧
+  movingKind = command === 'zoomin' || command === 'zoomout' ? 'zoom' : 'ptz'
   send('ptz', { command, speed: SPEED }, null, true)
 }
+
+/** 本次按住的操作类型：{@code 'ptz'} 转方向 / {@code 'zoom'} 变倍 / 空串表示未按住。 */
+let movingKind = ''
 
 /**
  * 松开停止。
@@ -567,7 +592,48 @@ function endMove() {
     return
   }
   moving.value = false
+  const wasZoom = movingKind === 'zoom'
+  movingKind = ''
   send('ptz', { command: 'stop' }, null, true)
+  /*
+   * 只有"转方向"才请求关键帧。
+   *
+   * 变倍走的是 FI 指令，直播下设备本就不执行（见 mode prop），
+   * 画面不会变化，要关键帧纯属浪费一条信令。
+   */
+  if (!wasZoom) requestKeyframe()
+}
+
+/**
+ * 上次请求关键帧的时刻（毫秒），用于节流。
+ *
+ * <p>云台方向键常被连点（点一下走一步），若每次松手都请求 I 帧，
+ * 每秒能发出好几条 —— 设备会为每条都编一个完整帧，码率瞬间翻几倍，
+ * 弱网下反而更卡。{@link IFRAME_MIN_INTERVAL_MS} 内只认第一次。
+ */
+let iframeAskedAt = 0
+
+/** 关键帧请求的最小间隔（毫秒）。 */
+const IFRAME_MIN_INTERVAL_MS = 1500
+
+/**
+ * 请求设备立即编一个关键帧。
+ *
+ * <p><b>为什么控制之后必须要它</b>：云台转动/变倍后画面整体改变，
+ * 但编码器仍按 GOP 走 —— 变化的区域要先以 P 帧相对「转动前」的参考帧
+ * 编码，直到下一个 I 帧才会完整刷新。GOP 若为 4 秒，用户松手后最多
+ * 要干等 4 秒画面才"跳"到位，体感就是「控制完反应好久」。
+ *
+ * <p>主动要一个 I 帧相当于让编码器立刻重新起一个参考点，
+ * 画面在几百毫秒内就刷新，不用等 GOP 周期。
+ *
+ * <p>静默失败：老设备可能不支持该指令，此时不影响云台操作本身。
+ */
+function requestKeyframe() {
+  const now = Date.now()
+  if (now - iframeAskedAt < IFRAME_MIN_INTERVAL_MS) return
+  iframeAskedAt = now
+  send('iframe', {}, null, true)
 }
 
 /** 把后端返回的应用到界面。 */

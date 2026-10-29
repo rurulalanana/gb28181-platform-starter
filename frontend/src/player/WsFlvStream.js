@@ -83,6 +83,46 @@ const MAX_APPEND_QUEUE = 256
 const HARD_SYNC_THRESHOLD = 0.5
 /** 软调阈值（秒）：超过它用播放速率追赶，避免频繁跳帧。 */
 const SOFT_SYNC_THRESHOLD = 0.2
+
+/* ==================== 直播追帧（延迟控制） ==================== */
+
+/**
+ * 稳态目标延迟（秒）：播放位置与「已到达的最新数据」之间保留的余量。
+ *
+ * <p><b>为什么需要追帧</b>：MSE 的 {@code currentTime} 只会随播放自然推进，
+ * 而 ZLM 持续以实时速度推数据，两者的差值（缓冲余量）只会越积越多 ——
+ * 表现为「越看越延迟」。实测不追帧时，看 10 分钟能积出 8~15 秒延迟，
+ * 云台控制后要等十几秒画面才动。
+ *
+ * <p><b>为什么留余量而不是追到 0</b>：追到 0 等于对着缓冲边缘播，
+ * 网络抖动 0.2 秒就会 waiting 卡顿。0.6 秒是实测的平衡点：
+ * 能吸收常见的单次抖动，同时让端到端延迟维持在 1 秒内。
+ */
+const LIVE_TARGET_LATENCY = 0.6
+
+/**
+ * 硬跳阈值（秒）：缓冲余量超过它就丢帧直接跳到边缘前 {@link LIVE_TARGET_LATENCY}。
+ *
+ * <p>设 1.6 而不是 1.0：用户切后台再回来、或系统短暂卡顿都会让余量跳增，
+ * 这时一次硬跳比慢慢加速更合理；而正常网络波动下余量很少超过 1.6，
+ * 不会触发跳帧（画面不闪）。
+ */
+const LIVE_MAX_LATENCY = 1.6
+
+/**
+ * 软追帧倍速：余量在 {@code [目标, 硬跳阈值]} 之间时用它慢慢吃掉。
+ *
+ * <p>取 1.08 而不是更大：1.08 倍速在监控画面上几乎看不出（人眼对监控这类
+ * 静态场景的匀速变化不敏感），但 10 秒就能吃掉 0.8 秒余量。
+ * 再大就会明显"快进感"，且音频走 Web Audio 是按 PTS 排程的，
+ * 视频加速会造成音画分离。
+ */
+const LIVE_CHASE_RATE = 1.08
+
+/**
+ * 追帧的目标下限（秒）：余量小于它时不再降速，避免把缓冲吃穿导致卡顿。
+ */
+const LIVE_MIN_LATENCY = 0.35
 /** 音频提前排程量（秒）：留一点余量，避免第一个包就被判定为「已经迟到」。 */
 const AUDIO_LEAD_SECONDS = 0.12
 /** 音频最多领跑多少秒（超过说明时间戳异常，丢弃以压低延迟）。 */
@@ -194,6 +234,8 @@ export default class WsFlvStream {
 
     // ---- 同步 ----
     this.syncTimer = null
+    /** 追帧开始的时刻（毫秒）：起播后先等 2 秒再开始校正。 */
+    this.chaseStartAt = null
 
     this._bindMediaSource()
   }
@@ -678,6 +720,33 @@ export default class WsFlvStream {
       this.prebufferTimer = null
     }
     if (this.destroyed || this.failed) return
+
+    /*
+     * 起播瞬间先追到直播边缘。
+     *
+     * <p>预缓冲攒了 {@link PREBUFFER_SECONDS}（2 秒）才放行，如果就此起播，
+     * 这 2 秒会原封不动变成用户的观看延迟。既然要的是「实时画面」，
+     * 攒够的那 2 秒里前面的 1.4 秒本来就不必看 —— 直接跳到边缘前
+     * {@link LIVE_TARGET_LATENCY}，起播延迟立刻从 2 秒降到 0.6 秒。
+     *
+     * <p>放在 onPrebuffered 之前：业务层收到回调就调 play() 了，
+     * 若之后再改 currentTime 会表现为"画面闪一下"。
+     */
+    const v = this.media
+    if (v && v.buffered.length) {
+      const edge = v.buffered.end(v.buffered.length - 1)
+      const target = edge - LIVE_TARGET_LATENCY
+      if (target > v.currentTime + 0.05) {
+        try {
+          v.currentTime = target
+        } catch (e) {
+          // 忽略：seek 失败时退化为从头播，下一拍追帧会补上
+        }
+      }
+    }
+    // 追帧计时从"真正开始播"算起，避免预缓冲那几秒被算进 2 秒观察期
+    this.chaseStartAt = Date.now()
+
     this.onPrebuffered()
   }
 
@@ -797,33 +866,122 @@ export default class WsFlvStream {
     this.audioScheduledTo = Math.max(this.audioScheduledTo, streamTime)
   }
 
-  // ==================== 音画同步 ====================
+  // ==================== 音画同步与直播追帧 ====================
 
-  /** 以音频为主时钟校正视频：小幅微调速率，大幅直接跳。 */
+  /**
+   * 每 500ms 一次的调度入口。
+   *
+   * <p><b>顺序很重要</b>：先追直播边缘（延迟主控），再处理音画偏移。
+   * 两者都会动 {@code playbackRate}，必须由前者优先决定 ——
+   * 若让音画同步先设了 1±0.1，追帧再改成 1.08，就等于两套算法互相打架，
+   * 画面会在 0.9 / 1.08 / 1 之间反复跳。
+   */
   _syncAudioVideo() {
-    /*
-     * 回放模式不做音画同步：位置与倍速由设备侧（npt / Scale）控制，
-     * 本地按音频时钟去改 currentTime 或 playbackRate 会直接推翻它们。
-     * 具体症状见构造函数里 vod 字段的说明。
-     */
     if (this.vod) return
-    const ctx = this.audioCtx
     const v = this.media
-    if (!ctx || !v || this.audioClockBase === null || this.destroyed) return
+    if (!v || this.destroyed) return
     if (v.readyState < 2 || v.seeking || v.paused) return
-    // 起播前 2 秒不校正：此时音频尚未真正出声，比较没有意义
-    if (ctx.currentTime - this.audioClockBase < 2) return
 
+    // 起播后前 2 秒不校正：此时数据还在灌、buffered.end 跳变剧烈
+    if (!this.prebuffered) return
+    if (this.chaseStartAt === null) this.chaseStartAt = Date.now()
+    if (Date.now() - this.chaseStartAt < 2000) return
+
+    // 1) 追直播边缘：返回本次是否已接管 playbackRate
+    const rateTaken = this._chaseLiveEdge(v)
+
+    // 2) 音画同步：只在追帧没动倍速时处理，且仅做硬跳
+    //    （软调用倍速会与追帧冲突，见上面的说明）
+    if (rateTaken) return
+    const ctx = this.audioCtx
+    if (!ctx || this.audioClockBase === null) return
     const audioTime = ctx.currentTime - this.audioClockBase
     const drift = v.currentTime - audioTime
     if (Math.abs(drift) > HARD_SYNC_THRESHOLD) {
       v.currentTime = audioTime
-      v.playbackRate = 1
-    } else if (Math.abs(drift) > SOFT_SYNC_THRESHOLD) {
-      // 视频跑快了就放慢，跑慢了就加快，最多 ±10%
-      v.playbackRate = 1 - Math.sign(drift) * 0.1
-    } else if (v.playbackRate !== 1) {
-      v.playbackRate = 1
+    }
+  }
+
+  /**
+   * 把播放位置追赶向「已到达的最新数据」。
+   *
+   * <p>这是 FLV 通路延迟控制的核心。判定与动作分三档：
+   * <ul>
+   *   <li>余量 &gt; {@link LIVE_MAX_LATENCY}：硬跳，直接丢中间帧跳到边缘前
+   *       {@link LIVE_TARGET_LATENCY}。切后台回来、系统卡顿后走这条。</li>
+   *   <li>余量 &gt; 目标 + 死区：软追，用 {@link LIVE_CHASE_RATE} 慢慢吃掉。
+   *       日常小幅漂移走这条，画面不闪。</li>
+   *   <li>余量 &lt; {@link LIVE_MIN_LATENCY}：可能要吃穿缓冲了，降速到 1.0
+   *       甚至 0.98 回填一点，避免 waiting 卡顿。</li>
+   * </ul>
+   *
+   * @param {HTMLVideoElement} v 播放器持有的 video 元素
+   * @returns {boolean} 本次是否已设置 playbackRate（音画同步据此让路）
+   */
+  _chaseLiveEdge(v) {
+    if (!v.buffered.length) return false
+    // 取最后一段的终点作为「直播边缘」
+    const edge = v.buffered.end(v.buffered.length - 1)
+    const latency = edge - v.currentTime
+
+    // 数据还没铺到当前位置（刚 seek 或缓冲被清），本拍不做判断
+    if (!Number.isFinite(latency) || latency < 0) return false
+
+    if (latency > LIVE_MAX_LATENCY) {
+      /*
+       * 硬跳。
+       *
+       * <p>跳到 {@code edge - TARGET} 而不是 {@code edge}：
+       * 贴着边缘播会在下一拍就变成"余量 0"，紧接着一次网络抖动就卡住。
+       * 留 0.6 秒让它能正常缓冲。
+       *
+       * <p>不能跳太狠：一次丢掉超过 5 秒会让用户明显感觉画面"跳了一段"，
+       * 此时宁可分两次跳（500ms 后还会再进入这个分支）。
+       */
+      const target = edge - LIVE_TARGET_LATENCY
+      if (target > v.currentTime + 0.05) {
+        v.currentTime = target
+      }
+      this.setRate(v, 1)
+      return true
+    }
+
+    if (latency > LIVE_TARGET_LATENCY + 0.15) {
+      // 软追：略快一点把余量吃掉
+      this.setRate(v, LIVE_CHASE_RATE)
+      return true
+    }
+
+    if (latency < LIVE_MIN_LATENCY) {
+      // 快要吃穿了：略微降速回填，给缓冲留出空间
+      this.setRate(v, 0.98)
+      return true
+    }
+
+    // 落在目标区间内：恢复正常速度
+    if (Math.abs(v.playbackRate - 1) > 0.005) {
+      this.setRate(v, 1)
+      return true
+    }
+    return false
+  }
+
+  /**
+   * 设置播放速率（带抖动抑制）。
+   *
+   * <p>只在变化超过 0.5% 时才真正写入：{@code playbackRate} 的每次赋值
+   * 都会触发 media 的 {@code ratechange}，而 xgplayer 与浏览器的媒体策略
+   * 都会监听它。每 500ms 无意义地重赋同一个值会刷出一堆事件。
+   *
+   * @param {HTMLVideoElement} v
+   * @param {number} rate
+   */
+  setRate(v, rate) {
+    if (Math.abs((v.playbackRate || 1) - rate) <= 0.005) return
+    try {
+      v.playbackRate = rate
+    } catch (e) {
+      // 某些浏览器在 readyState 不足时拒绝改速率，下一拍会重试
     }
   }
 
