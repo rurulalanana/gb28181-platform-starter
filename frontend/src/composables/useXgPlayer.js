@@ -798,6 +798,29 @@ export function useXgPlayer(containerRef) {
    * 而其实 WebRTC 还在协商，流根本还没到。所以这里先把 SDP 换完、
    * {@code ontrack} 拿到流，再创建播放器并立刻挂 {@code srcObject}，
    * 用户不会看到那个误导性的错误画面。
+   *
+   * <h3>音频：必须主动把编码限制成 PCMA / PCMU</h3>
+   *
+   * <p><b>不限制的话 WebRTC 永远没有声音</b>（这是之前一直没声音的真正原因）：
+   * 不指定编码时，Chrome 的 offer 音频段是
+   * {@code 111 63 9 0 8 13 …}（opus 排第一），而 <b>ZLM 只会挑 opus 回</b>：</p>
+   * <pre>
+   *   offer : m=audio 9 … 111 63 9 0 8 13 110 126
+   *   answer: m=audio 48000 … 111            ← 只有 opus
+   * </pre>
+   * <p>国标设备推的是 G.711（PCMA/PCMU），而 ZLM 要把它转成 opus 就得有
+   * ffmpeg —— 嵌入式 ZLM 没有，于是答复里写着 opus、却一个音频包都不发。
+   * 实测：{@code audioMuted=true}、{@code inbound-rtp} 一条都没有。</p>
+   *
+   * <p>改用 {@code setCodecPreferences} 只留 PCMA/PCMU 后，ZLM 直接回
+   * {@code m=audio … 8}（PCMA）并<b>原样透传</b>，实测 8 秒收到
+   * <b>47040 字节 / 294 个包</b>，音轨 {@code live}。浏览器原生就支持
+   * PCMU/PCMA（{@code RTCRtpReceiver.getCapabilities('audio')} 里有），
+   * 所以不需要任何 WASM 解码器。</p>
+   *
+   * <p><b>仍有限制</b>：如果设备的音频是 <b>AAC</b>（实测部分下级平台通道是 AAC），
+   * WebRTC 这条路依然没声音 —— 浏览器不支持 AAC-in-WebRTC，
+   * ZLM 也转不了。这类通道需要声音时切 FLV（FLV 的 AAC 由 MSE 原生解码）。</p>
    */
   async function playWebrtc(streamId) {
     const el = createHost()
@@ -808,11 +831,44 @@ export function useXgPlayer(containerRef) {
       const conn = new RTCPeerConnection({ iceServers: [] })
       pc = conn
 
-      // ontrack 在 setRemoteDescription 之后由浏览器回调；用 Promise 等它，
-      // 这样下面创建播放器时流一定已经到手。
+      /*
+       * 显式声明双向的收发器，并把音频编码限制成 G.711（PCMA/PCMU）。
+       *
+       * <p>不能用 {@code createOffer({offerToReceiveAudio:true})} 代替：
+       * 那种写法拿不到 transceiver 引用，也就无法调 setCodecPreferences，
+       * 而“不限制音频编码”正是之前 WebRTC 没声音的原因（见方法注释）。
+       */
+      conn.addTransceiver('video', { direction: 'recvonly' })
+      const audioTx = conn.addTransceiver('audio', { direction: 'recvonly' })
+      try {
+        const caps = window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities
+          ? RTCRtpReceiver.getCapabilities('audio')
+          : null
+        if (caps && caps.codecs) {
+          const g711 = caps.codecs.filter((c) => /PCMA|PCMU/i.test(c.mimeType || ''))
+          if (g711.length) audioTx.setCodecPreferences(g711)
+        }
+      } catch (e) {
+        // 老浏览器不支持 setCodecPreferences：保持默认（可能没有声音，但不影响画面）
+      }
+
+      /*
+       * 所有轨道并入<b>同一个</b> MediaStream。
+       *
+       * <p>音视频的 ontrack 是分开触发的，且不保证顺序（实测音频比视频晚几毫秒）。
+       * 若像原来那样「收到第一条轨就 resolve 并把 event.streams[0] 交出去」，
+       * 后到的音频就会丢 —— 因为 video 元素只认 srcObject 那个对象，
+       * 而后续轨道会被加进另一个（或没有）流里。
+       *
+       * <p>改成共用 remoteStream 后，即使音频晚到，只要 addTrack 到同一个对象，
+       * 已经在播的 video 元素会自动开始出声（浏览器行为）。
+       */
+      const remoteStream = new MediaStream()
       const streamPromise = new Promise((resolve) => {
         conn.ontrack = (event) => {
-          resolve(event.streams[0] || new MediaStream([event.track]))
+          remoteStream.addTrack(event.track)
+          // 有任何一条轨就 resolve：只等视频会在纯音频流上永久挂住
+          resolve(remoteStream)
         }
       })
 
@@ -824,10 +880,7 @@ export function useXgPlayer(containerRef) {
         }
       }
 
-      const offer = await conn.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: true
-      })
+      const offer = await conn.createOffer()
       await conn.setLocalDescription(offer)
       await waitIceGathering(conn)
       if (disposed) return

@@ -154,10 +154,6 @@ function rewriteHost(url) {
  *       丢失很常见，这就是「FLV 播两秒 loading 一下」的根本原因，
  *       换 flv.js / mpegts.js / jessibuca 都不会改变这一点。</li>
  * </ul>
- *
- * <p><b>代价：WebRTC 没有声音</b>：ZLM 的 WebRTC 需要 Opus，
- * 而国标设备推的是 G.711（PCMA/PCMU），嵌入式 ZLM 不转码。
- * 需要听声音时在同一个菜单里切到 FLV 即可（FLV 用 Web Audio 解 G.711）。
  */
 export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
 
@@ -166,21 +162,27 @@ export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
  *
  * <p>列在这里的都是<b>浏览器真能播</b>的通路：
  * <ul>
- *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s）、<b>最流畅</b>（UDP），
- *       但<b>没有声音</b>，且不支持 H.265（失败时自动退回 FLV）；</li>
- *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，<b>有声音</b>，
- *       延迟 ≈ 3s（TCP 队头阻塞，必须靠深缓冲抹平）；</li>
+ *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s）、<b>最流畅</b>（UDP）。
+ *       <b>G.711（PCMA/PCMU）设备有声音</b>：播放器用
+ *       {@code setCodecPreferences} 把音频编码限制成 PCMA/PCMU，
+ *       ZLM 直接透传，浏览器原生解码 —— 不需要任何 WASM。
+ *       <b>但 AAC 设备（部分下级平台通道）没声音</b>：浏览器不支持
+ *       AAC-in-WebRTC，ZLM 也没有 ffmpeg 可转码，这类通道要声音请切 FLV。
+ *       另：H.265 设备 WebRTC 协商会失败，播放器自动回退到 FLV。</li>
+ *   <li>{@code wsflv} —— WebSocket-FLV，自研引擎，<b>所有编码都有声音</b>
+ *       （AAC 走 MSE，G.711 走 Web Audio），延迟 ≈ 3s（TCP 队头阻塞，
+ *       必须靠深缓冲抹平）；</li>
  *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，特性同 ws-flv，
  *       能穿代理/防火墙；</li>
  *   <li>{@code hls} —— 纯 HTTP、无需长连接，延迟 ≈ 3 个切片（ZLM 配 2s×3）。
- *       <b>没有声音</b>，且延迟最大，只在极端网络环境下当最后手段。</li>
+ *       <b>没有声音</b>，只在极端网络环境下当最后手段。</li>
  * </ul>
  * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
  */
 export const LIVE_PROTOCOLS = [
-  { value: 'webrtc', label: 'WebRTC（最流畅，无声音）' },
-  { value: 'wsflv', label: 'WebSocket-FLV（有声音）' },
-  { value: 'httpflv', label: 'HTTP-FLV（有声音）' },
+  { value: 'webrtc', label: 'WebRTC（最流畅）' },
+  { value: 'wsflv', label: 'WebSocket-FLV（全有声）' },
+  { value: 'httpflv', label: 'HTTP-FLV（全有声）' },
   { value: 'hls', label: 'HLS（无声音）' }
 ]
 

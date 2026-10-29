@@ -1,0 +1,79 @@
+WebRTC 通路支持 G.711 声音（限制音频编码为 PCMA/PCMU）
+
+## 问题
+
+WebRTC 一直是「有画面没声音」，之前误以为是 ZLM 的硬限制，甚至考虑换
+jessibuca。查证后发现是我们的协商方式有问题。
+
+## 根因：不限制编码时 ZLM 只回 opus，而它转不了 G.711→opus
+
+实测抓到的 SDP（同一路 G.711 流）：
+
+    我们的 offer：m=audio 9 ... 111 63 9 0 8 13 110 126
+                             ↑opus          ↑PCMU(0) ↑PCMA(8)
+    ZLM 的 answer：m=audio 48000 ... 111
+                                      ↑只有 opus
+
+Chrome 的默认 offer 把 opus 排第一位，ZLM 就挑 opus 回。而国标设备推的是
+G.711（PCMA/PCMU），ZLM 要转成 opus 必须有 ffmpeg —— 嵌入式 ZLM 没有。
+结果就是：answer 里写着 opus，却一个音频包都不发
+（实测 audioMuted=true、inbound-rtp 为空）。
+
+## 修法：用 setCodecPreferences 只留 PCMA/PCMU
+
+    conn.addTransceiver('audio', { direction: 'recvonly' })
+    const g711 = caps.codecs.filter(c => /PCMA|PCMU/i.test(c.mimeType))
+    audioTx.setCodecPreferences(g711)
+
+ZLM 随即回 m=audio ... 8（PCMA）并**原样透传**。实测 G.711 通道：
+8 秒收到 47040 字节 / 294 个包，音轨 live、muted=false。
+
+**不需要任何 WASM**：浏览器原生支持 PCMU/PCMA
+（RTCRtpReceiver.getCapabilities('audio') 里就有），
+所以完全不用引入 jessibuca 那 1MB 解码器。
+
+顺带把音视频轨并入同一个 MediaStream：原来「收到第一条轨就 resolve 并交
+event.streams[0]」，而实测音频比视频晚几毫秒到，后到的音频会被丢掉。
+
+## 关于 jessibuca
+
+查了官方文档（jessibuca.com/player.html 与 /pro.html）：
+
+- 开源版只支持 3 种格式（ws-raw 仅 M7S、ws-flv、http-flv），
+  **WebRTC / HLS / MP4 点播 / GB28181 回放 全是 Pro 才有**（157 项仅 Pro）；
+- 官方对照表里 `Webrtc H264/H265(zlmediakit)` 的 G711A 是「支持」，
+  G711U / AAC / MP3 是「不支持」—— 与本次实测的结论一致；
+- 开源版 H.264/H.265 WASM 标称 720P，1080P+ 要 Pro 的多线程；
+  官方给的参考是 6 路 1080P 需 1.75G 内存，16 路电视墙软解跑不动；
+- GPL 授权，交付给客户的前端 bundle 有传染性风险。
+
+结论：**不换**。我们自己的 WebRTC 已经能拿到同样的「低延迟 + G.711 有声」，
+而且不丢 WebRTC/HLS/MP4 点播/回放伪点播这四块能力。
+
+## 仍然存在的限制（已写进代码注释与协议菜单）
+
+**AAC 音频的通道 WebRTC 依然没声音**。实测两条通道对照：
+
+| 通道 | 音频编码 | 分辨率 | WebRTC 音频 |
+|---|---|---|---|
+| 34020000001320000001（直连球机） | G711A | 2560×1440 | 有（track live、muted=false） |
+| 34020000001310000002（下级平台） | **AAC** | 1280×720 | **无**（连音轨都不建） |
+
+原因：浏览器不支持 AAC-in-WebRTC，ZLM 也没有 ffmpeg 可转码。
+这类通道要声音必须切 FLV（FLV 的 AAC 由 MSE 原生解码，已验证流里
+确实有 74 个 SoundFormat=10 的音频标签）。
+
+协议菜单文案相应调整：
+- WebRTC（最流畅）
+- WebSocket-FLV（全有声）
+- HTTP-FLV（全有声）
+- HLS（无声音）
+
+## 验证
+
+| 项 | 结果 |
+|---|---|
+| G711A 通道 WebRTC | 音轨 live、muted=false、有字节流动 |
+| G711A 通道 2560×1440 H.265 | WebRTC 正常播放（未回退） |
+| AAC 通道 WebRTC | 无音轨（预期），画面正常 |
+| 服务端 | HTTP 200，0 ERROR |
