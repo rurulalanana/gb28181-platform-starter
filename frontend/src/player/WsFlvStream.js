@@ -1112,10 +1112,32 @@ export default class WsFlvStream {
     try {
       const sb = this.mediaSource.addSourceBuffer(mime)
       sb.mode = 'segments'
+      /*
+       * SourceBuffer 级错误监听：这是捕获 {@code MEDIA_ERR_DECODE (code=3)} 现场的唯一入口。
+       *
+       * <p>按 MSE 规范，{@code appendBuffer} 解析失败时会在 SourceBuffer 上
+       * 派发 {@code error} 事件，并把 media 置为 {@code MEDIA_ERR_DECODE}。
+       * 此刻 {@code buffered} 往往还是干净的（失败的那段没写进去），
+       * 所以事后看缓冲查不出任何东西 —— 必须在这里把
+       * 「最后写入的那一段」和当时的播放位置一起记下来。
+       */
+      sb.addEventListener('error', () => {
+        const v = this.media
+        log('err', {
+          where: 'sourcebuffer-error',
+          mime,
+          last: this.lastAppendInfo || null,
+          ct: v ? +v.currentTime.toFixed(2) : null,
+          rs: v ? v.readyState : null,
+          mediaErr: v && v.error ? { code: v.error.code, msg: v.error.message } : null,
+          ...packRanges(v && v.buffered)
+        })
+      })
       this.sourceBuffer = sb
       this.videoMime = mime
       return true
     } catch (e) {
+      log('err', { where: 'addSourceBuffer', mime, msg: String(e && e.message) })
       return false
     }
   }
@@ -1177,6 +1199,20 @@ export default class WsFlvStream {
       this.stWinTfdtEnd = tfdt
     }
     const before = packRanges(this.media && this.media.buffered)
+    /*
+     * 记住「正在写入的这一段」。
+     *
+     * <p><b>为什么必须记</b>：{@code MEDIA_ERR_DECODE (code=3)} 是间歇性的，
+     * 事后看 {@code buffered} 什么都查不出来 —— 报错时缓冲往往还是干净的。
+     * 只有把「出错前最后写入的那一段」的 tfdt / 字节数 / 是否以关键帧开头
+     * 留下来，才能反推是哪类数据把它弄崩的。{@link _ensureSourceBuffer}
+     * 里注册的 SourceBuffer error 监听会读取这个字段。
+     */
+    this.lastAppendInfo = {
+      tfdt: tfdt == null ? null : +tfdt.toFixed(1),
+      bytes: data.byteLength,
+      isInit: tfdt == null
+    }
     sb.onupdateend = () => {
       this.appending = false
       log('append', {

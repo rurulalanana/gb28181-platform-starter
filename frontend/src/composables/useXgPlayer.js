@@ -31,6 +31,7 @@ import { ElMessage } from 'element-plus'
 import Player from 'xgplayer'
 import 'xgplayer/dist/index.min.css'
 import WsFlvStream from '@/player/WsFlvStream'
+import { log } from '@/player/FlvDiag'
 import { webrtcApi } from '@/api'
 
 export function useXgPlayer(containerRef) {
@@ -124,6 +125,8 @@ export function useXgPlayer(containerRef) {
    *   见 {@link attachProtocolSwitch} 的说明。
    * @param {function} [opts.onStall] 流是通的但<b>始终没有视频轨</b>时的回调，
    *   由调用方重建整路流（停会话 + 重新 INVITE）。见 {@link playFlv} 的说明。
+   * @param {function} [opts.onProtoChange] 播放器<b>自动</b>改变协议时回调（参数为新协议名）。
+   *   FLV 解码失败重试耗尽会切到 WebRTC，页面据此同步自己的协议下拉。
    * @param {boolean} [opts._rebuild] 内部重建标记（重建不清空解码重试计数）
    */
   async function play(streamId, urls, opts = {}) {
@@ -175,12 +178,64 @@ export function useXgPlayer(containerRef) {
       if (ok === false && !opts._webrtcFallback) {
         protocol.value = 'wsflv'
         if (currentProtoSwitch) currentProtoSwitch = { ...currentProtoSwitch, value: 'wsflv' }
+        // 同步页面的协议下拉，避免「下拉写 WebRTC、实际走 FLV」的错位
+        if (typeof opts.onProtoChange === 'function') opts.onProtoChange('wsflv')
         await play(streamId, urls, { ...opts, proto: 'wsflv', _webrtcFallback: true })
       }
     } else if (proto === 'hls') {
       await playHls(urls?.hls)
     } else {
-      await playFlv(flvUrlOf(proto, urls), opts.onFatal, currentVod, opts.onStall,
+      /*
+       * FLV 通路彻底失败（解码重试耗尽）→ 自动切 WebRTC。
+       *
+       * <p><b>为什么该自动切而不是只报错</b>：FLV 跑在 TCP 上，而设备→ZLM
+       * 是公网 UDP 推流（服务端日志实测持续 `rtp丢包: 26992 -> 26995`）。
+       * 丢包落在关键帧上就会产生<b>损坏的编码帧</b>，浏览器硬解遇到坏帧直接
+       * {@code MEDIA_ERR_DECODE (code=3)}，且数据源持续丢包时重试多少次都会
+       * 再遇到。同期实测 WebRTC（UDP）可以流畅播放 —— 因为 ZLM 在 UDP
+       * 通路上有 jitter buffer 与重传，丢包不会变成坏帧交给解码器。
+       *
+       * <p>所以重试耗尽后直接切到 WebRTC，比让用户对着�“已重试 3 次”干瞪眼
+       * 更符合预期。两个防重入标记避免踢皮球：
+       * <ul>
+       *   <li>{@code _webrtcFallback}：本次是 WebRTC 失败后退回 FLV 的，
+       *       再切回 WebRTC 无意义；</li>
+       *   <li>{@code _flvFailedOver}：已经因 FLV 失败切过 WebRTC 了。
+       *       WebRTC 再失败时不能再回来。</li>
+       * </ul>
+       */
+      const onFlvFatal = (msg) => {
+        if (disposed) return
+        const canSwitch = !!(urls && urls.webrtc) && !opts._webrtcFallback && !opts._flvFailedOver
+        if (canSwitch) {
+          log('err', { where: 'flv-fatal-switch-webrtc', msg })
+          protocol.value = 'webrtc'
+          if (currentProtoSwitch) currentProtoSwitch = { ...currentProtoSwitch, value: 'webrtc' }
+          /*
+           * 通知调用方同步它自己的协议下拉。
+           *
+           * <p>顶部的 {@code el-select} 是页面状态，不跟着改就会留下
+           * 「下拉写着 WebSocket-FLV、画面其实走 WebRTC」的错位 ——
+           * 排查时极易误判（典型误判：「我选的 FLV 怎么不卡」）。
+           * 自动切换是异步发生的，{@code play()} 已经返回了，
+           * 所以只能靠回调而不能靠返回值。
+           */
+          if (typeof opts.onProtoChange === 'function') opts.onProtoChange('webrtc')
+          ElMessage({
+            type: 'warning',
+            duration: 9000,
+            showClose: true,
+            message:
+              `FLV 解码失败（${msg}）。FLV 走 TCP，线路丢包会产生坏帧；` +
+              '已自动切换为 WebRTC（UDP，不受丢包阻塞）。'
+          })
+          play(streamId, urls, { ...opts, proto: 'webrtc', _flvFailedOver: true })
+          return
+        }
+        // 无 WebRTC 可用（或已切过）：保持原有行为，交给业务层弹错误
+        if (opts.onFatal) opts.onFatal(msg)
+      }
+      await playFlv(flvUrlOf(proto, urls), onFlvFatal, currentVod, opts.onStall,
         opts.onStable, opts.onLowBandwidth)
     }
   }
@@ -287,7 +342,14 @@ export function useXgPlayer(containerRef) {
       if (decodeRetryCount >= MAX_DECODE_RETRY) {
         state.value = `播放异常：${reason}（已重试 ${MAX_DECODE_RETRY} 次）`
         playing.value = false
-        if (onFatal) onFatal()
+        /*
+         * 必须把 {@code reason} 传出去。
+         *
+         * <p>早先写的是 {@code onFatal()}，于是上层拿到的永远是 undefined，
+         * 用户看到的提示变成「FLV 解码失败（undefined）」—— 明明抓到了原因
+         * 却没传给需要展示它的人，等于白诊断一场。
+         */
+        if (onFatal) onFatal(reason || '解码失败')
         return
       }
       decodeRetryCount++
@@ -307,6 +369,23 @@ export function useXgPlayer(containerRef) {
         play(currentStream.value, { wsFlv: url, httpFlv: url }, {
           proto: protocol.value === 'httpflv' ? 'httpflv' : 'wsflv',
           onFatal,
+          /*
+           * onStall / onStable / onLowBandwidth 必须一并回传。
+           *
+           * <p>它们是业务层（LiveView 电视墙）注入的钩子：
+           * <ul>
+           *   <li>{@code onStall} —— 流通但始终无视频轨时拆会话重推，
+           *       每格有独立的重建预算；</li>
+           *   <li>{@code onStable} —— 稳定 10 秒后把重建预算还回去；</li>
+           *   <li>{@code onLowBandwidth} —— 带宽不足告警。</li>
+           * </ul>
+           * <p><b>早先这三个漏传了</b>，导致解码失败重建一次之后它们全部失效：
+           * 电视墙的 stall 自愈从此不再工作，带宽告警也再也不报 ——
+           * 而这恰恰是「重建后更容易再次卡死」的原因之一。
+           */
+          onStall,
+          onStable,
+          onLowBandwidth,
           _rebuild: true,
           vod
         })

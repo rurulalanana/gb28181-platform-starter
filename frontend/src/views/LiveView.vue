@@ -606,21 +606,22 @@ async function playTile(tile) {
   await player.play(streamId, urls, {
     proto: proto.value,
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
-    onStall: () => rebuildStalled(tile)
+    onStall: () => rebuildStalled(tile),
+    /*
+     * 播放器自动改协议时同步顶部下拉。
+     *
+     * <p>典型触发：FLV 解码失败重试耗尽 → 自动切 WebRTC。不同步的话
+     * 下拉会一直写着「WebSocket-FLV」，而画面其实走 WebRTC ——
+     * 排查时会被这个错位带偏（「我选的 FLV 怎么不卡了」）。
+     *
+     * <p>只在「该格就是当前点播的格子」时同步，避免多格之间互相覆盖：
+     * 电视墙里各格的协议是各自独立的，顶部下拉只代表<br>
+     * 「下次点播用哪个」，所以取最后一次操作的那一格的值是合理的。
+     */
+    onProtoChange: (p) => {
+      if (p && p !== proto.value) proto.value = p
+    }
   })
-  /*
-   * 把顶部协议下拉同步成「播放器实际用的协议」。
-   *
-   * <p>WebRTC 协商失败（H.265 设备、UDP 被拦）时播放器会自动回退到 FLV；
-   * 若不同步，顶部会一直显示 <b>WebRTC</b> 而画面其实走 FLV ——
-   * 排查时会被这个错位带偏（典型误判：「我选的 WebRTC 怎么还是卡」）。
-   *
-   * <p>放在 play() 之后读而不是 watch：这里能确定 play 已走完（含回退），
-   * 一个值读一次就够，不需要长期监听每个格子的协议变化。
-   * el-select 的 change 只在用户操作时触发，程序化改值不会反过来再调一次。
-   */
-  const actual = player.protocol.value
-  if (actual && actual !== proto.value) proto.value = actual
 }
 
 /**

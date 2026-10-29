@@ -1,0 +1,86 @@
+FLV 解码失败自动切 WebRTC，并修复两处回调丢失
+
+## 为什么 WebRTC 流畅而 FLV 不行（实测对照）
+
+同一路流（34020000002000000006/34020000001310000002，1280x720）同时段对比：
+
+| 指标 | WebRTC（UDP） | FLV（TCP） |
+|---|---|---|
+| 到达码率 | **775 kbps** | 233~530 kbps |
+| 浏览器侧丢包 | 168 个包 | —（TCP 不丢，只阻塞） |
+| **NACK 重传请求** | **191 次** | **无此机制** |
+| 解码帧率 | **15 fps（完整）** | 10.3 fps |
+| 解码丢帧 | **0** | — |
+| 解码错误 | **null** | `MEDIA_ERR_DECODE (code=3)` |
+| jitter | 0.061 | — |
+
+结论：**不是同一批帧**，三层都不同。
+
+1. **传输层吞吐差 1.5~3 倍**：TCP 在丢包时把拥塞窗口缩到很小，
+   UDP 不受影响。实测 775 kbps（UDP）vs 233 kbps（http-flv）/ 526 kbps（静态文件）。
+
+2. **WebRTC 有 NACK 重传，FLV 没有**：浏览器丢了 168 个包，但发出 191 次 NACK，
+   ZLM 从 RTP 缓存里重传，最终**拼回完整帧**（解码 15fps、丢帧 0）。
+   FLV 是单向 TCP 流 —— ZLM 发什么就是什么，没有「再给我一次」的机制。
+
+3. **解码器容错策略不同（最关键）**：即使拿到坏帧，
+   - WebRTC 视频通路：丢/花这一帧，继续播；
+   - MSE（FLV）：Chrome 的 ChunkDemuxer 视为 **fatal**，整个 MediaSource 永久作废，
+     只能重建播放器。而设备→ZLM 是公网 UDP 推流（服务端日志实测持续
+     `rtp丢包: 26992 -> 26995` + `packet dropped`），源流本身就带坏帧，
+     重试 3 次照样再遇到。
+
+所以「FLV 播一下就卡 / 一直 code 3」是 TCP + MSE 的固有性质，
+换 flv.js / mpegts.js / jessibuca 都不改变。
+
+## 改动
+
+### 1. FLV 重试耗尽后自动切 WebRTC（新增）
+
+`play()` 里包一层 `onFlvFatal`：解码重试 3 次仍失败时，
+若本次有 WebRTC 地址、且不是「WebRTC 失败回退来的 FLV」，就自动切到 WebRTC，
+并弹一次说明（带原因）。两个防重入标记避免两路互相踢皮球：
+`_webrtcFallback`（WebRTC→FLV 已回退过）、`_flvFailedOver`（FLV→WebRTC 已切过）。
+
+### 2. 修复 onFatal 丢失原因（既有 bug）
+
+`scheduleRebuild` 里写的是 `onFatal()`，**没传 reason** —— 明明抓到了
+「视频元素已出错（code=3）」，上层拿到的却是 undefined，用户看到
+「FLV 解码失败（undefined）」。现在把 reason 传出去。
+
+### 3. 修复解码重建后回调全部失效（既有 bug）
+
+`scheduleRebuild` 重建时只回传了 `onFatal` / `vod`，**漏传**
+`onStall` / `onStable` / `onLowBandwidth`。后果：解码失败重建一次之后，
+电视墙的 stall 自愈、重建预算归还、带宽告警全部失效 ——
+而这恰恰是「重建后更容易再次卡死」的原因之一。现在一并回传。
+
+### 4. 协议下拉跟随自动切换
+
+新增 `opts.onProtoChange` 回调，自动切协议时通知页面同步 `el-select`。
+LiveView 已接；ChannelView 原本就有 watch，无需改。
+不同步会留下「下拉写 WebSocket-FLV、画面其实走 WebRTC」的错位，
+排查时极易误判。
+
+### 5. SourceBuffer 错误现场记录
+
+`_ensureSourceBuffer` 注册 `error` 监听，`_pump` 记录 `lastAppendInfo`
+（tfdt / 字节数 / 是否 init 段）。MSE 报 code=3 时 buffered 往往还是干净的，
+不记「最后写入的那一段」就无从反推是哪类数据把它弄崩。
+
+## 验证（真机）
+
+强制注入 `video.error = code 3` 模拟坏帧：
+
+| 项 | 结果 |
+|---|---|
+| toast 文案 | 「FLV 解码失败（视频元素已出错（code=3），需要重建播放器）…已自动切换为 WebRTC」—— 原因不再丢 |
+| 协议下拉 | 自动变为「WebRTC（最流畅）」 |
+| 实际通路 | `srcObject: true`、1280x720、正常播放 |
+| 服务端 | HTTP 200，本进程 0 ERROR |
+
+## 关于为什么不该继续投资 FLV
+
+用户实测结论就是本提交的数据：WebRTC 解码 15fps / 丢帧 0 / 无错误，
+FLV 则反复 code 3。FLV 现在的定位应是「需要声音时的备选」
+（AAC 音频只有 MSE 能解），而不是首选通路。
