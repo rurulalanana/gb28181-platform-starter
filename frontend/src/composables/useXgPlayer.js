@@ -27,6 +27,7 @@
  */
 
 import { ref, shallowRef } from 'vue'
+import { ElMessage } from 'element-plus'
 import Player from 'xgplayer'
 import 'xgplayer/dist/index.min.css'
 import WsFlvStream from '@/player/WsFlvStream'
@@ -180,7 +181,7 @@ export function useXgPlayer(containerRef) {
       await playHls(urls?.hls)
     } else {
       await playFlv(flvUrlOf(proto, urls), opts.onFatal, currentVod, opts.onStall,
-        opts.onStable)
+        opts.onStable, opts.onLowBandwidth)
     }
   }
 
@@ -204,8 +205,9 @@ export function useXgPlayer(containerRef) {
    * @param {function} [onStall] 流通但始终无视频轨时的回调（需调用方重建会话）
    * @param {function} [onStable] 连续稳定播放达到 {@link STABLE_PLAY_MS} 时的回调，
    *        调用方可借此把自己那侧的「重建预算」也还回去
+   * @param {function} [onLowBandwidth] 带宽持续不足时回调，参数含实测 kbps 与推进比
    */
-  async function playFlv(url, onFatal, vod, onStall, onStable) {
+  async function playFlv(url, onFatal, vod, onStall, onStable, onLowBandwidth) {
     if (!url) {
       state.value = '缺少播放地址'
       return
@@ -365,6 +367,39 @@ export function useXgPlayer(containerRef) {
           if (state.value === '等待设备推流…') state.value = '缓冲中…'
         }
         stats.value = info
+      },
+      /*
+       * 带宽持续不足 → 直接告诉用户「是网络不够」，并引导切 WebRTC。
+       *
+       * <p><b>为什么要在播放器里判、而不是让它一直卡</b>：用户看到的现象只有
+       * 「卡」，而卡可能是解码失败、代码 bug、带宽不足三种完全不同的原因。
+       * 播放器手里有两个数能把它们分开 —— 到达字节 / 媒体时间推进比。
+       * 报出实测值后，用户才能去查网络（或找运营商），而不是反复重启平台。
+       *
+       * <p>真机实测（公网 ws-flv）：流需要 980 kbps，浏览器实际只收到 233 kbps，
+       * 媒体时间推进比 0.18，50 秒里 34 次 waiting —— 这种情况无论怎么调
+       * 缓冲/追帧都不可能流畅，因为 TCP 从头到尾就没把数据送够。
+       */
+      onSlowNetwork: (info) => {
+        if (disposed) return
+        const pct = Math.round((info.ratio || 0) * 100)
+        state.value =
+          `网络带宽不足（实测 ${info.kbps} kbps，画面只能推到 ${pct}%）。` +
+          '请切换协议为 WebRTC'
+        /*
+         * 同时弹一次 toast：{@code state} 会被后续的 {@code waiting} 改成
+         * 「缓冲中…」，用户来不及看清原因就消失了。toast 独立存活 5 秒，
+         * 且带实测数字，用户能拿去查网络而不是反复重启平台。
+         */
+        ElMessage({
+          type: 'warning',
+          duration: 8000,
+          message:
+            `当前线路带宽不足：实测 ${info.kbps} kbps，画面只能推进到 ${pct}%。` +
+            'FLV 走 TCP，带宽不够必然卡；请切换为 WebRTC（UDP，不受丢包阻塞）。',
+          showClose: true
+        })
+        if (onLowBandwidth) onLowBandwidth(info)
       }
     })
     stream.start()

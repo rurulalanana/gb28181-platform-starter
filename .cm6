@@ -1,0 +1,101 @@
+加播放器行内诊断日志，据此定位并修复两处真实问题
+
+## 为什么要加日志
+
+用户反馈「FLV 播一下就卡住」，但外部观测拿不到判据：
+- `video.buffered` 在贴近直播边缘时会**低估**已解码区间（实测
+  buffered=[[236.8,264.6]] 而 currentTime=266.46、readyState=4 且播放流畅），
+  只看它会把正常播放误判成断流；
+- 测试页常在后台标签，Chrome 会挂起静音视频，卡顿数据不可信；
+- 真正的断点（时间戳跳变、段内空洞、append 阻塞）全在播放器内部。
+
+新增 `player/FlvDiag.js`，环形缓冲记录 1800 条，控制台一行即可取出判据：
+
+    gbFlvLog()          // 摘要（各类型计数 + waiting 时刻 + 时间轴跳变）
+    gbFlvLog.gaps()     // 只列时间轴跳变
+    gbFlvLog.dump()     // 完整 JSON
+    gbFlvLog.clear()
+
+记录内容：每段 fMP4 的样本数 / 首尾 dts / 时长 / 主题 / 字节数 / 写入的 tfdt；
+每次 append 前后的 buffered 区间与 currentTime；waiting/playing/error/ratechange
+的精确时刻；每次 evict；每 2 秒一条「到达字节 + 产出帧数 + 媒体时间推进比」。
+
+## 真实问题一（已修）：tfdt 每段多跳一整段
+
+日志一眼看出矛盾——同一段的两条记录对不上：
+
+    seg 记录：firstDts=0   span=333
+    append 记录：tfdt=333
+
+追到源头 `node_modules/xgplayer-transmuxer/es/flv/fixer.js:86`：
+
+    videoTrack.baseMediaDecodeTime = videoTrack.samples[0].dts
+
+这行**每次 demux 都执行**。而我们是「攒多批再 flush」（SEGMENT_FLUSH_MS=400），
+于是 flush 时该字段停在最后一批的 dts，样本却是从第一批开始。
+`mp4.js:1300` 直接拿它写 tfdt：`MP42.tfdt(track.baseMediaDecodeTime)`。
+
+实测三段：
+
+    段1: firstDts=0   span=333 → tfdt=333  (应为 0)
+    段2: firstDts=400 span=333 → tfdt=733  (应为 400)
+    段3: firstDts=800 span=133 → tfdt=933  (应为 800)
+
+MSE 完全按 tfdt 判断「这段接在哪」，每段多跳一整段就把时间轴切成一堆碎片
+（实测 buffered=[[0.33,1.13],[3.73,4],[5.87,6.27]]），播放头走进空洞后再无数据
+——正是「播一下就卡住」。
+
+修法：flush 前按本批第一个样本重算 `videoTrack.baseMediaDecodeTime`。
+修后 `gbFlvLog.gaps()` 稳定返回 0 条跳变。
+
+（单批 flush 时这两个值恰好相等，所以该 bug 是随「攒批」改造引入的。）
+
+## 真实问题二（不是代码问题）：TCP 吞吐只有需求的一半到五分之一
+
+修完时间轴后仍会卡，日志给出了定量结论（45 秒口径）：
+
+| 指标 | 实测 | 说明 |
+|---|---|---|
+| 到达码率 | 272~1050 kbps | 波动极大 |
+| 流需要 | **980 kbps** | 服务端 curl 本机同流实测 |
+| 产出帧率 | 10.3 fps | 流是 15 fps |
+| 解封装错误 | **0** | 没有丢帧、没有坏包 |
+| 媒体时间推进比 | 0.71 | 50 秒墙钟只走 27 秒媒体 |
+| waiting | 17 次 | |
+
+服务端本机拉同一路流是 978 kbps（正常），浏览器侧：
+- http-flv（纯 TCP）持续 10 秒：233 kbps
+- 1.2MB 静态文件（nginx→Java）：526 kbps
+- RTT 62~140ms，TCP 块间隔最大 1261ms
+
+**结论：这不是播放器能修的。** TCP 在「高 RTT + 丢包」下拥塞窗口塌陷，
+吞吐只有需求的一小部分；而同一链路 UDP 的 WebRTC 能跑满（用户已确认流畅）。
+换 flv.js / mpegts.js / jessibuca 都一样 —— 它们全跑在 TCP 上。
+
+## 顺带：把判据做进产品
+
+`WsFlvStream` 新增 `onSlowNetwork` 回调：连续 3 个统计窗口
+「媒体时间推进比 < 0.7」即判定带宽不足，一次性弹出提示并带上实测值：
+
+    当前线路带宽不足：实测 530 kbps，画面只能推进到 71%。
+    FLV 走 TCP，带宽不够必然卡；请切换为 WebRTC（UDP，不受丢包阻塞）。
+
+这样运维看到的是「去查网络」，而不是反复重启平台。
+
+## 诊断工具自身修的两个 bug
+
+- `gaps()` 早先读不存在的 `prev.ms` 字段，导致时长恒为 0、每段都报 HOLE；
+  后又误从 `append` 记录取时长（时长只在 `seg` 里）。现统一用 `seg` 的
+  `sumDur` 判据，并把 tfdt 一并记进 `seg`。
+- 构造 WsFlvStream 时误写 `opts.onSlowNetwork`（构造函数是解构参数，没有
+  `opts` 变量），上线后立即抛 ReferenceError；已改回直接引用解构变量。
+
+## 验证（真机，前端诊断输出）
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| 时间轴跳变 | 每段一条 HOLE | **0 条** |
+| 段内 tfdt 错配 | 每段都有 | **0 处** |
+| 分段数 / 45 秒 | 38 | 97（正常按 400ms 切片） |
+| 到达码率 | — | 272~1050 kbps（需求 980） |
+| 解封装错误 | 0 | 0 |

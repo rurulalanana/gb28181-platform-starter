@@ -36,6 +36,7 @@
 
 import { FlvDemuxer, FMP4Remuxer, AudioCodecType } from 'xgplayer-transmuxer'
 import { decodeG711, G711_SAMPLE_RATE } from './g711'
+import { log, packRanges, readTfdt, installGlobalLog } from './FlvDiag'
 
 /**
  * 直播缓冲保留时长（秒）：超过旧的部分就清掉，防止内存无限增长。
@@ -111,6 +112,35 @@ const SEGMENT_FLUSH_MS = 400
  * <p>按帧数判定不依赖任何时间字段，是真正的兜底：8 帧在 15 fps 下约 530 毫秒。
  */
 const SEGMENT_MAX_SAMPLES = 8
+
+/**
+ * 字节/帧率统计窗口（毫秒）。
+ *
+ * <p>见 {@link _flushStats}：把「到达字节」与「产出样本」放在同一个窗口里
+ * 对比，才能分清「网没送到」和「解封装丢帧」。2 秒足够短到能看出突变，
+ * 又长到不受单个标签的抖动影响。
+ */
+const STATS_WINDOW_MS = 2000
+
+/**
+ * 媒体时间推进比的告警阀值。
+ *
+ * <p><b>为什么用「媒体时间 / 墙钟」而不是绝对码率</b>：绝对码率需要知道
+ * 「这路流本来该多少 kbps」，而那取决于分辨率/编码/设备配置，前端无从得知。
+ * 但两者之比是<b>自归一化</b>的：正常播放必然是 1.0。
+ *
+ * <p>实测（公网 ws-flv，980 kbps 的流，TCP 吞吐只有 233 kbps）：
+ * 50 秒墙钟里媒体时间只前进 9.2 秒，比值 <b>0.18</b>，同时 34 次 waiting。
+ * 取 0.7 作为阀值：给慢启动、GOP 边界留足余量，但真实带宽不足一定能识别。
+ */
+const STARVE_RATIO = 0.7
+
+/**
+ * 连续多少个统计窗口低于阀值才判定为「带宽不足」。
+ *
+ * <p>3 个窗口 ≈ 6 秒。单个窗口可能因网络瞬时抖动为低，连续 3 个就不会误判。
+ */
+const STARVE_WINDOWS = 3
 
 /**
  * 音画硬跳阈值（秒）：偏差超过它才改 {@code currentTime}。
@@ -225,9 +255,11 @@ export default class WsFlvStream {
    * @param {(msg: string) => void} [opts.onError] 不可恢复的错误回调
    * @param {(info: object) => void} [opts.onStats] 播放信息回调（码率、分辨率等）
    * @param {() => void} [opts.onPrebuffered] 预缓冲攒够、可以起播时回调一次
+   * @param {(info: {kbps:number, ratio:number}) => void} [opts.onSlowNetwork]
+   *        带宽持续不足时回调一次（见 {@link STARVE_RATIO}）
    * @param {boolean} [opts.vod] 是否为录像回放（伪点播）模式
    */
-  constructor({ url, mediaSource, media, onError, onStats, onPrebuffered, vod }) {
+  constructor({ url, mediaSource, media, onError, onStats, onPrebuffered, onSlowNetwork, vod }) {
     this.url = url
     this.mediaSource = mediaSource
     this.media = media
@@ -243,6 +275,14 @@ export default class WsFlvStream {
      * 必须由业务层通过播放器自己的 API 起播，状态才会同步。
      */
     this.onPrebuffered = onPrebuffered || (() => {})
+    /**
+     * 带宽不足回调（只触发一次）。
+     *
+     * <p>参数 {@code {kbps, ratio}}：实测到达码率与媒体时间推进比。
+     * 由业务层弹提示并引导用户切 WebRTC —— 因为<b>带宽不足是 TCP 通路的固有
+     * 问题</b>，播放器内部无法自愈（UDP 的 WebRTC 不受影响）。
+     */
+    this.onSlowNetwork = typeof onSlowNetwork === 'function' ? onSlowNetwork : null
     /**
      * 录像回放模式。
      *
@@ -298,6 +338,26 @@ export default class WsFlvStream {
     this.pendingMs = 0
     /** 兜底刷段定时器，见 {@link _scheduleFlush}。 */
     this.flushTimer = null
+
+    // ---- 诊断统计窗口（见 {@link _flushStats}）----
+    /** 当前窗口起始时刻（毫秒）。 */
+    this.stWinStart = 0
+    /** 窗口内到达字节。 */
+    this.stWinBytes = 0
+    /** 窗口内投喂次数。 */
+    this.stWinPush = 0
+    /** 窗口内产出的视频样本数。 */
+    this.stWinVideoSamples = 0
+    /** 窗口内解封装抛错次数。 */
+    this.stWinDemuxErr = 0
+    /** 本窗口开始的 tfdt（毫秒），用于算媒体时间推进量。 */
+    this.stWinTfdtStart = null
+    /** 本窗口最后的 tfdt（毫秒）。 */
+    this.stWinTfdtEnd = null
+    /** 连续多少个窗口媒体推进比过低。 */
+    this.starveWin = 0
+    /** 是否已报过「带宽不足」（只报一次，避免刷屏）。 */
+    this.starveReported = false
     /**
      * 预缓冲是否已完成。
      *
@@ -358,6 +418,9 @@ export default class WsFlvStream {
   /** 建立连接。 */
   start() {
     if (this.destroyed) return
+    // 把 window.gbFlvLog 挂上（幂等，多实例共享同一份记录）
+    installGlobalLog()
+    this._bindDiag()
     this._connect()
     this.syncTimer = setInterval(() => this._syncAudioVideo(), 500)
     /*
@@ -404,6 +467,36 @@ export default class WsFlvStream {
   // ==================== 连接（WebSocket / HTTP） ====================
 
   /**
+   * 绑定媒体事件诊断。
+   *
+   * <p>记录 {@code waiting} / {@code playing} / {@code error} /
+   * {@code ratechange} / {@code emptied} 的<b>精确时刻</b>。
+   * 「播一下就卡住」到底是 waiting 卡住了、还是 readyState 掉了、
+   * 还是被改了倍速，靠这几个事件的时间线能直接看出来，
+   * 不必再靠外部观测猜。
+   */
+  _bindDiag() {
+    const v = this.media
+    if (!v || v.__diagBound) return
+    v.__diagBound = true
+    const snap = (ev) => {
+      log('ev', {
+        ev,
+        ct: +v.currentTime.toFixed(2),
+        rs: v.readyState,
+        ns: v.networkState,
+        rate: v.playbackRate,
+        paused: v.paused,
+        err: v.error ? v.error.code : null,
+        ...packRanges(v.buffered)
+      })
+    }
+    for (const ev of ['waiting', 'playing', 'stalled', 'seeking', 'seeked', 'ratechange', 'pause', 'play', 'emptied', 'error']) {
+      v.addEventListener(ev, () => snap(ev))
+    }
+  }
+
+  /**
    * 建立连接。按 URL 协议选传输层：
    * {@code ws://}、{@code wss://} 走 WebSocket，其余（{@code http(s)://} 与
    * 相对路径）走 HTTP 长连接。
@@ -434,6 +527,7 @@ export default class WsFlvStream {
   _scheduleRetry() {
     if (this.destroyed) return
     const delay = Math.min(500 * 2 ** this.retryCount, 10000)
+    log('conn', { what: 'retry-scheduled', retryCount: this.retryCount, delay })
     this.retryCount++
     this.retryTimer = setTimeout(() => this._connect(), delay)
   }
@@ -452,7 +546,18 @@ export default class WsFlvStream {
     ws.onmessage = (ev) => {
       if (this.destroyed || !(ev.data instanceof ArrayBuffer)) return
       this.retryCount = 0
-      this._push(new Uint8Array(ev.data))
+      const u8 = new Uint8Array(ev.data)
+      /*
+       * 诊断：WebSocket 通路也要记源头标签时间戳。
+       *
+       * <p>WS 通路是「一条消息 = 一个标签」，不经 {@link _drainFlvTags}，
+       * 所以这里单独记。少记这一处的话，对比 tfdt 时就看不到源头一侧。
+       */
+      if (u8.length >= 11 && (u8[0] & 0x1f) === 9) {
+        const ts = ((u8[7] << 24) >>> 0) + (u8[4] << 16) + (u8[5] << 8) + u8[6]
+        log('tagsrc', { ts, b: (u8[1] << 16) | (u8[2] << 8) | u8[3] })
+      }
+      this._push(u8)
     }
 
     ws.onerror = () => {
@@ -460,6 +565,7 @@ export default class WsFlvStream {
     }
 
     ws.onclose = () => {
+      log('conn', { what: 'ws-close', retryCount: this.retryCount })
       this.ws = null
       this._scheduleRetry()
     }
@@ -590,6 +696,19 @@ export default class WsFlvStream {
       const dataSize = (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]
       const need = 11 + dataSize + 4
       if (buf.length - off < need) break
+      /*
+       * 诊断：记录<b>源头</b>的视频标签时间戳。
+       *
+       * <p>这是整条链路上最原始的时间信息。若上游设备/ZLM 给的
+       * timestamp 本身就跳变，那问题不在前端分段；反之若这里连续、
+       * 而 fMP4 的 tfdt 有洞，就是我们的重封装算错了。
+       * 两条通路都经过这里，所以只需记这一处。
+       */
+      const tagType = buf[off] & 0x1f
+      if (tagType === 9) {
+        const ts = ((buf[off + 7] << 24) >>> 0) + (buf[off + 4] << 16) + (buf[off + 5] << 8) + buf[off + 6]
+        log('tagsrc', { ts, b: dataSize })
+      }
       this._push(buf.subarray(off, off + need))
       off += need
       if (this.destroyed || this.failed) return
@@ -607,14 +726,35 @@ export default class WsFlvStream {
   _push(chunk) {
     if (this.destroyed || this.failed) return
     this.receivedBytes += chunk.length
+    /*
+     * 字节级统计窗口：用来区分「网没送到」和「解封装丢帧」。
+     *
+     * <p><b>为什么必须区分</b>：实测 50 秒墙钟里媒体时间只前进 9.2 秒
+     * （18%），同时 34 次 waiting —— 播放器一直在饿死。但原因可能是
+     * ①网络/服务端只发了 18% 的字节，或 ②字节够了但解封装把帧丢了。
+     * 两者的处置方向完全相反，靠猜没用。
+     *
+     * <p>每 {@link STATS_WINDOW_MS} 打一条 {@code 'bytes'} 记录：
+     * 窗口内到达字节、解封装抛错次数、产出视频样本数。把
+     * 「字节/秒」和「样本/秒」放在一起看，答案立刻分晓 ——
+     * 15fps 的流应当 ≈ 15 样本/秒；若样本远少于字节所能支撑的帧数，
+     * 就是解封装在丢。
+     */
+    this.stWinBytes += chunk.length
+    this.stWinPush++
     let tracks
     try {
       tracks = this.demuxer.demuxAndFix(chunk, this.discontinuity, this.contiguous, 0, false)
     } catch (e) {
       // 单个坏包不该打断整路播放，丢掉继续
+      this.stWinDemuxErr++
+      this._flushStats()
       return
     }
-    if (!tracks) return
+    if (!tracks) {
+      this._flushStats()
+      return
+    }
     // 首包解析成功后转为「连续」，让 fixer 按连续时间戳处理
     this.discontinuity = false
     this.contiguous = true
@@ -622,8 +762,11 @@ export default class WsFlvStream {
     const videoTrack = this.demuxer.videoTrack
     const audioTrack = this.demuxer.audioTrack
 
+    this.stWinVideoSamples += videoTrack.samples.length
+
     this._handleAudio(audioTrack)
     this._handleVideo(videoTrack)
+    this._flushStats()
 
     if (!this.mediaInfoSent && videoTrack.exist()) {
       this.mediaInfoSent = true
@@ -635,6 +778,78 @@ export default class WsFlvStream {
         hasAudio: !!this.audioLaw
       })
     }
+  }
+
+  /**
+   * 每个统计窗口结束时打一条 {@code 'bytes'} 记录。
+   *
+   * <p>字段含义：
+   * <ul>
+   *   <li>{@code ms} —— 本窗口实际时长；</li>
+   *   <li>{@code bytes} / {@code kbps} —— 到达字节与折算码率；</li>
+   *   <li>{@code push} —— 投喂次数（WS 消息数 / HTTP 标签数）；</li>
+   *   <li>{@code vsamp} —— 解封装产出的<b>视频样本</b>数（=帧数）；</li>
+   *   <li>{@code fps} —— 折算帧率，与流本身帧率对比即知是否丢帧；</li>
+   *   <li>{@code derr} —— 解封装抛错次数。</li>
+   * </ul>
+   */
+  _flushStats() {
+    const now = Date.now()
+    if (!this.stWinStart) {
+      this.stWinStart = now
+      return
+    }
+    const ms = now - this.stWinStart
+    if (ms < STATS_WINDOW_MS) return
+    /*
+     * 媒体时间推进比 = 本窗口内「媒体时间前进」/ 「墙钟前进」。
+     *
+     * <p>正常播放恒为 1.0。远小于 1 就说明<b>数据没送到</b>（而不是解码慢、
+     * 也不是解封装丢帧 —— 那两项会表现为 {@code derr} 上升或
+     * {@code vsamp} 与 {@code bytes} 不成比例）。这是区分「网不够」与
+     * 「代码有 bug」最直接的一个数。
+     */
+    const mediaMs = this.stWinTfdtEnd != null && this.stWinTfdtStart != null
+      ? this.stWinTfdtEnd - this.stWinTfdtStart : null
+    const ratio = mediaMs == null ? null : +(mediaMs / ms).toFixed(2)
+    log('bytes', {
+      ms,
+      bytes: this.stWinBytes,
+      kbps: Math.round((this.stWinBytes * 8) / ms),
+      push: this.stWinPush,
+      vsamp: this.stWinVideoSamples,
+      fps: +((this.stWinVideoSamples * 1000) / ms).toFixed(1),
+      derr: this.stWinDemuxErr,
+      mediaMs,
+      ratio
+    })
+    /*
+     * 连续多个窗口推进比过低 → 带宽不足，回调业务方给出提示。
+     *
+     * <p><b>为什么必须在播放器里判</b>：用户看到的现象只是「卡」，
+     * 而卡的原因可能是解码失败、代码 bug、或带宽不足。
+     * 只有播放器手里的这两个数（到达字节、媒体时间推进）能直接分开。
+     * 报错时报出实测值，用户才能去查网络，而不是反复重启平台。
+     */
+    if (ratio != null && ratio < STARVE_RATIO) {
+      this.starveWin++
+    } else if (ratio != null) {
+      this.starveWin = 0
+    }
+    if (this.starveWin >= STARVE_WINDOWS && !this.starveReported) {
+      this.starveReported = true
+      const kbps = Math.round((this.stWinBytes * 8) / ms)
+      log('err', { where: 'starve', ratio, kbps, win: this.starveWin })
+      if (this.onSlowNetwork) {
+        this.onSlowNetwork({ kbps, ratio, mediaMs, wallMs: ms })
+      }
+    }
+    this.stWinStart = now
+    this.stWinBytes = 0
+    this.stWinPush = 0
+    this.stWinVideoSamples = 0
+    this.stWinDemuxErr = 0
+    this.stWinTfdtStart = this.stWinTfdtEnd
   }
 
   /**
@@ -778,15 +993,87 @@ export default class WsFlvStream {
     this.pendingSamples = []
     this.pendingMs = 0
 
+    /*
+     * 诊断：记下这一批样本的时间轴。
+     *
+     * <p>样本自带的 dts 是分段逻辑的输入，ppend 后从 fMP4 里解析出的
+     * {@code tfdt} 才是 MSE 实际看到的。两者都要记，才能分清是
+     * 「解封装算错」还是「重封装写错」。
+     */
+    const ss = videoTrack.samples
+    const firstDts = ss[0] && Number.isFinite(ss[0].dts) ? ss[0].dts : null
+    const lastDts = ss[ss.length - 1] && Number.isFinite(ss[ss.length - 1].dts)
+      ? ss[ss.length - 1].dts : null
+    const sumDur = ss.reduce((a, s) => a + (s.duration || 0), 0)
+    const keys = ss.filter((s) => s.keyframe).length
+
     let result
     try {
+      /*
+       * 🔴 关键：必须按「本批第一个样本」重算 baseMediaDecodeTime。
+       *
+       * <p><b>这是「FLV 播一下就卡住」的真正原因</b>。{@code xgplayer-transmuxer}
+       * 在 {@code flv/fixer.js} 里<b>每次 demux 都执行</b>：</p>
+       * <pre>
+       *   videoTrack.baseMediaDecodeTime = videoTrack.samples[0].dts
+       * </pre>
+       * <p>而 {@code mp4.js} 生成 moof 时直接拿它写 tfdt：</p>
+       * <pre>
+       *   var tfdt = MP42.tfdt(track.baseMediaDecodeTime)
+       * </pre>
+       *
+       * <p>我们是<b>攒多批再 flush</b> 的（见 {@link SEGMENT_FLUSH_MS}），
+       * 所以 flush 时这个字段停在「最后一批」的 dts，而样本却是从
+       * 「第一批」开始的 —— 实测 tfdt 恰好等于 lastDts 而不是 firstDts：</p>
+       * <pre>
+       *   段1: firstDts=0   span=333 → tfdt=333  (应为 0)
+       *   段2: firstDts=400 span=333 → tfdt=733  (应为 400)
+       *   段3: firstDts=800 span=133 → tfdt=933  (应为 800)
+       * </pre>
+       *
+       * <p>MSE 完全按 tfdt 决定「这段接在哪」，每段多跳一整段就把时间轴
+       * 切成一堆短碎片（实测 {@code buffered=[[0.33,1.13],[3.73,4],[5.87,6.27]]}），
+       * 播放头走进空洞后再无数据 —— 表现就是「播一下就卡住」。</p>
+       *
+       * <p>单批 flush（一个标签刷一次）时这两个值恰好相等，所以这个 bug
+       * 在「攒批」改造之前不存在，是随改造一起引入的。</p>
+       */
+      if (firstDts != null) {
+        videoTrack.baseMediaDecodeTime = firstDts
+      }
       // initMerge=false：init segment 只含视频轨。
       // 若用 initMerge=true，音频轨会被并进同一个 init segment，
       // 而 MSE 的视频 SourceBuffer 不接受音频轨描述符。
       result = this.remuxer.remux(this.needInitSegment, { initMerge: false })
     } catch (e) {
+      log('err', { where: 'remux', msg: String(e && e.message) })
       return
     }
+    const segTfdt = result && result.videoSegment ? readTfdt(result.videoSegment) : null
+    log('seg', {
+      n: ss.length,
+      keys,
+      firstDts: firstDts == null ? null : +firstDts.toFixed(1),
+      lastDts: lastDts == null ? null : +lastDts.toFixed(1),
+      span: firstDts != null && lastDts != null ? +(lastDts - firstDts).toFixed(1) : null,
+      sumDur: +sumDur.toFixed(1),
+      // 本段写入的 tfdt（重封装后的真实解码基准），供 {@code gbFlvLog.gaps()} 判时间轴
+      tfdt: segTfdt == null ? null : +segTfdt.toFixed(1),
+      // duration 全为 0 就是「按帧数/定时器刷」而非「按时长刷」，是一类典型异常
+      zeroDur: ss.every((s) => !s.duration),
+      bytes: result && result.videoSegment ? result.videoSegment.length : 0,
+      init: !!(result && result.videoInitSegment),
+      /*
+       * 音频段大小。
+       *
+       * <p>非 0 表示 remuxer 把<b>音频轨</b>也编成了 fMP4 段，而紧接着那句
+       * {@code _append(result.audioSegment)} 会把它塞进<b>视频</b>
+       * SourceBuffer —— 那个 SB 的 mime 是 {@code video/mp4;codecs="…"}，
+       * 收音频轨必然报错。G.711 走 {@code audioTrack.reset()} 所以是 0，
+       * 但 <b>AAC 流不会被 reset</b>，需靠这条日志确认。
+       */
+      audioBytes: result && result.audioSegment ? result.audioSegment.length : 0
+    })
     if (result.videoInitSegment) {
       this.needInitSegment = false
       this._append(result.videoInitSegment)
@@ -874,8 +1161,32 @@ export default class WsFlvStream {
     }
     const data = this.appendQueue.shift()
     this.appending = true
+    /*
+     * 诊断：记下这次写入的 tfdt 与写入前后的 buffered。
+     *
+     * <p><b>tfdt 是判据的核心</b>：MSE 完全按它决定「这段接在哪」。
+     * 若相邻两段的 tfdt 差 ≠ 前一段的媒体时长，MSE 就在 buffered 里
+     * 划出一道空洞；播放头一旦走进空洞再无数据，画面永久停住 ——
+     * 这正好对应「播一下就卡住」。记录它才能区分是分段算错、还是
+     * 解封装的上游时间戳就断了。
+     */
+    const tfdt = readTfdt(data)
+    if (tfdt != null) {
+      // 给 {@link _flushStats} 算「媒体时间推进量」用：记窗口内的首尾 tfdt
+      if (this.stWinTfdtStart == null) this.stWinTfdtStart = tfdt
+      this.stWinTfdtEnd = tfdt
+    }
+    const before = packRanges(this.media && this.media.buffered)
     sb.onupdateend = () => {
       this.appending = false
+      log('append', {
+        tfdt: tfdt == null ? null : +tfdt.toFixed(1),
+        bytes: data.byteLength,
+        beforeN: before.n,
+        ...packRanges(this.media && this.media.buffered),
+        ct: this.media ? +this.media.currentTime.toFixed(2) : null,
+        rs: this.media ? this.media.readyState : null
+      })
       this._evict()
       // 每写完一段就看一次预缓冲是否够了（够了就放行起播）
       this._checkPrebuffer()
@@ -885,6 +1196,7 @@ export default class WsFlvStream {
       sb.appendBuffer(data)
     } catch (e) {
       this.appending = false
+      log('err', { where: 'append', name: e && e.name, msg: String(e && e.message) })
       // QuotaExceededError：清掉旧缓冲再重试
       if (e && e.name === 'QuotaExceededError') {
         this._evict(true)
@@ -976,6 +1288,13 @@ export default class WsFlvStream {
      */
     const removeTo = v.currentTime - (aggressive ? 20 : BUFFER_KEEP_SECONDS)
     if (removeTo - start > 1) {
+      log('evict', {
+        aggressive,
+        from: +start.toFixed(2),
+        to: +removeTo.toFixed(2),
+        ct: +v.currentTime.toFixed(2),
+        ...packRanges(v.buffered)
+      })
       try {
         sb.remove(start, removeTo)
       } catch (e) {
@@ -1287,6 +1606,15 @@ export default class WsFlvStream {
   _fail(msg, retryable = true) {
     if (this.destroyed || this.failed) return
     this.failed = true
+    const v = this.media
+    log('err', {
+      where: 'fail',
+      msg,
+      retryable,
+      ct: v ? +v.currentTime.toFixed(2) : null,
+      rs: v ? v.readyState : null,
+      ranges: v ? packRanges(v.buffered) : null
+    })
     // 不会再消费了，排队的段直接丢弃，否则会滞留在内存里
     this.appendQueue = []
     this.onError(msg, retryable)
