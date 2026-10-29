@@ -94,20 +94,34 @@ const SOFT_SYNC_THRESHOLD = 0.2
  * 表现为「越看越延迟」。实测不追帧时，看 10 分钟能积出 8~15 秒延迟，
  * 云台控制后要等十几秒画面才动。
  *
- * <p><b>为什么留余量而不是追到 0</b>：追到 0 等于对着缓冲边缘播，
- * 网络抖动 0.2 秒就会 waiting 卡顿。0.6 秒是实测的平衡点：
- * 能吸收常见的单次抖动，同时让端到端延迟维持在 1 秒内。
+ * <p><b>为什么留 1 秒而不是 0.6 秒</b>：ZLM 是<b>按批</b>落盘的 —— 一次
+ * append 往往带来 0.5~2 秒的数据，因此 {@code buffered.end - currentTime}
+ * 本身就在 0.1~2.4 秒之间<b>剧烈抖动</b>（实测 80 个采样点，标准差 &gt; 0.6）。
+ * 目标定 0.6 时，正常抖动就会被误判成「余量过低」而反复降速，缓冲反而
+ * 更容易被吃穿。1 秒既能跨过一个 GOP 边界的到达缺口，又让端到端延迟
+ * 维持在 2 秒内。
  */
-const LIVE_TARGET_LATENCY = 0.6
+const LIVE_TARGET_LATENCY = 1.0
 
 /**
  * 硬跳阈值（秒）：缓冲余量超过它就丢帧直接跳到边缘前 {@link LIVE_TARGET_LATENCY}。
  *
- * <p>设 1.6 而不是 1.0：用户切后台再回来、或系统短暂卡顿都会让余量跳增，
- * 这时一次硬跳比慢慢加速更合理；而正常网络波动下余量很少超过 1.6，
- * 不会触发跳帧（画面不闪）。
+ * <p><b>为什么从 1.6 提到 3.0</b>：实测该值取 1.6 时，40 秒内触发了
+ * <b>26 次</b>硬跳（几乎每 1.5 秒一次）—— 因为突发到达本身就把余量顶到
+ * 2 秒以上。每次跳帧都会打断解码器并触发 {@code waiting}，实测卡顿从
+ * 关掉追帧时的 2 次/40 秒涨到 16 次/40 秒。<b>跳帧比延迟更伤体验</b>，
+ * 因此阈值必须明显高于「正常突发幅度」。
  */
-const LIVE_MAX_LATENCY = 1.6
+const LIVE_MAX_LATENCY = 3.0
+
+/**
+ * 两次硬跳之间的最小间隔（毫秒）。
+ *
+ * <p>突发到达会让余量反复越线，没有冷却就会连续跳 —— 用户看到的是
+ * 「画面一顿一顿地往前跳」。5 秒足够让流回到稳定节奏，也比人眼能容忍的
+ * 「连续跳帧」间隔长得多。
+ */
+const LIVE_JUMP_COOLDOWN_MS = 5000
 
 /**
  * 软追帧倍速：余量在 {@code [目标, 硬跳阈值]} 之间时用它慢慢吃掉。
@@ -120,9 +134,20 @@ const LIVE_MAX_LATENCY = 1.6
 const LIVE_CHASE_RATE = 1.08
 
 /**
- * 追帧的目标下限（秒）：余量小于它时不再降速，避免把缓冲吃穿导致卡顿。
+ * 软追帧的死区（秒）：余量超过 {@code 目标 + 本值} 才开始加速。
+ *
+ * <p>0.3 而不是 0.15：余量本身就抖 ±0.6 秒，死区太窄会让倍速在
+ * 1.00 / 1.08 之间反复跳，每次都触发 {@code ratechange}。
  */
-const LIVE_MIN_LATENCY = 0.35
+const LIVE_CHASE_DEADBAND = 0.3
+
+/**
+ * 追帧的目标下限（秒）：余量小于它时才降速回填。
+ *
+ * <p>调低到 0.5 而不是更高：降速回填每秒只能补 0.02 秒，
+ * 靠它救不了大缺口，只能防「马上就要吃穿」的最后一下。
+ */
+const LIVE_MIN_LATENCY = 0.5
 /** 音频提前排程量（秒）：留一点余量，避免第一个包就被判定为「已经迟到」。 */
 const AUDIO_LEAD_SECONDS = 0.12
 /** 音频最多领跑多少秒（超过说明时间戳异常，丢弃以压低延迟）。 */
@@ -236,6 +261,12 @@ export default class WsFlvStream {
     this.syncTimer = null
     /** 追帧开始的时刻（毫秒）：起播后先等 2 秒再开始校正。 */
     this.chaseStartAt = null
+    /**
+     * 上次硬跳的时刻（毫秒）：用于冷却，见 {@link LIVE_JUMP_COOLDOWN_MS}。
+     *
+     * <p>0 表示从未跳过。
+     */
+    this.lastJumpAt = 0
 
     this._bindMediaSource()
   }
@@ -898,7 +929,25 @@ export default class WsFlvStream {
     const audioTime = ctx.currentTime - this.audioClockBase
     const drift = v.currentTime - audioTime
     if (Math.abs(drift) > HARD_SYNC_THRESHOLD) {
-      v.currentTime = audioTime
+      /*
+       * 硬跳目标必须落在已缓冲区间内。
+       *
+       * <p>音频走 Web Audio 的绝对时钟，与视频缓冲无关；而追帧会跳帧、
+       * {@code _evict()} 会清掉旧数据 —— 两者都会让「音频时钟换算出的
+       * 位置」落到缓冲区之外。若直接赋给 {@code currentTime}，视频会去
+       * 等一个还没到的时间点，{@code buffered.end - currentTime} 变成负数，
+       * 实测卡 100ms~2s（40 秒里 16 次 waiting）。
+       *
+       * <p>夹在区间内之后，最差只是音画对齐不完美，不会造成断流。
+       */
+      const b = v.buffered
+      if (!b.length) return
+      const lo = b.start(0)
+      const hi = b.end(b.length - 1)
+      const target = Math.min(Math.max(audioTime, lo), Math.max(lo, hi - 0.2))
+      if (Math.abs(target - v.currentTime) > HARD_SYNC_THRESHOLD) {
+        v.currentTime = target
+      }
     }
   }
 
@@ -923,30 +972,48 @@ export default class WsFlvStream {
     // 取最后一段的终点作为「直播边缘」
     const edge = v.buffered.end(v.buffered.length - 1)
     const latency = edge - v.currentTime
+    if (!Number.isFinite(latency)) return false
 
-    // 数据还没铺到当前位置（刚 seek 或缓冲被清），本拍不做判断
-    if (!Number.isFinite(latency) || latency < 0) return false
+    /*
+     * 余量为负：{@code currentTime} 已经跑到已落盘数据之外。
+     *
+     * <p>这不是异常 —— ZLM 按批 flush、{@code _evict()} 的 remove 又会
+     * 阻塞 append，两者都会让 {@code buffered.end} 暂时落后于播放位置。
+     *
+     * <p><b>但绝对不能直接 return false</b>：那样倍速会永远停在上一拍的
+     * 0.98 / 1.08，再也恢复不了（实测卡在 0.98 后视频越播越慢，缓冲一路
+     * 被吃穿）。这里必须把速率交还给 1 倍，等数据追上即可。
+     */
+    if (latency < 0) {
+      this.setRate(v, 1)
+      return true
+    }
 
     if (latency > LIVE_MAX_LATENCY) {
       /*
        * 硬跳。
        *
-       * <p>跳到 {@code edge - TARGET} 而不是 {@code edge}：
-       * 贴着边缘播会在下一拍就变成"余量 0"，紧接着一次网络抖动就卡住。
-       * 留 0.6 秒让它能正常缓冲。
+       * <p>跳到 {@code edge - TARGET} 而不是 {@code edge}：贴着边缘播会在
+       * 下一拍就变成「余量 0」，紧接着一次网络抖动就卡住。
        *
-       * <p>不能跳太狠：一次丢掉超过 5 秒会让用户明显感觉画面"跳了一段"，
-       * 此时宁可分两次跳（500ms 后还会再进入这个分支）。
+       * <p><b>冷却期</b>：突发到达会让余量反复越线，没有冷却就会连续跳，
+       * 用户看到的是「画面一顿一顿地往前跳」。冷却期内只软追不硬跳。
        */
+      const now = Date.now()
+      if (this.lastJumpAt && now - this.lastJumpAt < LIVE_JUMP_COOLDOWN_MS) {
+        this.setRate(v, LIVE_CHASE_RATE)
+        return true
+      }
       const target = edge - LIVE_TARGET_LATENCY
       if (target > v.currentTime + 0.05) {
+        this.lastJumpAt = now
         v.currentTime = target
       }
       this.setRate(v, 1)
       return true
     }
 
-    if (latency > LIVE_TARGET_LATENCY + 0.15) {
+    if (latency > LIVE_TARGET_LATENCY + LIVE_CHASE_DEADBAND) {
       // 软追：略快一点把余量吃掉
       this.setRate(v, LIVE_CHASE_RATE)
       return true

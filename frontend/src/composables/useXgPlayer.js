@@ -78,6 +78,21 @@ export function useXgPlayer(containerRef) {
    */
   const STABLE_PLAY_MS = 10000
   /**
+   * 直播「追帧微调」允许的倍速下界。
+   *
+   * <p>必须与 {@code WsFlvStream} 的 {@code LIVE_CHASE_RATE}（1.08）与
+   * 回填速率（0.98）保持同步：这里是<b>放行闸门</b>，低于下界的值会被
+   * 拉回 1 倍速。见 {@code playFlv} 里 {@code resetRate} 的说明。
+   */
+  const LIVE_RATE_MIN = 0.95
+  /**
+   * 直播「追帧微调」允许的倍速上界。
+   *
+   * <p>为什么取 1.1 而不是 1.08：留一点余量，避免浮点误差把合法的
+   * 1.08 判成越界、反复拉回 1 —— 那会让追帧完全失效。
+   */
+  const LIVE_RATE_MAX = 1.1
+  /**
    * 当前回放参数（录像段的 duration 与信令回调）。
    *
    * <p>存在闭包里是为了 <b>跨解码重试重建</b>保留：重建会重新走 playFlv，
@@ -480,8 +495,24 @@ export function useXgPlayer(containerRef) {
     // 防止外部代码或残留的 rate 状态影响直播速度。
     // 回放的倍速由 applyVodControls 转成设备侧 Scale。
     if (!vod) {
+      /*
+       * 倍速兜底：只拦「明显异常」的值，放行追帧的微调区间。
+       *
+       * <p><b>为什么不能一律拉回 1</b>：{@code WsFlvStream._chaseLiveEdge()}
+       * 靠 1.08 / 0.98 这类微调来吃掉多余缓冲、回填即将吃穿的缓冲。
+       * 这里若把任何非 1 的倍速都拉回 1，软追帧就<b>完全失效</b>，
+       * 只剩硬跳一条路 —— 实测表现为缓冲反复被吃穿到 0.03 秒，
+       * 25 秒里 8 次 waiting（每次卡 100~400ms）。
+       *
+       * <p>契约：追帧只使用 [LIVE_RATE_MIN, LIVE_RATE_MAX] 内的值；
+       * 超出这个范围一定是外部误设（残留状态、键盘快捷键等），
+       * 必须拉回 1 倍速。
+       */
       const resetRate = () => {
-        if (media.playbackRate !== 1) media.playbackRate = 1
+        const r = media.playbackRate
+        if (r < LIVE_RATE_MIN || r > LIVE_RATE_MAX) {
+          media.playbackRate = 1
+        }
       }
       media.addEventListener('ratechange', resetRate)
       resetRate()
