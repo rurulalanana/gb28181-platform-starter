@@ -136,6 +136,13 @@ export default class WsFlvStream {
     this.httpAbort = null
     this.retryCount = 0
     this.retryTimer = null
+    /**
+     * HTTP 通路的「标签重组」缓冲：收到的字节先攒在这里，凑齐完整 FLV
+     * 标签再喂给解封装器。见 {@link _pushHttp}。
+     */
+    this.flvRest = null
+    /** 会话内是否已投喂过 FLV 文件头（重连时不再喂）。 */
+    this.flvHeaderPushed = false
 
     // ---- 解封装 ----
     this.demuxer = new FlvDemuxer()
@@ -218,6 +225,14 @@ export default class WsFlvStream {
    */
   _connect() {
     if (this.destroyed) return
+    /*
+     * 新连接一律丢掉上一次的半截标签。
+     *
+     * <p>断流时最后一个标签很可能只收到一半，残留在 {@code flvRest} 里；
+     * 重连后字节从头开始（先 FLV 头再标签），拼接起来就是一段错位数据，
+     * 会让解封装器切出错误的样本，表现为画面花屏或解码失败。
+     */
+    this.flvRest = null
     if (/^wss?:/i.test(this.url || '')) {
       this._connectWs()
     } else {
@@ -303,7 +318,7 @@ export default class WsFlvStream {
         if (done) break
         if (value && value.length) {
           this.retryCount = 0
-          this._push(value)
+          this._pushHttp(value)
         }
       }
     } catch (e) {
@@ -332,10 +347,77 @@ export default class WsFlvStream {
   // ==================== 解封装与分发 ====================
 
   /**
+   * HTTP 通路收字节：先按 FLV 标签重新切齐，再<b>逐个标签</b>投喂。
+   *
+   * <p><b>为什么必须切</b>：WebSocket 通路天然是「一条消息 = 一个 FLV 标签」，
+   * 解封装器每次只看到一个完整标签；HTTP 长连接的 chunk 边界则完全任意，
+   * 一次读取可能包含四五个标签、也可能把标签从中间切开。
+   *
+   * <p>实测（Mac + Chrome，1280×720 Main，硬解）：多标签一次性投喂时，
+   * 第一段 fMP4 里会出现「本该丢弃的帧」混进同一个 sample 序列，
+   * 容器结构完全合法（{@code trun} 声明的样本大小之和与 {@code mdat} 一致），
+   * 但解码器报 {@code MEDIA_ERR_DECODE (code 3)}，三次重建都无效；
+   * 同一路流走 WebSocket 一切正常。切齐后两条通路的投喂节奏完全一致。
+   *
+   * <p>切分的额外好处：重连时能干净地跳过新的 FLV 头，不会把
+   * {@code 'FLV'} 魔数当成标签去解析。
+   */
+  _pushHttp(chunk) {
+    if (this.destroyed || this.failed) return
+    if (!this.flvRest || !this.flvRest.length) {
+      this.flvRest = chunk.slice()
+    } else {
+      const merged = new Uint8Array(this.flvRest.length + chunk.length)
+      merged.set(this.flvRest)
+      merged.set(chunk, this.flvRest.length)
+      this.flvRest = merged
+    }
+    this._drainFlvTags()
+  }
+
+  /**
+   * 把 {@code flvRest} 里能凑齐的完整 FLV 单元（文件头 + 逐个标签）投喂出去，
+   * 剩下的半截留到下次。
+   *
+   * <p>FLV 标签定长公式：{@code 11 字节标签头 + dataSize + 4 字节 PreviousTagSize}。
+   * 必须等整段到齐再喂，否则样本会被截断。
+   */
+  _drainFlvTags() {
+    let buf = this.flvRest
+    if (!buf || !buf.length) return
+    let off = 0
+    // 整个会话只在第一次连接时投喂文件头（9 字节头 + 4 字节 PreviousTagSize0）
+    if (!this.flvHeaderPushed) {
+      if (buf.length < 13) return
+      if (buf[0] !== 0x46 || buf[1] !== 0x4c || buf[2] !== 0x56) {
+        // 不是 FLV 头：原样喂出去，让解封装器抛错走重建，不在这里装作正常
+        this.flvRest = null
+        this.flvHeaderPushed = true
+        this._push(buf)
+        return
+      }
+      this.flvHeaderPushed = true
+      this._push(buf.subarray(0, 13))
+      off = 13
+    }
+    for (;;) {
+      if (buf.length - off < 11) break
+      const dataSize = (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]
+      const need = 11 + dataSize + 4
+      if (buf.length - off < need) break
+      this._push(buf.subarray(off, off + need))
+      off += need
+      if (this.destroyed || this.failed) return
+    }
+    // 残留半截标签：复制一份，避免长期持有整块大缓冲
+    this.flvRest = off >= buf.length ? null : buf.subarray(off).slice()
+  }
+
+  /**
    * 喂一段 FLV 字节。
    *
-   * <p>{@link FlvDemuxer} 自己处理跨包边界（内部有 {@code _remainingData}），
-   * 所以这里按 WebSocket 消息边界直接投喂即可。
+   * <p>WebSocket 通路是「一条消息 = 一个标签」，HTTP 通路经
+   * {@link _drainFlvTags} 切齐后也是逐标签投喂 —— 两条通路在这里完全等价。
    */
   _push(chunk) {
     if (this.destroyed || this.failed) return

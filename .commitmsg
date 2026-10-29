@@ -1,35 +1,53 @@
-修复直播「视频在播却盖着播放图标」
+修复 HTTP-FLV 无法播放
 
-## 问题
+## 现象
 
-预缓冲改造把直播的 autoplay 设为 false（等攒够缓冲再播），于是 xgplayer
-初始处于「暂停」态，start 插件就把大播放按钮画在正中央。而实际起播是由
-WsFlvStream 直接调 video.play() 完成的 —— 绕过播放器 API 不会通知它，
-结果两边状态不一致：画面在动，按钮还盖着。
+实时预览切到 HTTP-FLV 后，画面永远出不来，提示「解码错误」，
+三次自动重建全部失败；同一路流切回 WebSocket-FLV 却能正常播放。
+控制台报：
+
+    MEDIA_ERR_DECODE (code 3)
+    PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED
+    RunSegmentParserLoop: stream parsing failed
+
+## 排查过程
+
+1. 先用 curl 直连 ZLM 的 /rtp/xxx.live.flv —— 200 + video/x-flv，
+   字节在持续涌出，链路没问题。
+2. 在浏览器里用 fetch 拉同一地址，3 秒拿到 555 KB / 107 个 chunk，
+   首个 chunk 以 "FLV" 魔数开头 —— 数据本身也是好的。
+3. 给 SourceBuffer.appendBuffer 打桩，把每次写入的 fMP4 段抓下来做
+   二进制解析：容器结构完全合法（ftyp/moov、moof/mdat 齐全，
+   trun 声明的样本大小之和与 mdat 负载精确相等，dataOffset 指向正确，
+   avcC 里的 SPS/PPS 与 FLV 序列头一致）。也就是说**不是封装错了**。
+4. 把抓到的同一批段拿去独立 MSE 页面回放，稳定复现 code 3；
+   而 WebSocket 通路抓到的段同样独立回放却正常。
+5. 对比两条通路的差异只剩一处：**投喂解封装器的粒度**。
+   WebSocket 一条消息 = 一个 FLV 标签；HTTP 一个 chunk 可能包含
+   四五个标签，也可能把标签从中间切开。用同一份 FLV 在 Node 里
+   模拟两种粒度跑 xgplayer-transmuxer，多标签一次性投喂会生成
+   「首段里混入本该丢弃的帧」的样本序列 —— 容器合法但解码器拒收。
 
 ## 修法
 
-一、起播改走播放器 API
+HTTP 通路先把字节按 FLV 标签重新切齐，再**逐个标签**投喂，
+与 WebSocket 通路完全一致：
 
-WsFlvStream._releasePrebuffer() 不再直接 media.play()，改为回调
-onPrebuffered()；useXgPlayer 收到后调 player.play()，xgplayer 状态与
-控制栏一起更新（playing 事件正常触发）。
-
-二、直播移除 start 插件
-
-中央那个大按钮是 start 插件，与控制栏的 play 是两个组件 ——
-ignores 里原来只去掉了 play，漏了 start。更重要的是：直播不允许暂停
-（closeVideoClick: true 已让点画面不暂停），这个按钮在本页没有任何作用，
-预缓冲那一两秒里它只会误导用户。回放保留 start（回放允许暂停，需要它）。
+- 新增 flvRest 缓冲，跨 chunk 累积；
+- 新增 flvHeaderPushed：会话内只投喂一次 9+4 字节文件头，
+  重连时跳过新的 FLV 头，不会把 'FLV' 魔数当标签解析；
+- 每次连接重置 flvRest（断流时的半截标签必须丢弃，
+  否则重连后从头拼会错位）。
 
 ## 验证（真机）
 
 | 项 | 结果 |
 |---|---|
-| 直播 start 元素数 | 0（截图确认画面干净，无播放图标） |
-| 直播 playing | true，buffer 3.2 秒稳定 |
-| 直播 30 秒采样 | 0 次卡顿、0 次 waiting |
-| 回放 start 元素数 | 1（保留），进度条在，播放正常 |
+| HTTP-FLV 起播 | 成功，currentTime 走到 49.85 秒 |
+| HTTP-FLV 25 秒采样 | 0 次卡顿、0 次 waiting/stalled |
+| HTTP-FLV 缓冲 | 稳定 28.6~33.5 秒 |
+| WebSocket-FLV 回归 | 正常，currentTime 11.52 秒 |
+| 服务端 | 启动正常，0 新增 ERROR |
 
-顺带确认回放未受影响：录像回放 2026-10-28 20:00~21:07 正常起播，
-hasProgress=true、playing=true。
+顺带确认：换一个通道（34020000001320000001）走 HTTP-FLV 本来就能播，
+说明故障与具体设备无关，只与投喂粒度有关 —— 这也反过来印证了结论。
