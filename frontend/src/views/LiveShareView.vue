@@ -788,17 +788,25 @@ watch(ptzReady, (ok) => {
    算出来与 CMS 逐像素一致；窄屏改一个变量就能整体缩小，
    不用把 8 个坐标改一遍（也无法用 transform:scale —— 那会让
    拖动时 {@code offsetWidth} 与实际包围盒不一致，拖到不了右边）。
+
+   <p>{@code --ptz-gap} 是格子间距。默认 0 —— 桌面浮层保持 CMS 那种
+   「无缝拼成十字」的外观；窄屏要画成一粒粒独立的圆角按键，
+   那里会把它改成正数。位置全部写成「{@code cell + gap} 的整数倍」，
+   所以 gap=0 时算出来与原公式完全一致。
    ============================================================ */
 .ptz-block {
-  /* 单元格边长：唯一需要改的参数 */
+  /* 单元格边长与间距：窄屏只需改这两个参数 */
   --ptz-cell: 50px;
+  --ptz-gap: 0px;
+  /* 行距 = 单元格 + 间隙，位置公式里反复用到 */
+  --ptz-step: calc(var(--ptz-cell) + var(--ptz-gap));
   position: absolute;
   z-index: 20;
   top: 20px;
   right: 20px;
-  width: calc(var(--ptz-cell) * 3);
-  /* 220 / 50 = 4.4：最后一行格子下面还留一点余量 */
-  height: calc(var(--ptz-cell) * 4.4);
+  width: calc(var(--ptz-step) * 3 - var(--ptz-gap));
+  /* 上方 0.2 格 + 四行格子三处间隙 + 下方 0.2 格余量 */
+  height: calc(var(--ptz-step) * 4 - var(--ptz-gap) + var(--ptz-cell) * 0.4);
   text-align: center;
   color: #333;
   background: rgba(237, 237, 237, 0);
@@ -854,8 +862,8 @@ watch(ptzReady, (ok) => {
 
 /* 中心：始终显示，作为拖动柄 */
 .ptz-center {
-  top: calc(var(--ptz-cell) * 1.2);
-  left: var(--ptz-cell);
+  top: var(--ptz-step);
+  left: var(--ptz-step);
   display: block;
   border-radius: calc(var(--ptz-cell) / 2);
   background: rgba(204, 204, 204, 0.2);
@@ -873,35 +881,36 @@ watch(ptzReady, (ok) => {
   height: calc(var(--ptz-cell) * 0.44);
 }
 
-/* 六个格子的位置 —— 默认 50px 时与 CMS 逐像素一致 */
+/* 六个格子的位置 —— gap=0 时与 CMS 逐像素一致 */
 .ptz-up {
   top: calc(var(--ptz-cell) * 0.2);
-  left: var(--ptz-cell);
+  left: var(--ptz-step);
 }
 
 .ptz-left {
-  top: calc(var(--ptz-cell) * 1.2);
+  top: calc(var(--ptz-step) + var(--ptz-cell) * 0.2);
   left: 0;
 }
 
 .ptz-right {
-  top: calc(var(--ptz-cell) * 1.2);
-  left: calc(var(--ptz-cell) * 2);
+  top: calc(var(--ptz-step) + var(--ptz-cell) * 0.2);
+  left: calc(var(--ptz-step) * 2);
 }
 
 .ptz-down {
-  top: calc(var(--ptz-cell) * 2.2);
-  left: var(--ptz-cell);
+  top: calc(var(--ptz-step) * 2 + var(--ptz-cell) * 0.2);
+  left: var(--ptz-step);
 }
 
 .ptz-plus {
-  top: calc(var(--ptz-cell) * 3.2);
+  top: calc(var(--ptz-step) * 3 + var(--ptz-cell) * 0.2);
   left: calc(var(--ptz-cell) * 0.3);
 }
 
 .ptz-minus {
-  top: calc(var(--ptz-cell) * 3.2);
-  left: calc(var(--ptz-cell) * 1.7);
+  top: calc(var(--ptz-step) * 3 + var(--ptz-cell) * 0.2);
+  /* 2 格宽 − 0.3 格左边距：gap=0 时正好 1.7 格，与 plus 左右对称 */
+  left: calc(var(--ptz-step) * 2 - var(--ptz-cell) * 0.3);
 }
 
 /*
@@ -1156,12 +1165,20 @@ watch(ptzReady, (ok) => {
   }
 
   /*
-   * iOS Safari 在输入框字号 < 16px 时会在聚焦瞬间<b>自动放大整页</b>，
-   * 而且失焦后不会缩回去 —— 用户会以为页面坏了。这是移动端最常见的
-   * 「样式不行」之一，只能靠把字号提到 16px 规避。
+   * 分享链接的字号。
+   *
+   * <p><b>为什么要配 {@code pointer-events: none}</b>：iOS Safari 在
+   * 「可聚焦」表单元素的字号 < 16px 时，聚焦瞬间会<b>自动放大整页</b>，
+   * 而且失焦后不缩回去。上一版为了绕这个坑把字号提到 16px，
+   * 结果链接看起来又大又笨（一行只能放下半条）。
+   *
+   * <p>这里反过来解：字号降到 13px（与桌面一致），同时让它
+   * <b>不可聚焦</b> —— 不聚焦就不会触发缩放。代价是不能长按选中，
+   * 但右侧就有一键复制按钮，分享链接也从来不需要只挑其中几个字。
    */
   .share-input {
-    font-size: 16px;
+    font-size: var(--fs-sm);
+    pointer-events: none;
   }
 
   /* ---------- 窄屏：云台是独立 Tab，占满整张卡片 ---------- */
@@ -1170,39 +1187,32 @@ watch(ptzReady, (ok) => {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    /*
-     * 上下留白按单元格边长走，面板越大留白越多，视觉重心居中。
-     * 用 min-height 而不是固定高：不支持云台时那里只有一行提示文字，
-     * 固定高会留出一大片空白。
-     */
-    min-height: 220px;
-    padding: var(--sp-4) var(--sp-3);
+    padding: var(--sp-5) var(--sp-3);
   }
 
   /*
    * 静态面板：{@code position: relative} 而不是 static —— 内部格子是
    * position:absolute，没有定位祖先会飞到页面左上角。
-   * 宽高必须显式给：格子全绝对定位，撑不开父元素。
    *
-   * <h3>尺寸为什么用 clamp</h3>
-   * 手机上云台是唯一的操作入口，<b>手指触点必须够大</b>：
-   * 38px 的格子（改造前）在手机上又小又难点，实测按偏率很高。
-   * 44px 是行业公认的<em>最小</em>可点尺寸，这里取 64~104px 的区间 ——
-   * 成年人手指肉垫宽度约 45~55px，格子大于它才不会连带按到隔壁。
-   *
-   * <p>{@code 22vw} 让它在各尺寸手机上同比伸缩（390px 竖屏 → 86px），
-   * {@code clamp} 的两端防止极端情况：超窄屏不至于缩到点不中，
-   * 平板/横屏也不至于大到要滚动才能看全。
+   * <h3>尺寸</h3>
+   * 上一版取 64~104px（390px 屏上 86px），按下去确实准，
+   * 但六个大圆角方块堆在一起显得笨重。这里收到 46~60px
+   * （390px 屏 → 54px），仍高于 Apple HIG 的 44pt 最小可点尺寸，
+   * 同时靠 {@code --ptz-gap} 拉开间距 —— <b>防误触靠的是间距，不是无限放大</b>：
+   * 两个 54px 的格子中间隔着 7px，指腹落在哪一格很清楚；
+   * 而没有间距的 86px 方格，反而容易按到边界上。
    */
   .ptz-mobile-host .ptz-block {
-    --ptz-cell: clamp(64px, 22vw, 104px);
+    --ptz-cell: clamp(46px, 14vw, 60px);
+    --ptz-gap: calc(var(--ptz-cell) * 0.14);
+    /*
+     * 只改「定位方式 + 两个尺寸变量」。宽高由基类的公式推导
+     * （--ptz-gap 已参与计算），这里再写一遍只会写出不一致的值。
+     */
     position: relative;
     top: auto;
     right: auto;
-    width: calc(var(--ptz-cell) * 3);
-    height: calc(var(--ptz-cell) * 4.4);
-    background: transparent;
-    box-shadow: none;
+    border-radius: 0;
   }
 
   /* 静态面板里方向键常显（无需 hover / 展开）；中心拖动柄无意义，藏掉 */
@@ -1215,34 +1225,36 @@ watch(ptzReady, (ok) => {
   }
 
   /*
-   * 放大后要把格子画成「按键」：默认那套样式是给半透明浮层用的，
-   * 一放大就是 6 个悬空的灰色箭头，看不出哪儿能按。
+   * 按键外观：不要粗边框 + 高饱和图标（上一版就是这两样显得土）。
+   * 换成「浅灰底 + 一层内在描边」，圆角按格子比例走，看着更像一个控件。
    */
   .ptz-mobile-host .ptz-cell:not(.ptz-center) {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--brand-600);
+    color: var(--text-secondary);
     background: var(--bg-sunken);
-    border: 1px solid var(--ink-200);
-    border-radius: var(--radius-sm, 6px);
+    /* 用 inset 阴影当边框：不占盒尺寸，格子尺寸与位置计算严格对齐 */
+    box-shadow: inset 0 0 0 1px rgba(15, 22, 33, 0.06);
+    border-radius: calc(var(--ptz-cell) * 0.28);
+    -webkit-tap-highlight-color: transparent;
   }
 
-  /* 按下反馈：手机上 :active 是唯一能给的即时反馈，必须明显 */
+  /* 按下反馈：手机上 :active 是唯一能给的即时反馈，必须看得见 */
   .ptz-mobile-host .ptz-cell:not(.ptz-center):active {
     color: #fff;
     background: var(--brand-500);
-    border-color: var(--brand-500);
+    box-shadow: none;
   }
 
   .ptz-mobile-host .ptz-cell:not(.ptz-center):active .ptz-ico {
-    transform: scale(1.12);
+    transform: scale(1.1);
   }
 
-  /* 图标跟着格子走：0.52 × 86px ≈ 45px，比原来写死的 26px 大得多 */
+  /* 图标跟着格子走（54px → 22px），比 0.5 倍更克制 */
   .ptz-mobile-host .ptz-ico {
-    width: calc(var(--ptz-cell) * 0.5);
-    height: calc(var(--ptz-cell) * 0.5);
+    width: calc(var(--ptz-cell) * 0.42);
+    height: calc(var(--ptz-cell) * 0.42);
   }
 }
 </style>
