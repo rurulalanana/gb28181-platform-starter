@@ -1215,12 +1215,39 @@ watch(ptzReady, (ok) => {
     border-radius: 0;
   }
 
-  /* 静态面板里方向键常显（无需 hover / 展开）；中心拖动柄无意义，藏掉 */
+  /*
+   * 去掉整块的灰底。
+   *
+   * <p>基类的 {@code .ptz-block:hover} 是给<b>画面上的浮层</b>用的：
+   * 鼠标移入时把整块染灰，提示「这块可以操作」。
+   * 但窄屏下这里是卡片里的静态面板，而且手机浏览器点一下就会置上
+   * {@code :hover} 且不再取消 —— 结果整个面板永远挂着一块灰底，
+   * 看起来像「选中了」或者「样式坏了」。
+   *
+   * <p>选择器要写成 {@code .ptz-mobile-host .ptz-block:hover}（比基类多一层），
+   * 否则同权重下会被基类后加载的规则盖掉。
+   */
+  .ptz-mobile-host .ptz-block,
+  .ptz-mobile-host .ptz-block:hover {
+    background: transparent;
+  }
+
+  /* 静态面板里方向键常显（无需 hover / 展开） */
   .ptz-mobile-host .ptz-cell {
     display: block;
   }
 
-  .ptz-mobile-host .ptz-center {
+  /*
+   * 中心拖动柄在这里没有意义（面板是静态的，不需要挪位置），要藏掉。
+   *
+   * <p>选择器必须写成 {@code .ptz-block .ptz-center} 这一级 ——
+   * 基类的 {@code .ptz-block:hover .ptz-cell} 是 0,3,0，
+   * 只写 {@code .ptz-mobile-host .ptz-center}（0,2,0）压不住它，
+   * 手机上一点就露出那个灰圆（正是用户反馈的那块灰）。
+   */
+  .ptz-mobile-host .ptz-block .ptz-center,
+  .ptz-mobile-host .ptz-block:hover .ptz-center,
+  .ptz-mobile-host .ptz-block.is-open .ptz-center {
     display: none;
   }
 
