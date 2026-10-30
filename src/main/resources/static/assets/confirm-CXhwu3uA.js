@@ -1,1 +1,0 @@
-import{cx as c}from"./index-PiO0WX9f.js";async function a(t,n,r={}){try{return await c.confirm(t,n,{type:"warning",confirmButtonText:"确定",cancelButtonText:"取消",...r}),!0}catch{return!1}}export{a as c};

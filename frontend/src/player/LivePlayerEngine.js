@@ -31,6 +31,55 @@ import { createVNode, render as vueRender } from 'vue'
 /** 组件脚本地址（构建后进 jar 的 static/js/）。 */
 const COMPONENT_SRC = '/js/liveplayer-component.min.js'
 
+/** 铺满容器的样式 id（模块级只注入一次）。 */
+const FILL_STYLE_ID = 'lp-fill-style'
+
+/**
+ * 注入「铺满容器」样式（幂等）。
+ *
+ * <h3>为什么必须要这段 CSS</h3>
+ *
+ * <p>LivePlayer 的 {@code aspect} prop 默认是字符串 {@code "16:9"}，组件据此给
+ * {@code .video-wrapper} 算 {@code padding-bottom: 56.25%} 来撑高度。
+ * 电视墙的每个格子比例各不相同（4 格更方、1 格更宽），按 16:9 算出来的高度
+ * <b>必然填不满</b> —— 底部多出一块纯黑，控制条浮在黑块上方，
+ * 表现为「播放器没有占满容器」。
+ *
+ * <p>{@code aspect="100%"} 能让组件走另一条分支（直接给
+ * {@code width/height:100%}），但只靠 prop 不够稳：组件在 {@code home}
+ * （水印）与 {@code fullscreen} 切换时会重建内层结构，{@code video-js}
+ * 自身也带 {@code height:auto} 默认样式，一旦外层比例变化就会再次塌陷。
+ * 所以这里用 CSS 把整条链路的高宽全部拉满。样式是模块级共享的（只注入一次），
+ * 宿主 div 销毁后规则仍然留在 {@code <head>} 里，供后续实例复用。
+ */
+function ensureFillStyle() {
+  if (typeof document === 'undefined') return
+  if (document.getElementById(FILL_STYLE_ID)) return
+  const style = document.createElement('style')
+  style.id = FILL_STYLE_ID
+  style.textContent = `
+.lp-fill .player-wrapper,
+.lp-fill .video-slot,
+.lp-fill .video-wrapper {
+  width: 100%;
+  height: 100%;
+  /* 覆盖组件按 aspect 算出的 padding-bottom 占位 */
+  padding-bottom: 0 !important;
+}
+.lp-fill .video-js,
+.lp-fill .video-js.vjs-fluid {
+  width: 100% !important;
+  height: 100% !important;
+  padding-top: 0 !important;
+}
+.lp-fill video {
+  width: 100%;
+  height: 100%;
+}
+`
+  document.head.appendChild(style)
+}
+
 /** 模块级加载 Promise：多实例共享同一次脚本加载。 */
 let componentPromise = null
 
@@ -210,11 +259,24 @@ export class LivePlayerEngine {
       this.el.style.minHeight = this.el.style.minHeight || '180px'
     }
 
+    if (!this.el || this.destroyed) return false
+    ensureFillStyle()
+    /*
+     * 在引擎层加 class 而不是让调用方加：{@code useLivePlayer} 与
+     * {@code useXgPlayer} 都走这里，样式覆盖必须对两者一致。
+     */
+    this.el.classList.add('lp-fill')
+
     const vnode = createVNode(Component, {
       videoUrl: this.url,
       raw: false,
       live: !this.vod,
       muted: this.muted,
+      /*
+       * aspect="100%" 让组件跳过「按 16:9 算 padding-bottom」的分支，
+       * 直接给内层 100%×100%（详见 {@link ensureFillStyle}）。
+       */
+      aspect: '100%',
       /*
        * hasaudio 只在 FLV 通路必须显式传 false（见类注释）。
        *
