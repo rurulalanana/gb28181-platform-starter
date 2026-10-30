@@ -37,65 +37,118 @@
           用 rem/百分比都做不到「格子严丝合缝拼成一个十字」——
           这些数字之间是整除关系（3 格宽 = 150、4 格高 = 200 + 20 余量），
           改成相对单位反而会在某些缩放下出现 1px 缝。
+
+          <h3>为什么用 Teleport</h3>
+          <p>手机竖屏的播放区只有 ~366×206，比云台块（150×220）<b>还矮</b> ——
+          浮在画面上会盖攩近半个画面。所以窄屏时用 {@code Teleport}
+          把这一块投到下方分享卡片右侧的宿主容器里（`.ptz-mobile-host`）；
+          宽屏保持就地渲染，即浮在画面右上角。
+          {@code Teleport} 的 {@code disabled} 为真时就地渲染，
+          刚好用来做这种「同一个组件两处落子」，不用把模板写两遍。
         -->
-        <div
-          v-show="ptzReady"
-          ref="ptzBlock"
-          class="ptz-block"
-          :style="ptzStyle"
-        >
+        <Teleport :to="ptzMobileHost" :disabled="!isMobile">
           <div
-            v-for="c in PTZ_CELLS"
-            :key="c.cmd"
-            class="ptz-cell"
-            :class="c.cls"
-            :title="c.title"
-            @mousedown="startPtz(c.cmd)"
-            @mouseup="stopPtz()"
-            @mouseleave="stopPtz()"
-            @touchstart.prevent="startPtz(c.cmd)"
-            @touchend.prevent="stopPtz()"
+            v-show="ptzReady"
+            ref="ptzBlock"
+            class="ptz-block"
+            :class="{ 'is-open': ptzOpen }"
+            :style="ptzStyle"
           >
-            <!-- 图标用内联 SVG：CMS 引的是 Font Awesome，本项目没有也不该为 7 个图标引一整套字体 -->
-            <svg class="ptz-ico" viewBox="0 0 24 24" aria-hidden="true">
-              <path :d="c.path" fill="currentColor" />
-            </svg>
+            <div
+              v-for="c in PTZ_CELLS"
+              :key="c.cmd"
+              class="ptz-cell"
+              :class="c.cls"
+              :title="c.title"
+              @mousedown="startPtz(c.cmd)"
+              @mouseup="stopPtz()"
+              @mouseleave="stopPtz()"
+              @touchstart.prevent="startPtz(c.cmd)"
+              @touchend.prevent="stopPtz()"
+            >
+              <!-- 图标用内联 SVG：CMS 引的是 Font Awesome，本项目没有也不该为 7 个图标引一整套字体 -->
+              <svg class="ptz-ico" viewBox="0 0 24 24" aria-hidden="true">
+                <path :d="c.path" fill="currentColor" />
+              </svg>
+            </div>
+            <!--
+              中心是拖动手柄，与方向键分开渲染：它不响应云台指令。
+              触摸设备没有 hover，这个圆同时充当「展开/收起方向键」的开关
+              （点一下切展开态，按住拖动则只移动面板，见 startDrag/endDrag）。
+              窄屏投到分享卡片右侧后是常显静态面板，这个手柄无意义，已隐藏。
+            -->
+            <div
+              class="ptz-cell ptz-center"
+              :title="ptzOpen ? '拖动可移动，点一下收起' : '点一下展开，拖动可移动'"
+              @pointerdown.prevent="startDrag"
+            >
+              <svg class="ptz-ico" viewBox="0 0 24 24" aria-hidden="true">
+                <path :d="PTZ_CENTER_PATH" fill="currentColor" />
+              </svg>
+            </div>
           </div>
-          <!-- 中心是拖动手柄，与方向键分开渲染：它不响应云台指令 -->
-          <div
-            class="ptz-cell ptz-center"
-            title="拖动可移动云台面板"
-            @mousedown.prevent="startDrag"
-          >
-            <svg class="ptz-ico" viewBox="0 0 24 24" aria-hidden="true">
-              <path :d="PTZ_CENTER_PATH" fill="currentColor" />
-            </svg>
-          </div>
-        </div>
+        </Teleport>
       </div>
 
       <!--
-        分享面板：对齐 CMS 的「↩ 分享」标签页 + 三行内容
-        （分享链接 / iframe / 扫码直播）。CMS 用的是 bootstrap 的 nav-tabs，
-        这里用我们的设计令牌重做，结构保持一致。
+        下半区卡片：分享 / 云台控制 两个面板。
 
-        <p><b>为什么把二维码画在本地而不是找后端要图片</b>：
-        二维码内容就是这个页面的网址，前端完全知道；多一次请求只为拿一张图
-        不划算，而且离线/内网环境下后端图床可能不可达。
+        <p><b>宽屏</b>只有一个「分享」面板 —— 云台浮在画面右上角（更符合
+        监控操作的肌肉记忆：看着画面转云台）。
+
+        <p><b>窄屏</b>（≤640px）播放区只有 ~366×206，比云台块（150×220）
+        还矮 —— 浮在画面上会盖掉近半个画面，浮到卡片旁边又会把分享内容
+        挤成 240px 宽（输入框只看得见半截链接）。所以窄屏改成
+        <b>Tab 切换</b>：一次只展示一个面板，两个都拿到满宽。
       -->
-      <section class="share-card">
-        <div class="share-tab">
-          <svg class="share-tab-icon" viewBox="0 0 16 16" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M11.5 1.5 9.8 3.2h.9a4.5 4.5 0 0 1 0 9H6v-1.8h4.7a2.7 2.7 0 0 0 0-5.4h-.9l1.7 1.7-1.3 1.3L6.9 4.7 10.2.2z"
-            />
-            <path fill="currentColor" d="M9.4 7.6v1.8H4.7a2.7 2.7 0 0 0 0 5.4h.9l-1.7-1.7 1.3-1.3 3.3 3.3-3.3 3.3-1.3-1.3 1.7-1.7h-.9a4.5 4.5 0 0 1 0-9z" />
-          </svg>
-          分享
-        </div>
+      <div class="play-lower">
+        <section class="share-card">
+          <!--
+            Tab 条。宽屏时只有「分享」一项 —— 保持改造前那个标签页的观感
+            （底线 + 品牌色），不额外引入一个只有单项的怪异 Tab 条。
+          -->
+          <div class="share-tabs" role="tablist">
+            <button
+              class="share-tab"
+              :class="{ 'is-active': activeTab === 'share' }"
+              type="button"
+              role="tab"
+              :aria-selected="activeTab === 'share'"
+              @click="activeTab = 'share'"
+            >
+              <!--
+                图标用 Element Plus 的 Share。
 
-        <div class="share-body">
+                <p>原来这里是手写的两条 SVG path，其中一条的包围盒到
+                {@code y=18.4}，而 viewBox 只有 16 —— 底部被裁掉，
+                渲染出来是两段对不上的钩子，根本不像「分享」。
+                {@code @element-plus/icons-vue} 已在 main.js 全量注册，
+                用 el-icon 不增加任何额外依赖。
+              -->
+              <el-icon class="share-tab-icon"><Share /></el-icon>
+              分享
+            </button>
+            <button
+              v-if="isMobile && ptzReady"
+              class="share-tab"
+              :class="{ 'is-active': activeTab === 'ptz' }"
+              type="button"
+              role="tab"
+              :aria-selected="activeTab === 'ptz'"
+              @click="activeTab = 'ptz'"
+            >
+              <el-icon class="share-tab-icon"><VideoCamera /></el-icon>
+              云台控制
+            </button>
+          </div>
+
+          <!--
+            分享面板。
+            宽屏恒显示；窄屏仅在选中「分享」时显示。
+            用 v-show 而不是 v-if：切回来时不必重建三个输入框与那张二维码图
+            （<img> 重建会重新请求一次 PNG）。
+          -->
+          <div v-show="!isMobile || activeTab === 'share'" class="share-body">
           <!-- 分享链接 -->
           <div class="share-row">
             <div class="share-label">分享链接</div>
@@ -146,8 +199,31 @@
               </div>
             </div>
           </div>
-        </div>
-      </section>
+          </div>
+
+          <!--
+            云台面板（窄屏 Tab「云台控制」的内容，宽屏整块 display:none）。
+
+            <p><b>这个 div 必须始终渲染</b>：它是上面 Teleport 的目标，
+            被 v-if 掉的话手机端首次切到这个面板时 Vue 会报
+            {@code Invalid Teleport target}。所以用 v-show 控制可见性。
+
+            <p>面板本身只是「宿主」，云台块的真实 DOM 由 Teleport 从播放区投进来，
+            宽度由内部的 {@code .ptz-block} 决定（{@code 3 × 单元格边长}），
+            换字号/单元格尺寸都不用改这里。
+          -->
+          <div
+            v-show="isMobile && activeTab === 'ptz'"
+            ref="ptzMobileHost"
+            class="ptz-mobile-host"
+            :class="{ 'is-ready': ptzReady }"
+          >
+            <div v-if="!ptzReady" class="ptz-mobile-empty">
+              该通道不支持云台控制
+            </div>
+          </div>
+        </section>
+      </div>
 
       <footer class="play-foot">GB/T 28181—2022 视频监控平台</footer>
     </main>
@@ -377,6 +453,44 @@ const ptzStyle = computed(() => {
 const ptzBlock = ref(null)
 
 /**
+ * 云台块在窄屏下的目标容器（分享卡片右侧）。
+ *
+ * <p>只在 {@code isMobile} 为真时被 {@code Teleport} 用到；
+ * 元素<b>始终渲染</b>，否则手机首次进入时 Teleport 的目标还不存在，
+ * Vue 会直接报 {@code Invalid Teleport target}。
+ */
+const ptzMobileHost = ref(null)
+
+/**
+ * 是否窄屏（≤640px）。
+ *
+ * <p>这里必须用 JS 判断而不能只靠 CSS：云台块要<b>换一个父节点</b>
+ * （从播放区里挪到下方卡片的面板里），不是纯样式能做的。
+ *
+ * <p>初始值给 {@code false}：首帧时 {@code ptzMobileHost} 还没挂载，
+ * 这时若就是 {@code true}，Teleport 会拿 {@code null} 当目标而报错。
+ * {@code onMounted} 里会立刻纠正，用户看不到差别。
+ */
+const isMobile = ref(false)
+
+/**
+ * 当前 Tab：{@code 'share'} | {@code 'ptz'}。
+ *
+ * <p>宽屏没有 Tab 可言（云台浮在画面上），这个值只在窄屏生效。
+ * 切到窄屏时若停在 {@code 'ptz'} 但通道不支持云台，会自动回落。
+ */
+const activeTab = ref('share')
+
+/** 窄屏媒体查询句柄（解除监听用）。 */
+let mobileMql = null
+
+function onMobileChange(e) {
+  isMobile.value = e.matches
+  // 从窄屏切回宽屏时把 Tab 复位，否则再切回窄屏会莫名其妙停在云台页
+  if (!e.matches) activeTab.value = 'share'
+}
+
+/**
  * 按下方向键：立刻发一次指令，并在按住期间每 {@link PTZ_REPEAT_MS} 续发。
  *
  * <h3>为什么要续发</h3>
@@ -430,12 +544,34 @@ async function sendPtz(command) {
   }
 }
 
-/* ---------------- 面板拖动 ---------------- */
+/* ---------------- 面板拖动 / 展开 ---------------- */
+
+/**
+ * 方向键是否展开。
+ *
+ * <p>桌面端靠 {@code :hover} 展开，这个状态没用；触摸设备没有 hover，
+ * 必须有一个显式开关，否则要么永远点不到云台、要么整块十字常显
+ * （150×220 比竖屏里的 16:9 播放区还高，会盖掉近半个画面）。
+ */
+const ptzOpen = ref(false)
 
 /** 拖动状态：按下时记录「指针相对块左上角」的偏移。 */
 let dragOffset = null
+/** 按下时的指针坐标，用来区分「点一下」与「拖动」。 */
+let dragStartPt = null
+/** 本次按下是否真的移动过。 */
+let dragMoved = false
+
+/** 判定为拖动的最小位移（px）。小于它就当成一次点击。 */
+const DRAG_THRESHOLD = 6
 
 function startDrag(ev) {
+  /*
+   * 窄屏下云台块是「分享卡片旁边的静态面板」，不在画面上浮动，
+   * 没有可拖动的位置 —— 而且它的父节点已变成宿主 div，
+   * 用那里的矩形做边界夹紧会把面板锁在原地。直接不启用。
+   */
+  if (isMobile.value) return
   const el = ptzBlock.value
   const stage = el?.parentElement
   if (!el || !stage) return
@@ -450,12 +586,26 @@ function startDrag(ev) {
     y: ev.clientY - elRect.top,
     stageRect
   }
-  window.addEventListener('mousemove', onDragMove)
-  window.addEventListener('mouseup', endDrag)
+  dragStartPt = { x: ev.clientX, y: ev.clientY }
+  dragMoved = false
+  /*
+   * 用 Pointer Events 而不是 mouse 事件：一套代码同时覆盖鼠标与触摸。
+   * 触摸下浏览器会把 touch 转成模拟 mouse 事件，但滚动/长按会打断它，
+   * 拖动时松手可能收不到 mouseup，面板就「粘」在指针上。
+   */
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup', endDrag)
+  window.addEventListener('pointercancel', endDrag)
 }
 
 function onDragMove(ev) {
   if (!dragOffset) return
+  // 位移超过阈值才算拖动；否则手指轻微抖动会把「点击」误判成拖动
+  if (!dragMoved) {
+    const d = Math.hypot(ev.clientX - dragStartPt.x, ev.clientY - dragStartPt.y)
+    if (d < DRAG_THRESHOLD) return
+    dragMoved = true
+  }
   const { x, y, stageRect } = dragOffset
   const el = ptzBlock.value
   if (!el) return
@@ -471,9 +621,17 @@ function onDragMove(ev) {
 }
 
 function endDrag() {
+  /*
+   * 没有位移 = 点了一下中心圆 → 切换方向键展开态。
+   * 只有在真的按下过（dragOffset 非空）时才判定，避免卸载时的空调用翻转状态。
+   */
+  if (dragOffset && !dragMoved) ptzOpen.value = !ptzOpen.value
   dragOffset = null
-  window.removeEventListener('mousemove', onDragMove)
-  window.removeEventListener('mouseup', endDrag)
+  dragStartPt = null
+  dragMoved = false
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', endDrag)
+  window.removeEventListener('pointercancel', endDrag)
 }
 
 /* ---------------- 生命周期 ---------------- */
@@ -488,6 +646,13 @@ onMounted(async () => {
    */
   window.addEventListener('mouseup', stopPtz)
   window.addEventListener('blur', stopPtz)
+  /*
+   * 窄屏判断：初始 false（见 isMobile 声明处的注释），这里立即纠正，
+   * 并监听后续的横竖屏切换/窗口缩放。
+   */
+  mobileMql = window.matchMedia('(max-width: 640px)')
+  isMobile.value = mobileMql.matches
+  mobileMql.addEventListener('change', onMobileChange)
   await load()
   buildQr()
 })
@@ -498,12 +663,25 @@ onUnmounted(() => {
   stopPtz()
   window.removeEventListener('mouseup', stopPtz)
   window.removeEventListener('blur', stopPtz)
+  if (mobileMql) {
+    mobileMql.removeEventListener('change', onMobileChange)
+    mobileMql = null
+  }
   endDrag()
   player.stop()
 })
 
 // 地址变化（例如在页面内切换通道）时重算二维码
 watch(pageUrl, buildQr)
+
+/*
+ * 通道信息（异步）到达后才知道能不能云台。
+ * 若用户已经把 Tab 切到「云台控制」（例如在加载完成前手快点了），
+ * 而这个通道其实不支持，就退回分享页 —— 否则会停在一个空白面板上。
+ */
+watch(ptzReady, (ok) => {
+  if (!ok && activeTab.value === 'ptz') activeTab.value = 'share'
+})
 </script>
 
 <style scoped>
@@ -512,7 +690,13 @@ watch(pageUrl, buildQr)
  * 底色用 --bg-app，与主框架内容区一致，分享页看起来仍是同一个产品。
  */
 .play-page {
+  /*
+   * 100vh 在移动浏览器上是「含地址栏】的高度，地址栏收起/展开时会露出
+   * 下方空白或溢出。dvh 是动态视口，跟着地址栏变，是现在的正确写法；
+   * 旧内核不认 dvh 时回退到上一行的 vh。
+   */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--bg-app);
@@ -599,14 +783,22 @@ watch(pageUrl, buildQr)
      .ptz-cell   50×50、绝对定位、默认 display:none、hover 整块才显示
      .ptz-center 50×50、圆角 25（正圆）、始终显示、cursor:move
      位置        上(50,10) 左(0,60) 右(100,60) 下(50,110) 大(15,160) 小(85,160)
+
+   <p>所有尺寸都由 {@code --ptz-cell}（单元格边长）推导：默认 50px 时
+   算出来与 CMS 逐像素一致；窄屏改一个变量就能整体缩小，
+   不用把 8 个坐标改一遍（也无法用 transform:scale —— 那会让
+   拖动时 {@code offsetWidth} 与实际包围盒不一致，拖到不了右边）。
    ============================================================ */
 .ptz-block {
+  /* 单元格边长：唯一需要改的参数 */
+  --ptz-cell: 50px;
   position: absolute;
   z-index: 20;
   top: 20px;
   right: 20px;
-  width: 150px;
-  height: 220px;
+  width: calc(var(--ptz-cell) * 3);
+  /* 220 / 50 = 4.4：最后一行格子下面还留一点余量 */
+  height: calc(var(--ptz-cell) * 4.4);
   text-align: center;
   color: #333;
   background: rgba(237, 237, 237, 0);
@@ -630,9 +822,9 @@ watch(pageUrl, buildQr)
  */
 .ptz-cell {
   position: absolute;
-  width: 50px;
-  height: 50px;
-  line-height: 50px;
+  width: var(--ptz-cell);
+  height: var(--ptz-cell);
+  line-height: var(--ptz-cell);
   cursor: pointer;
   display: none;
   color: #333;
@@ -653,8 +845,8 @@ watch(pageUrl, buildQr)
 }
 
 .ptz-ico {
-  width: 26px;
-  height: 26px;
+  width: calc(var(--ptz-cell) * 0.52);
+  height: calc(var(--ptz-cell) * 0.52);
   vertical-align: middle;
   transition: transform 0.1s;
   pointer-events: none;
@@ -662,10 +854,10 @@ watch(pageUrl, buildQr)
 
 /* 中心：始终显示，作为拖动柄 */
 .ptz-center {
-  top: 60px;
-  left: 50px;
+  top: calc(var(--ptz-cell) * 1.2);
+  left: var(--ptz-cell);
   display: block;
-  border-radius: 25px;
+  border-radius: calc(var(--ptz-cell) / 2);
   background: rgba(204, 204, 204, 0.2);
   cursor: move;
 }
@@ -677,53 +869,89 @@ watch(pageUrl, buildQr)
 /* 中心图标用浅灰：它只是「提示可以拖」，不是可点的按钮 */
 .ptz-center .ptz-ico {
   color: rgba(0, 0, 0, 0.3);
-  width: 22px;
-  height: 22px;
+  width: calc(var(--ptz-cell) * 0.44);
+  height: calc(var(--ptz-cell) * 0.44);
 }
 
-/* 六个格子的位置 —— 与 CMS 逐像素一致 */
+/* 六个格子的位置 —— 默认 50px 时与 CMS 逐像素一致 */
 .ptz-up {
-  top: 10px;
-  left: 50px;
+  top: calc(var(--ptz-cell) * 0.2);
+  left: var(--ptz-cell);
 }
 
 .ptz-left {
-  top: 60px;
+  top: calc(var(--ptz-cell) * 1.2);
   left: 0;
 }
 
 .ptz-right {
-  top: 60px;
-  left: 100px;
+  top: calc(var(--ptz-cell) * 1.2);
+  left: calc(var(--ptz-cell) * 2);
 }
 
 .ptz-down {
-  top: 110px;
-  left: 50px;
+  top: calc(var(--ptz-cell) * 2.2);
+  left: var(--ptz-cell);
 }
 
 .ptz-plus {
-  top: 160px;
-  left: 15px;
+  top: calc(var(--ptz-cell) * 3.2);
+  left: calc(var(--ptz-cell) * 0.3);
 }
 
 .ptz-minus {
-  top: 160px;
-  left: 85px;
+  top: calc(var(--ptz-cell) * 3.2);
+  left: calc(var(--ptz-cell) * 1.7);
 }
 
-/* 触摸设备没有 hover：直接常显，否则手机上永远点不到云台 */
+/*
+ * 触摸设备没有 hover：方向键改为「点中心圆展开/收起」。
+ *
+ * <p>原来这里写的是「一律常显」，在手机上不可用 —— 竖屏播放区只有
+ * ~358×201，而云台块是 150×220（比画面还高），常显直接盖掉近半个画面。
+ * 另外手机浏览器点一下也会置 {@code :hover}，上一条 hover 规则会把格子
+ * 又显示出来，所以这里要把它一并压掉。
+ */
 @media (hover: none) {
+  .ptz-block:hover .ptz-cell,
   .ptz-cell {
+    display: none;
+  }
+
+  .ptz-block .ptz-center,
+  .ptz-block.is-open .ptz-cell {
     display: block;
   }
 
-  .ptz-block {
+  .ptz-block.is-open {
     background: rgba(237, 237, 237, 0.35);
   }
 }
 
 /* ---- 分享卡片 ---- */
+.play-lower {
+  width: 100%;
+  max-width: 960px;
+}
+
+/*
+ * 云台面板的宿主。
+ *
+ * <p>宽屏不显示（那时云台浮在画面右上角）。窄屏的具体样式见文件末尾的
+ * {@code @media (max-width: 640px)}。这里给 {@code display:none} 是
+ * 「默认隐藏」的语义，窄屏规则会覆盖它。
+ */
+.ptz-mobile-host {
+  display: none;
+}
+
+.ptz-mobile-empty {
+  padding: var(--sp-6) var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
 .share-card {
   width: 100%;
   max-width: 960px;
@@ -734,25 +962,51 @@ watch(pageUrl, buildQr)
 }
 
 /*
- * 标签页头。CMS 是 bootstrap nav-tabs：一条底线、当前项上方有主色横条、
+ * Tab 条。CMS 是 bootstrap nav-tabs：一条底线、当前项上方有主色横条、
  * 文字用主色。这里保持同一视觉语言，颜色换成品牌色。
+ *
+ * <p>宽屏时 bar 里只有一项（分享），看起来就像原来的「标签页」；
+ * 窄屏会多出「云台控制」，成为真正的可切换 Tab。
  */
+.share-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 6px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--ink-200);
+}
+
 .share-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 42px;
-  padding: 0 18px;
+  padding: 0 14px;
   font-size: var(--fs-md);
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  /* 用透明边框占位：切换时不会因为多出 2px 边框而跳动 */
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.share-tab:hover {
   color: var(--brand-600);
-  background: var(--bg-sunken);
-  border-bottom: 2px solid var(--brand-500);
-  cursor: default;
+}
+
+.share-tab.is-active {
+  color: var(--brand-600);
+  border-bottom-color: var(--brand-500);
+  font-weight: 600;
 }
 
 .share-tab-icon {
-  width: 15px;
-  height: 15px;
+  /* el-icon 用 font-size 定尺寸（内部 svg 是 1em × 1em） */
+  font-size: 15px;
 }
 
 .share-body {
@@ -875,8 +1129,19 @@ watch(pageUrl, buildQr)
 
 /* 窄屏：label 换到上方，避免右侧内容被压得太窄 */
 @media (max-width: 640px) {
+  .play-content {
+    padding: var(--sp-3);
+    gap: var(--sp-3);
+  }
+
   .share-row {
     flex-direction: column;
+    /*
+     * 关键：flex-direction:column 下 align-items 仍是基类的 flex-start，
+     * 交叉轴（水平）上子项会按内容宽收缩 —— .share-field 于是只剩 185px，
+     * 分享链接只看得见「http://IP」，看起来像样式坏了。
+     */
+    align-items: stretch;
     gap: var(--sp-2);
   }
 
@@ -888,6 +1153,96 @@ watch(pageUrl, buildQr)
 
   .share-body {
     padding: var(--sp-4);
+  }
+
+  /*
+   * iOS Safari 在输入框字号 < 16px 时会在聚焦瞬间<b>自动放大整页</b>，
+   * 而且失焦后不会缩回去 —— 用户会以为页面坏了。这是移动端最常见的
+   * 「样式不行」之一，只能靠把字号提到 16px 规避。
+   */
+  .share-input {
+    font-size: 16px;
+  }
+
+  /* ---------- 窄屏：云台是独立 Tab，占满整张卡片 ---------- */
+  .ptz-mobile-host {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    /*
+     * 上下留白按单元格边长走，面板越大留白越多，视觉重心居中。
+     * 用 min-height 而不是固定高：不支持云台时那里只有一行提示文字，
+     * 固定高会留出一大片空白。
+     */
+    min-height: 220px;
+    padding: var(--sp-4) var(--sp-3);
+  }
+
+  /*
+   * 静态面板：{@code position: relative} 而不是 static —— 内部格子是
+   * position:absolute，没有定位祖先会飞到页面左上角。
+   * 宽高必须显式给：格子全绝对定位，撑不开父元素。
+   *
+   * <h3>尺寸为什么用 clamp</h3>
+   * 手机上云台是唯一的操作入口，<b>手指触点必须够大</b>：
+   * 38px 的格子（改造前）在手机上又小又难点，实测按偏率很高。
+   * 44px 是行业公认的<em>最小</em>可点尺寸，这里取 64~104px 的区间 ——
+   * 成年人手指肉垫宽度约 45~55px，格子大于它才不会连带按到隔壁。
+   *
+   * <p>{@code 22vw} 让它在各尺寸手机上同比伸缩（390px 竖屏 → 86px），
+   * {@code clamp} 的两端防止极端情况：超窄屏不至于缩到点不中，
+   * 平板/横屏也不至于大到要滚动才能看全。
+   */
+  .ptz-mobile-host .ptz-block {
+    --ptz-cell: clamp(64px, 22vw, 104px);
+    position: relative;
+    top: auto;
+    right: auto;
+    width: calc(var(--ptz-cell) * 3);
+    height: calc(var(--ptz-cell) * 4.4);
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* 静态面板里方向键常显（无需 hover / 展开）；中心拖动柄无意义，藏掉 */
+  .ptz-mobile-host .ptz-cell {
+    display: block;
+  }
+
+  .ptz-mobile-host .ptz-center {
+    display: none;
+  }
+
+  /*
+   * 放大后要把格子画成「按键」：默认那套样式是给半透明浮层用的，
+   * 一放大就是 6 个悬空的灰色箭头，看不出哪儿能按。
+   */
+  .ptz-mobile-host .ptz-cell:not(.ptz-center) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--brand-600);
+    background: var(--bg-sunken);
+    border: 1px solid var(--ink-200);
+    border-radius: var(--radius-sm, 6px);
+  }
+
+  /* 按下反馈：手机上 :active 是唯一能给的即时反馈，必须明显 */
+  .ptz-mobile-host .ptz-cell:not(.ptz-center):active {
+    color: #fff;
+    background: var(--brand-500);
+    border-color: var(--brand-500);
+  }
+
+  .ptz-mobile-host .ptz-cell:not(.ptz-center):active .ptz-ico {
+    transform: scale(1.12);
+  }
+
+  /* 图标跟着格子走：0.52 × 86px ≈ 45px，比原来写死的 26px 大得多 */
+  .ptz-mobile-host .ptz-ico {
+    width: calc(var(--ptz-cell) * 0.5);
+    height: calc(var(--ptz-cell) * 0.5);
   }
 }
 </style>

@@ -245,14 +245,14 @@
               <el-icon><Film /></el-icon> 设备录像
             </el-button>
             <!--
-              分享：生成一个免登录的直播链接（对齐 LiveGBS 的 play.html）。
-              复制到剪贴板而不是弹窗 —— 分享的下一步动作永远是「粘贴到某处」，
-              多一层弹窗只是多点一次。弹窗形式见「更多」里的分享面板。
+              分享：直接在新窗口打开该通道的免登录直播页（对齐 LiveGBS 的 play.html）。
+              不弹窗、不复制：这一下就是要看「别人打开会看到什么」，
+              需要链接时在新页里一键复制即可（分享页自带复制按钮）。
             -->
             <el-button
               link
               type="primary"
-              title="复制该通道的免登录直播链接"
+              title="在新窗口打开该通道的免登录直播页"
               @click="shareLive(row)"
             >
               <el-icon><Share /></el-icon> 分享
@@ -401,7 +401,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
@@ -591,7 +591,7 @@ async function preview(row) {
 }
 
 /**
- * 复制该通道的免登录直播分享链接。
+ * 在新窗口打开该通道的免登录直播页。
  *
  * <p>链接形如 {@code /play?serial=<设备编码>&code=<通道编码>}，
  * 对齐 LiveGBS 的 {@code play.html}。打开的人不需要账号 ——
@@ -600,8 +600,15 @@ async function preview(row) {
  * <p>用 {@code location.origin} 而不是后端返回的地址：分享链接要指向
  * <b>用户当前访问的这个入口</b>。若平台同时有内网/公网两个域名，
  * 用后端拼的地址会把内网用户引到公网去（或反之）。
+ *
+ * <h3>为什么用创建 {@code <a>} 而不是 {@code window.open}</h3>
+ *
+ * <p>{@code window.open(url, '_blank', 'noopener')} 带 {@code noopener} 时
+ * <b>规范上就返回 null</b>，没法据此判「是不是被拦截了」；
+ * 而不带 {@code noopener} 又会把 {@code window.opener} 交给对方的页面。
+ * 由点击事件直接触发一个真实的链接跳转，既不丢 noopener，也不受弹窗拦截器影响。
  */
-async function shareLive(row) {
+function shareLive(row) {
   const serial = row.deviceId || row.serial
   const code = row.id || row.channelId
   if (!serial || !code) {
@@ -609,50 +616,13 @@ async function shareLive(row) {
     return
   }
   const url = `${window.location.origin}/play?serial=${encodeURIComponent(serial)}&code=${encodeURIComponent(code)}`
-  const ok = await copyText(url)
-  if (ok) {
-    ElMessage.success('已复制分享链接（免登录，可直接发给他人）')
-  } else {
-    /*
-     * 复制失败时把链接显示出来让用户手抄 —— 比只报「复制失败」有用。
-     * 用 ElMessageBox 而不是 alert：可选中、可复制。
-     */
-    ElMessageBox.alert(url, '请手动复制分享链接', {
-      confirmButtonText: '知道了',
-      customClass: 'share-link-box'
-    }).catch(() => {})
-  }
-}
-
-/**
- * 粘贴板写入（带降级）。
- *
- * <p>{@code navigator.clipboard} 只在安全上下文可用 —— 平台常用
- * {@code http://IP:port} 访问，那是<b>非安全上下文</b>，该 API 不存在。
- * 这不是边缘情况而是常态，所以必须有 {@code execCommand} 兜底。
- */
-async function copyText(text) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch (e) {
-    // 权限被拒：走下面的兜底
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    ta.remove()
-    return ok
-  } catch (e) {
-    return false
-  }
+  const a = document.createElement('a')
+  a.href = url
+  a.target = '_blank'
+  a.rel = 'noopener noreferrer'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 
 /**
