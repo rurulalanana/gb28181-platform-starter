@@ -181,7 +181,7 @@ import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
-import { useRecordPlayer } from '@/composables/useRecordPlayer'
+import { useLivePlayer } from '@/composables/useLivePlayer'
 import {
   canDownloadRecord,
   downloadRecord,
@@ -337,13 +337,13 @@ const playStateType = computed(() => {
 })
 
 /**
- * 弹窗内的播放器：xgplayer 外壳 + 容错 MSE 内核。
+ * 弹窗内的播放器。
  *
- * <p>与时间轴页、实时预览是<b>同一条通路</b>（{@link useRecordPlayer}）：
- * H.265 录像里夹着坏帧，浏览器硬解会 {@code PIPELINE_ERROR_DECODE}，
- * 必须走自控下载 + 浏览器端重封装才能跳坏段继续播。
+ * <p>与实时预览、录像回放是<b>同一个播放器</b>（LivePlayer）：
+ * 云端录像是标准 mp4，走 LivePlayer 的官方点播通路
+ * （{@code live=false} 显示进度条，支持拖动定位）。
  */
-const recordPlayer = useRecordPlayer(dialogVideoContainer, {
+const recordPlayer = useLivePlayer(dialogVideoContainer, {
   onFatal: (msg) => ElMessage.error('播放失败：' + msg)
 })
 
@@ -361,18 +361,14 @@ async function play(row) {
   playerVisible.value = true
   await nextTick()
   /*
-   * 静态地址（/record/**）由 nginx sendfile 直读，不过鉴权，不需要 token；
+   * 静态地址（/record/**）由 nginx sendfile 直读，鉴权走地址签名
+   * （后端返回的 playUrl 已带 ?e=…&t=…），不需要 token；
    * 只有退回受保护接口时才带。
    */
   const authToken = row.playUrl ? '' : (localStorage.getItem('gb_token') || '')
   const source = row.playUrl || `/api/v1/cloudrecord/file/${row.recordId}`
   try {
-    await recordPlayer.play(source, {
-      token: authToken,
-      // 一律走自控下载通路：原生 <video> 的下载策略是「攒一批→播→
-      // 缓冲掉下去再攒」，公网链路上必然周期性转圈（见 useRecordPlayer 说明）。
-      useMse: true
-    })
+    await recordPlayer.playFile(source, { token: authToken })
   } catch (e) {
     ElMessage.error(e.message || '点播失败')
   }

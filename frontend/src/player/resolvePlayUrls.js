@@ -179,21 +179,18 @@ export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
  *       <b>没有声音</b>，只在极端网络环境下当最后手段。</li>
  * </ul>
  * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
+ *
+ * <p><b>标签只写协议名</b>：括号里的特性说明（有没有声音、缓冲深不深）会让
+ * 下拉项过长、挤在一起读不清，且这些特性会随设备编码变化（同一路流，
+ * H.264 与 H.265 的表现就不同），写死在标签上反而会误导。
+ * 各协议的实测特性以上面的注释为准。
  */
 export const LIVE_PROTOCOLS = [
-  { value: 'webrtc', label: 'WebRTC（最流畅·支持声音）' },
-  { value: 'wsflv', label: 'WebSocket-FLV（静音·缓冲深）' },
-  { value: 'httpflv', label: 'HTTP-FLV（静音·可穿代理）' },
-  { value: 'hls', label: 'HLS（静音·延迟高）' }
+  { value: 'webrtc', label: 'WebRTC' },
+  { value: 'wsflv', label: 'WebSocket-FLV' },
+  { value: 'httpflv', label: 'HTTP-FLV' },
+  { value: 'hls', label: 'HLS' }
 ]
-
-/** 协议对应的短标签（播放器控制栏空间小，用短名）。 */
-export const LIVE_PROTOCOL_SHORT = {
-  webrtc: 'WebRTC',
-  wsflv: 'FLV',
-  httpflv: 'HTTP-FLV',
-  hls: 'HLS'
-}
 
 /**
  * 该协议在给定地址集合里是否有可用地址。

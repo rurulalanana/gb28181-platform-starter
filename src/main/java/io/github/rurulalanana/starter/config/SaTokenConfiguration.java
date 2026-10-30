@@ -42,6 +42,11 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                         // 录像分享页：分享链接就是给「不登录平台的人」用的，
                         // 凭签名令牌换取录像信息（见 ShareTokenService）
                         "/api/v1/cloudrecord/share/**",
+                        // 直播分享页：/play?serial=&code= 由外部人员直接打开，
+                        // 没有账号也不带 token —— 要求登录的话分享链接对谁都无效。
+                        // 只读、只返回该通道的播放地址，不暴露 SSRC / callId 等信令细节
+                        // （见 LiveShareController 的安全边界说明）。
+                        "/api/v1/share/**",
                         // 录像地址鉴权端点：由 nginx 的 auth_request 子请求调用，
                         // 子请求里带不了登录态；安全性由地址里的签名保证
                         // （见 RecordUrlSigner / RecordAuthController）。

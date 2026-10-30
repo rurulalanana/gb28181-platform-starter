@@ -939,7 +939,24 @@ public class StreamService {
                 if (keepAlive.contains(session.getChannelId())) {
                     continue;
                 }
-                if (mediaServer.readerCount(session.getZlmApp(), session.getStream()) > 0) {
+                int readers = mediaServer.readerCount(session.getZlmApp(), session.getStream());
+                /*
+                 * 诊断日志：排查「没人看却一直不回收」时必须能看到每路的真实读者数。
+                 *
+                 * <p>只打 DEBUG，避免每 20 秒 × N 路刷屏；出问题时把日志级别调到
+                 * DEBUG 即可看到「巡检认为有人在看」的具体数值，从而区分
+                 * ① 确实有播放器连着（读者数 > 0，不该关）；
+                 * ② 读者数恒为 0 但会话没被关（判定逻辑有 bug）。
+                 */
+                if (log.isDebugEnabled()) {
+                    long seenAgo = now - lastViewerAt.getOrDefault(
+                            session.getSessionKey(), session.getCreatedAt());
+                    log.debug("空闲巡检采样: {} readers={} 距上次见观众={}ms 宽限={}ms 常开={} 明细={}",
+                            session.getSessionKey(), readers, seenAgo, grace,
+                            keepAlive.contains(session.getChannelId()),
+                            mediaServer.readerDetail(session.getZlmApp(), session.getStream()));
+                }
+                if (readers > 0) {
                     // 看到观众就刷新时间戳：本次不关，且给下一次采样留出宽限
                     lastViewerAt.put(session.getSessionKey(), now);
                     continue;

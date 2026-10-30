@@ -53,7 +53,7 @@
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <sip.module.version>1.0.14</sip.module.version>
-    <zlm.module.version>1.0.10</zlm.module.version>
+    <zlm.module.version>1.0.11</zlm.module.version>
     <!-- 大华设备接入（厂商无关契约 + NetSDK 实现）。
          命名约定 sdk-<厂商>：将来接海康/宇视就是平级的 sdk-hikvision / sdk-uniview。 -->
     <sdk-dahua.module.version>1.0.0</sdk-dahua.module.version>
@@ -177,6 +177,16 @@
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>s3</artifactId>
       <version>${aws.sdk.version}</version>
+    </dependency>
+
+    <!-- 二维码生成（直播分享页的「扫码直播」）。
+         只引 core：{@code MatrixToImageWriter} 在 javase 包里，
+         而那个包会拖进 jai-imageio，体积大且与 ImageIO 有冲突；
+         用 {@code QRCodeWriter} 拿到 BitMatrix 后自己写 PNG 即可。 -->
+    <dependency>
+      <groupId>com.google.zxing</groupId>
+      <artifactId>core</artifactId>
+      <version>3.5.2</version>
     </dependency>
 
   </dependencies>

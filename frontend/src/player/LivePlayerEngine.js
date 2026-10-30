@@ -58,6 +58,23 @@ function ensureFillStyle() {
   const style = document.createElement('style')
   style.id = FILL_STYLE_ID
   style.textContent = `
+/*
+ * 宿主 div 自身必须严格等于父容器高度。
+ *
+ * 【为什么必须显式约束】引擎会给宿主设 min-height:180px 兜底
+ * （video.js 需要非零尺寸才能建控制栏）。但电视墙的小格子高度可能只有
+ * 150px 左右，180px 会撑破父容器：控制栏按 180 定位、bottom:0 落在
+ * 父容器之外，被 .video-box 的 overflow:hidden 裁掉大半 ——
+ * 表现为「工具栏看得见却点不动」（实际可点区域只剩露出来的那一条）。
+ *
+ * 用 height:100% + max-height:100% 双保险：前者撑满，后者禁止超出。
+ * min-height 交给下面的 @media 只在容器确实太矮时才生效。
+ */
+.lp-fill {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+}
 .lp-fill .player-wrapper,
 .lp-fill .video-slot,
 .lp-fill .video-wrapper {
@@ -66,15 +83,128 @@ function ensureFillStyle() {
   /* 覆盖组件按 aspect 算出的 padding-bottom 占位 */
   padding-bottom: 0 !important;
 }
+/*
+ * .video-slot 是组件内部留给「自定义内容」的空槽，DOM 里排在
+ * .vjs-control-bar 之后。给它 height:100% 会让它撑满整个播放器区域，
+ * 从而<b>盖住控制栏</b>——控制栏看得见、点击却全被这个空 div 吃掉。
+ *
+ * 电视墙不往 slot 里放东西，所以直接让它不参与命中测试。
+ * 需要往 slot 塞内容时，改成给里面的实际元素单独设 pointer-events。
+ */
+.lp-fill .video-slot {
+  pointer-events: none;
+}
 .lp-fill .video-js,
 .lp-fill .video-js.vjs-fluid {
   width: 100% !important;
   height: 100% !important;
   padding-top: 0 !important;
 }
+/*
+ * 控制栏贴底并置顶。
+ *
+ * <p>video.js 默认 bottom:0 相对 .video-js 定位，只要上面各层高度一致就已经正确。
+ * 但组件内部的 .video-slot / .video-water / .video-zoom 都排在控制栏之后，
+ * 一旦它们有实际尺寸就会盖住控制栏。显式给控制栏 z-index 是双保险，
+ * 保证「工具栏看得见就一定点得动」。
+ */
+.lp-fill .vjs-control-bar {
+  margin-bottom: 0;
+  z-index: 5;
+}
+/*
+ * video 元素等比显示，不拉伸。
+ *
+ * <p>组件在 {@code stretch_=true} 时会内联 {@code object-fit:fill}
+ * （见 liveplayer-component 里拼接 style 的那段），画面被强行拉满而变形。
+ * 我们默认传 {@code stretch:false}，组件就不加 object-fit；
+ * 这里显式写 {@code contain} 是把默认行为固定下来 ——
+ * 即便将来组件换了默认值，也不会突然变成拉伸。
+ *
+ * <p>用户点控制栏的「STR」按钮时，组件会自行改成 {@code fill}，
+ * 内联样式优先级高于本样式表，所以手动切换仍然有效。
+ */
 .lp-fill video {
   width: 100%;
   height: 100%;
+  object-fit: contain;
+}
+/*
+ * 不可拖动的流：隐藏进度条与时间显示。
+ *
+ * <h3>为什么直播和设备回放都不该有进度条</h3>
+ * 这两条通路拿到的都是<b>主动推上来的实时流</b>，没有可 seek 的时间轴：
+ * <ul>
+ *   <li>直播 —— 本来就没有「跳到后面」这回事；</li>
+ *   <li>设备录像 —— 是「按段重新 INVITE」的伪点播，定位靠 SIP INFO 让设备跳，
+ *       不是靠改 {@code currentTime}。时间轴页面本身已提供定位入口。</li>
+ * </ul>
+ *
+ * <h3>不隐藏会怎样（线上实际表现）</h3>
+ * video.js 的 {@code ProgressControl.update()} 在
+ * {@code player.seekable()} 为空时会调 {@code hide()}：
+ * <pre>起播前（seekable 有值）→ 进度条出现
+ *开始播放（seekable 变空）→ 进度条 display:none</pre>
+ * 于是控制栏在播放前后<b>宽度分配完全不同</b> —— 按钮从分散变成挤在左边，
+ * 整条控制栏看起来「跳了一下」，用户会以为页面布局坏了。
+ * 时间数字（{@code 10:31 / 29:59}）同理，且它也不是真实进度。
+ *
+ * <p>隐藏后控制栏只剩 播放/暂停、音量、拉伸、截图、全屏，
+ * 与 CMS（LiveGBS）的控制栏一致，且<strong>播放前后完全稳定</strong>。
+ *
+ * <p>只对显式传 {@code hideProgress} 的实例生效 —— 云端录像的 MP4 文件
+ * 是真正可 seek 的点播，进度条必须保留（见 {@code useLivePlayer#playFile}）。
+ */
+.lp-no-seek .vjs-progress-control,
+.lp-no-seek .vjs-current-time,
+.lp-no-seek .vjs-duration,
+.lp-no-seek .vjs-time-divider,
+.lp-no-seek .vjs-remaining-time {
+  display: none !important;
+}
+/*
+ * 隐藏进度条后，靠 spacer 把右侧按钮组（拉伸/截图/全屏）推到最右。
+ *
+ * <p>video.js 默认 {@code .vjs-custom-control-spacer} 是 {@code display:none}，
+ * 它平时由进度条的 flex 占据剩余空间来「顺便」把全屏挤到右边。
+ * 进度条一没了，剩下的按钮就会全部挤到左侧、右边留一大片空白。
+ */
+.lp-no-seek .vjs-custom-control-spacer {
+  display: block !important;
+  flex: 1 1 auto;
+}
+/*
+ * 窄容器（电视墙小格子）：缩小按钮、隐去次要按钮。
+ *
+ * <p>video.js 的按钮宽度是 {@code 4em}（14px 字号 → 56px）。
+ * 电视墙 4/6/9/16 分屏时单个格子可能只有 180~250px 宽，
+ * 而控制栏要放 播放+音量+拉伸+截图+全屏 共 5 个 → 需 280px，
+ * <b>必然溢出</b>：多出来的按钮会跑到容器外（实测全屏按钮超出右边界 127px），
+ * 表现为「控制栏按钮错位、部分点不到」。
+ *
+ * <p>处理：容器窄于 420px 时按钮缩到 {@code 2.8em}（≈39px），
+ * 并隐去拉伸与截图 —— 这两个在小格子里既看不清也不常用，
+ * 而播放/音量/全屏是任何尺寸都需要的。5 × 39 = 195px，能放下。
+ *
+ * <p>用容器查询而不是媒体查询：格子宽度取决于分屏数（1/4/6/9/16），
+ * 与窗口宽度无直接关系 —— 1080p 窗口下 16 分屏每格也才 250px。
+ */
+.lp-fill {
+  container-type: inline-size;
+}
+
+@container (max-width: 420px) {
+  .lp-fill .vjs-control-bar .vjs-control {
+    width: 2.8em;
+  }
+  .lp-fill .vjs-control-bar .vjs-snapshot-control,
+  .lp-fill .vjs-control-bar .live-player-stretch-btn {
+    display: none !important;
+  }
+  /* 窄容器放不下 "LIVE"/"Stream Type" 那串文字 */
+  .lp-fill .vjs-control-bar .vjs-live-control {
+    display: none !important;
+  }
 }
 `
   document.head.appendChild(style)
@@ -171,6 +301,7 @@ export class LivePlayerEngine {
    * @param {(info:object)=>void} [opts.onStats] 媒体信息回调
    * @param {boolean} [opts.vod] 是否点播
    * @param {boolean} [opts.webrtc] 是否走组件内置的 Webrtc tech
+   * @param {boolean} [opts.hideProgress] 隐藏进度条与时间显示（直播/设备回放必传，见 CSS 注释）
    * @param {boolean} [opts.debug] 打开组件自身的调试日志（Webrtc tech 的日志只能这么开）
    * @param {(stage:string, extra?:object)=>void} [opts.onDebug] 诊断回调
    */
@@ -180,6 +311,8 @@ export class LivePlayerEngine {
     muted = true,
     hasAudio = false,
     webrtc = false,
+    controls = true,
+    hideProgress = false,
     debug = false,
     onError,
     onReady,
@@ -192,6 +325,8 @@ export class LivePlayerEngine {
     this.muted = muted
     this.hasAudio = hasAudio
     this.webrtc = webrtc
+    this.controls = controls
+    this.hideProgress = hideProgress
     this.debug = debug
     this.onError = onError || (() => {})
     this.onReady = onReady || (() => {})
@@ -247,16 +382,28 @@ export class LivePlayerEngine {
      * 或父级高度为 auto），它虽然不报错，但<b>不会触发 playing</b> ——
      * 表现为「组件挂上了、video 元素也在、就是不播」，极难定位。
      * 所以这里给一个兜底尺寸。
+     *
+     * <p><b>兜底高度不能超过父容器</b>：电视墙小格可能只有 150px 高，
+     * 若这里硬写 min-height:180px，宿主会撑破父容器，
+     * 而 .video-box 是 overflow:hidden —— 控制栏被裁掉大半，
+     * 表现为「工具栏看得见却点不动」。所以取 min(180, 父容器高度)。
      */
     if (!this.el.clientWidth || !this.el.clientHeight) {
+      const parentH = this.el.parentElement ? this.el.parentElement.clientHeight : 0
       this._dbg('container-zero-size', {
         w: this.el.clientWidth,
         h: this.el.clientHeight,
-        parentH: this.el.parentElement ? this.el.parentElement.clientHeight : null
+        parentH
       })
       this.el.style.width = this.el.style.width || '100%'
       this.el.style.height = this.el.style.height || '100%'
-      this.el.style.minHeight = this.el.style.minHeight || '180px'
+      /*
+       * 只有当父容器确实够高时才加 min-height。
+       * 父容器也为 0（布局尚未完成）时仍给 180，让 video.js 能初始化；
+       * 一旦父容器量出真实高度，100% 会自然接管。
+       */
+      const minH = parentH > 0 ? Math.min(180, parentH) : 180
+      if (!this.el.style.minHeight) this.el.style.minHeight = minH + 'px'
     }
 
     if (!this.el || this.destroyed) return false
@@ -266,6 +413,14 @@ export class LivePlayerEngine {
      * {@code useXgPlayer} 都走这里，样式覆盖必须对两者一致。
      */
     this.el.classList.add('lp-fill')
+    /*
+     * 实时流（直播 / 设备回放）没有可 seek 的时间轴，进度条既无意义、
+     * 又会在起播瞬间被 video.js 自动隐藏导致控制栏宽度跳变。
+     * 详见 {@link ensureFillStyle} 里 {@code .lp-no-seek} 的说明。
+     */
+    if (this.hideProgress) {
+      this.el.classList.add('lp-no-seek')
+    }
 
     const vnode = createVNode(Component, {
       videoUrl: this.url,
@@ -300,8 +455,23 @@ export class LivePlayerEngine {
        */
       reloadInterval: this.webrtc ? 0 : undefined,
       fluent: true,
-      stretch: true,
-      controls: true,
+      /*
+       * stretch: false —— 保持画面原始宽高比，不拉伸。
+       *
+       * <p>{@code stretch:true} 会让 video 撑满容器（等效 object-fit:fill），
+       * 16:9 的码流放进非 16:9 的格子里会被横向或纵向拉变形，
+       * 人像和球机云台的画面尤其明显。默认按标准比例显示（letterbox 留黑边），
+       * 需要铺满时由用户点控制栏的「STR」按钮自行切换。
+       */
+      stretch: false,
+      /*
+       * 是否显示组件自带的控制栏。
+       *
+       * <p>国标回放要关掉：它的进度条画不出长度（FLV 里没有 duration），
+       * 拖动也是无效 seek（伪点播没有可 seek 的位置）。留着只会让用户拖一根
+       * 没有反应的进度条。回放的控制条改由页面提供（见 PlaybackView）。
+       */
+      controls: this.controls,
       onError: (e) => this._onErrorEvent(e),
       onMessage: (m) => {
         this.lastNotice = typeof m === 'string' ? m : JSON.stringify(m).slice(0, 120)
@@ -474,6 +644,168 @@ export class LivePlayerEngine {
   /** 当前播放位置（秒）。 */
   currentTime() {
     return this.videoEl ? this.videoEl.currentTime : 0
+  }
+
+  /**
+   * 拿到底层 video.js 实例。
+   *
+   * <p><b>为什么需要它</b>：录像回放要把 LivePlayer 的<b>官方事件</b>
+   * （{@code seeking} / {@code pause} / {@code play} / {@code ratechange} /
+   * {@code timeupdate}）转成国标 SIP 指令，必须拿到 Player 实例才能订阅。
+   *
+   * <p><b>怎么找到它</b>：video.js 的注册表 {@code videojs.players} 的键是
+   * <b>Player 的 id</b>（如 {@code vjs_video_2}），而 video 元素自己的 id 是
+   * <b>tech 的 id</b>（如 {@code vjs_video_2_webrtc_api}）。
+     * 直接 {@code videojs.getPlayer(videoEl.id)} 会命中另一个对象（只有 {@code on}
+   * 的 Component），拿不到 Player 的方法 —— 所以这里先用 Player 的根元素
+   * （{@code .video-js}）的 id 去取。
+   *
+   * @returns {object|null} video.js Player 实例
+   */
+  vjsPlayer() {
+    if (!this.videoEl) return null
+    const vjs = typeof window !== 'undefined' ? window.videojs : null
+    if (!vjs) return null
+    // Player 的根元素包着 tech 元素，从它拿 id 最准
+    const root = this.videoEl.closest ? this.videoEl.closest('.video-js') : null
+    if (root && root.id) {
+      try {
+        const p = typeof vjs.getPlayer === 'function' ? vjs.getPlayer(root.id) : null
+        if (p && typeof p.on === 'function') return p
+      } catch (e) {
+        // 忽略：换下一条路径
+      }
+    }
+    // 兜底：遍历注册表，找 tech 元素就是当前 video 的那个
+    try {
+      const reg = vjs.players || {}
+      for (const k of Object.keys(reg)) {
+        const p = reg[k]
+        const el = p && p.tech_ && typeof p.tech_.el === 'function' ? p.tech_.el() : null
+        if (el === this.videoEl) return p
+      }
+    } catch (e) {
+      // 忽略
+    }
+    return null
+  }
+
+  /**
+   * 订阅播放器事件。
+   *
+   * <p>优先用 video.js 实例（事件语义与它自己的控制栏一致），
+   * 拿不到时退回 video 元素的原生事件。
+   *
+   * @param {string} event 事件名（'timeupdate' / 'play' / 'pause' / 'ratechange' / 'ended'）
+   * @param {Function} handler 回调
+   * @returns {Function} 取消订阅的函数
+   */
+  on(event, handler) {
+    const p = this.vjsPlayer()
+    if (p && typeof p.on === 'function') {
+      p.on(event, handler)
+      return () => {
+        try {
+          p.off(event, handler)
+        } catch (e) {
+          // 忽略
+        }
+      }
+    }
+    if (!this.videoEl) return () => {}
+    this.videoEl.addEventListener(event, handler)
+    return () => this.videoEl.removeEventListener(event, handler)
+  }
+
+  /* ==================== LivePlayer 官方方法转发 ====================
+   *
+   * 官方方法清单见 https://www.liveqing.com/docs/manuals/LivePlayer.html：
+   *   play / pause / paused / getCurrentTime / setCurrentTime / snap
+   *   getMuted / setMuted / isFullscreen / requestFullscreen / exitFullscreen
+   *   toggleFullscreen / getVolume / setVolume / getDuration
+   *
+   * <p>这里统一转发到底层 video 元素（video.js 的这些方法最终也是操作它），
+   * 业务层不必关心组件内部结构。
+   */
+
+  /** 播放。 */
+  play() {
+    const p = this.vjsPlayer()
+    if (p && typeof p.play === 'function') {
+      try {
+        const r = p.play()
+        if (r && typeof r.catch === 'function') r.catch(() => {})
+      } catch (e) {
+        // 忽略
+      }
+      return
+    }
+    if (this.videoEl) {
+      const r = this.videoEl.play()
+      if (r && typeof r.catch === 'function') r.catch(() => {})
+    }
+  }
+
+  /** 暂停。 */
+  pause() {
+    const p = this.vjsPlayer()
+    if (p && typeof p.pause === 'function') {
+      try {
+        p.pause()
+      } catch (e) {
+        // 忽略
+      }
+      return
+    }
+    if (this.videoEl) this.videoEl.pause()
+  }
+
+  /** 是否处于暂停态。 */
+  paused() {
+    return this.videoEl ? this.videoEl.paused : true
+  }
+
+  /**
+   * 设置播放进度（官方 {@code setCurrentTime}）。
+   *
+   * @param {number} sec 目标秒数
+   */
+  setCurrentTime(sec) {
+    const p = this.vjsPlayer()
+    if (p && typeof p.currentTime === 'function') {
+      try {
+        p.currentTime(sec)
+        return
+      } catch (e) {
+        // 退回 video 元素
+      }
+    }
+    if (this.videoEl) {
+      try {
+        this.videoEl.currentTime = sec
+      } catch (e) {
+        // 忽略
+      }
+    }
+  }
+
+  /**
+   * 总时长（官方 {@code getDuration}，秒）。
+   *
+   * <p>直播 FLV 没有时长，返回 {@code 0}。录像点播（mp4）才有值。
+   */
+  getDuration() {
+    const p = this.vjsPlayer()
+    if (p && typeof p.duration === 'function') {
+      try {
+        const d = p.duration()
+        if (Number.isFinite(d) && d > 0) return d
+      } catch (e) {
+        // 忽略
+      }
+    }
+    const d = this.videoEl ? this.videoEl.duration : NaN
+    return Number.isFinite(d) && d > 0 ? d : 0
   }
 
   /** 是否静音（供外部同步音量按钮）。 */

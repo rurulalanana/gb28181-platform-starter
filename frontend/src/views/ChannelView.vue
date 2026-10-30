@@ -210,7 +210,7 @@
           操作列固定在右侧：表格列多（参考站同款 13 列）必然超宽，
           不固定的话横向滚动才能看到按钮，操作入口等于藏起来了。
         -->
-        <el-table-column label="操作" min-width="252" align="center" class-name="op-col" fixed="right">
+        <el-table-column label="操作" min-width="316" align="center" class-name="op-col" fixed="right">
           <template #default="{ row }">
             <el-button
               link
@@ -243,6 +243,19 @@
               @click="openDeviceRecord(row)"
             >
               <el-icon><Film /></el-icon> 设备录像
+            </el-button>
+            <!--
+              分享：生成一个免登录的直播链接（对齐 LiveGBS 的 play.html）。
+              复制到剪贴板而不是弹窗 —— 分享的下一步动作永远是「粘贴到某处」，
+              多一层弹窗只是多点一次。弹窗形式见「更多」里的分享面板。
+            -->
+            <el-button
+              link
+              type="primary"
+              title="复制该通道的免登录直播链接"
+              @click="shareLive(row)"
+            >
+              <el-icon><Share /></el-icon> 分享
             </el-button>
           </template>
         </el-table-column>
@@ -327,6 +340,26 @@
         </div>
       </div>
       <template #footer>
+        <!--
+          播放协议选择。
+
+          <p>LivePlayer 没有「往控制栏插自定义按钮」的扩展点，所以协议切换
+          放在这里（与实时预览页一致）。切换后立即重连当前流。
+        -->
+        <el-select
+          v-model="proto"
+          size="small"
+          style="width: 168px; margin-right: 12px"
+          title="播放协议"
+          @change="switchProto"
+        >
+          <el-option
+            v-for="o in LIVE_PROTOCOLS"
+            :key="o.value"
+            :label="o.label"
+            :value="o.value"
+          />
+        </el-select>
         <el-button @click="closePreview">关闭</el-button>
       </template>
     </el-dialog>
@@ -371,7 +404,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_PROTOCOL_SHORT, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
@@ -423,7 +456,7 @@ const videoContainer = ref(null)
 const player = useLivePlayer(videoContainer)
 
 /*
- * 协议下拉跟随播放器实际使用的协议（WebRTC 失败会自动回退到 FLV）。
+ * 协议下拉跟随播放器实际使用的协议。
  *
  * <p>不同步的话预览弹窗里会一直显示 WebRTC，而画面实际走 FLV ——
  * 排查时会被这个错位带偏。详见 LiveView 里同样的 watch 说明。
@@ -558,6 +591,71 @@ async function preview(row) {
 }
 
 /**
+ * 复制该通道的免登录直播分享链接。
+ *
+ * <p>链接形如 {@code /play?serial=<设备编码>&code=<通道编码>}，
+ * 对齐 LiveGBS 的 {@code play.html}。打开的人不需要账号 ——
+ * 这正是「分享」的语义（安全边界见后端 {@code LiveShareController}）。
+ *
+ * <p>用 {@code location.origin} 而不是后端返回的地址：分享链接要指向
+ * <b>用户当前访问的这个入口</b>。若平台同时有内网/公网两个域名，
+ * 用后端拼的地址会把内网用户引到公网去（或反之）。
+ */
+async function shareLive(row) {
+  const serial = row.deviceId || row.serial
+  const code = row.id || row.channelId
+  if (!serial || !code) {
+    ElMessage.error('该通道缺少编码，无法生成分享链接')
+    return
+  }
+  const url = `${window.location.origin}/play?serial=${encodeURIComponent(serial)}&code=${encodeURIComponent(code)}`
+  const ok = await copyText(url)
+  if (ok) {
+    ElMessage.success('已复制分享链接（免登录，可直接发给他人）')
+  } else {
+    /*
+     * 复制失败时把链接显示出来让用户手抄 —— 比只报「复制失败」有用。
+     * 用 ElMessageBox 而不是 alert：可选中、可复制。
+     */
+    ElMessageBox.alert(url, '请手动复制分享链接', {
+      confirmButtonText: '知道了',
+      customClass: 'share-link-box'
+    }).catch(() => {})
+  }
+}
+
+/**
+ * 粘贴板写入（带降级）。
+ *
+ * <p>{@code navigator.clipboard} 只在安全上下文可用 —— 平台常用
+ * {@code http://IP:port} 访问，那是<b>非安全上下文</b>，该 API 不存在。
+ * 这不是边缘情况而是常态，所以必须有 {@code execCommand} 兜底。
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch (e) {
+    // 权限被拒：走下面的兜底
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    ta.remove()
+    return ok
+  } catch (e) {
+    return false
+  }
+}
+
+/**
  * 「画面未就绪」自动重建的次数上限（每个通道一轮最多 2 次）。
  *
  * <p>重建 = 停会话 + 重新 INVITE，成本不低（设备要重新起推），
@@ -622,21 +720,7 @@ async function startPlay() {
   await player.play(streamId, urls, {
     proto: proto.value,
     // 通了但始终没视频轨时，重建整路流（见 rebuidStalled 的说明）
-    onStall: () => rebuildStalled(),
-    protocolSwitch: {
-      value: proto.value,
-      // 控制栏按钮放短标签（FLV / HTTP-FLV / WebRTC / HLS），
-      // 菜单项放完整名（含「HLS（无声音）」这类限制说明），像视频网站的清晰度菜单
-      options: LIVE_PROTOCOLS.map((o) => ({
-        value: o.value,
-        label: o.label,
-        short: LIVE_PROTOCOL_SHORT[o.value] || o.label
-      })),
-      onChange: (v) => {
-        proto.value = v
-        switchProto(v)
-      }
-    }
+    onStall: () => rebuildStalled()
   })
 }
 

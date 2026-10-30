@@ -18,6 +18,22 @@ const routes = [
     meta: { public: true, title: '录像分享' }
   },
   {
+    /*
+     * 直播分享页：免登录，对齐 LiveGBS 的 play.html。
+     *
+     * <p>路径用 {@code /play} 而不是 {@code /share/live}：前者与 CMS 的
+     * {@code play.html} 语义一致（「播放某个通道」），也不会和录像分享
+     * {@code /share/:token} 的动态段混淆 —— 那会让 {@code /share/live}
+     * 被当成「令牌为 live 的录像分享」。
+     *
+     * <p>参数：{@code ?serial=<设备编码>&code=<通道编码>}。
+     */
+    path: '/play',
+    name: 'play',
+    component: () => import('@/views/LiveShareView.vue'),
+    meta: { public: true, title: '直播分享' }
+  },
+  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',

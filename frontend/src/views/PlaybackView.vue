@@ -1,197 +1,184 @@
 <template>
-  <div class="page">
-
-    <el-card shadow="never">
-    <!-- 工具条：筛选条件在左，一行放完 -->
-    <div class="filter-bar">
-      <el-select
-        v-model="query.channelKey"
-        placeholder="选择通道"
-        filterable
-        style="width: 260px"
-        @change="onChannelChange"
-      >
-        <el-option
-          v-for="c in channels"
-          :key="c.deviceId + '/' + c.id"
-          :label="`${c.customName || c.name || c.id}${c.deviceOnline ? '' : '（离线）'}`"
-          :value="c.deviceId + '/' + c.id"
-        />
-      </el-select>
+  <div class="page pb-page">
+    <div class="pb-card">
       <!--
-        设备录像状态。
-
-        <p><b>为什么值得占一个位置</b>：改造前界面上只有「查出来的录像段」，
-        用户点一个空日期什么都看不到，无从区分「设备没在录」与
-        「在录，但今天确实没内容」—— 后者只会在有录像之后才变得可见。
-
-        <p><b>判据</b>：向设备查【当前-15 分钟, 当前】，若返回的段中有
-        {@code endTime >= 当前-3 分钟}，则这个时刻被某段录像覆盖，即正在录。
-        不能只看「查到了段」：设备 2 小时一段，停止录像后 15 分钟内仍会
-        查到与区间有交集的旧段。
+        标题：居中，格式对齐 CMS（LiveGBS）的「设备录像时间轴(设备-通道)」。
       -->
-      <el-tooltip :content="recStateHint" placement="bottom">
-        <el-tag
-          :type="recStateType"
-          size="default"
-          effect="plain"
-          class="rec-tag"
-          :class="{ clickable: !!query.channelKey }"
-          @click="refreshRecState(true)"
-        >
-          {{ recStateText }}
-        </el-tag>
-      </el-tooltip>
-      <el-date-picker
-        v-model="day"
-        type="date"
-        placeholder="选择日期"
-        :clearable="false"
-        :editable="false"
-        value-format="YYYY-MM-DD"
-        style="width: 150px"
-        @change="onDayChange"
-      />
-      <!--
-        按日查询：设备侧录像检索一次只查一个时间段，
-        而「跨天任意区间」既难对齐时间轴，用户也很难判断哪段属于哪天的计划录像。
-        固定成整天后：前一天/后一天 + 今天，三下就能翻到想看的那一天。
-      -->
-      <el-button-group class="day-nav">
-        <el-button title="前一天" @click="shiftDay(-1)">
-          <el-icon><ArrowLeft /></el-icon>
-        </el-button>
-        <el-button title="后一天" :disabled="isToday" @click="shiftDay(1)">
-          <el-icon><ArrowRight /></el-icon>
-        </el-button>
-      </el-button-group>
-      <el-button :disabled="isToday" @click="goToday">今天</el-button>
-      <el-button type="primary" :loading="searching" @click="search">
-        <el-icon><Search /></el-icon> 检索
-      </el-button>
-      <!--
-        视角切换：时间轴看「一天里哪儿有录像」，列表看「每段多长、多大、叫什么」。
-        两者数据同源，只是呈现方式不同，切来切去不会重新发起 SIP 查询。
-        （用 margin-left:auto 靠右，不用 flex:1 的空 span —— 空 span 会吃掉
-        剩余宽度，反而把后面的控件挤到下一行。
-      -->
-      <el-radio-group v-model="viewMode" size="default" class="view-switch">
-        <el-radio-button value="timeline">
-          <el-icon><Clock /></el-icon> 时间轴
-        </el-radio-button>
-        <el-radio-button value="list">列表</el-radio-button>
-      </el-radio-group>
-    </div>
+      <h4 class="pb-title">设备录像时间轴({{ timelineTitle }})</h4>
 
-      <!--
-        时间轴视角。
+      <div class="pb-body">
 
-        <p>横向是一整天（00:00 → 24:00），有色块的地方就有录像。
-        点色块直接回放，点空白处提示该时刻无录像 —— 比先看列表再找
-        「哪一段覆盖 14:30」直观得多，也顺手解决「录像在哪儿」的定位问题。
+        <!--
+          工具栏：单行两段。左段是「对哪条通道、怎么播」，右段是「看哪天、什么视角」。
 
-        <p>没有做拖拽「连续回放」：设备回放是按段点播的，跨段连续播放要
-        平台侧排队换流，属于另一个量级的工作。
-
-        <p><b>但拖拽可以用来框选下载区间</b> —— 而且这是当前唯一既能快、
-        又不损失画质的手段：无损下载的耗时由内容时长决定（设备按 1 倍速推流），
-        要快就只能少下。大部分时候用户真正需要的只是几小时里的一小段。
-        拖选距离小于 {@link DRAG_THRESHOLD_PX} 像素仍当作点击（继续回放）。
-      -->
-      <div v-if="viewMode === 'timeline'" v-loading="searching" class="timeline">
-        <div class="timeline-scale">
-          <span
-            v-for="(t, i) in TICK_LABELS"
-            :key="t"
-            :class="{ first: i === 0, last: i === TICK_LABELS.length - 1 }"
-            :style="{ left: (i / (TICK_LABELS.length - 1)) * 100 + '%' }"
-          >{{ t }}</span>
-        </div>
-        <div
-          class="timeline-track"
-          :class="{ 'is-dragging': drag.active }"
-          @click="onTrackClick"
-          @mousemove="onTrackMove"
-          @mouseleave="onTrackLeave"
-          @mousedown="onDragStart"
-        >
-          <div
-            v-for="s in timelineSegments"
-            :key="s.startMs + '-' + s.endMs"
-            class="timeline-seg"
-            :class="`seg-${s.type}`"
-            :style="{ left: s.left + '%', width: s.width + '%' }"
-            :title="segTitle(s)"
-          />
-          <!-- 框选区：下载时只取这一截，选区外变暗，一目了然 -->
-          <div
-            v-if="dragRect"
-            class="timeline-sel"
-            :style="{ left: dragRect.left + '%', width: dragRect.width + '%' }"
-          >
-            <span class="sel-label">{{ dragRect.label }}</span>
+          <p>按钮尺寸对齐 CMS 的 Bootstrap {@code btn-sm}：高 29px、字号 12px、
+          圆角 3px、主色 {@code #556677}。不直接用 el-button 是为了拿到一致的高度 ——
+          element-plus 的 small 按钮是 24px，和日期框、下拉并排会参差不齐。
+        -->
+        <div class="pb-toolbar">
+          <div class="pb-tools-left">
+            <button class="cms-btn cms-btn-primary" title="返回上一页" @click="goBack">
+              <span class="cms-ico">‹</span> 返回
+            </button>
+            <span class="cms-gap" />
+            <!--
+              通道选择：CMS 的通道来自路由参数，本平台的 /playback 没有，
+              所以必须留在页面上。尺寸压到和 cms-btn 同高。
+            -->
+            <el-select
+              v-model="query.channelKey"
+              placeholder="选择通道"
+              filterable
+              class="pb-sel pb-sel-channel"
+              @change="onChannelChange"
+            >
+              <el-option
+                v-for="c in channels"
+                :key="c.deviceId + '/' + c.id"
+                :label="`${c.customName || c.name || c.id}${c.deviceOnline ? '' : '（离线）'}`"
+                :value="c.deviceId + '/' + c.id"
+              />
+            </el-select>
+            <span class="cms-gap" />
+            <el-select
+              v-model="playRate"
+              class="pb-sel pb-sel-rate"
+              title="回放倍速（国标 Scale，由设备侧变速推流）"
+              @change="onRateChange"
+            >
+              <el-option :value="0.5" label="0.5 倍速" />
+              <el-option :value="1" label="1 倍速" />
+              <el-option :value="2" label="2 倍速" />
+              <el-option :value="4" label="4 倍速" />
+            </el-select>
+            <span class="cms-gap" />
+            <button
+              class="cms-btn"
+              :disabled="!current"
+              title="下载当前正在回放的这一段录像"
+              @click="downloadCurrent"
+            >下载</button>
           </div>
-          <!--
-            悬停提示：刻度只有每 2 小时一根，指针落在哪仍需看具体时刻。
-            跟鼠标走而不是固定在轨道底部 —— 固定位置会和刻度条挤在一起，
-            跟着走时视线不用在轨道与刻度之间来回跳。
-          -->
-          <div
-            v-if="hoverAt"
-            class="timeline-tip"
-            :style="{ left: hoverAt.percent + '%' }"
-            :class="{ 'tip-hit': hoverAt.hit }"
-          >
-            <span class="tip-clock">{{ hoverAt.clock }}</span>
-            <span v-if="hoverAt.hit" class="tip-seg">{{ hoverAt.segText }}</span>
+
+          <div class="pb-tools-right">
+            <!-- 日期：CMS 是一个输入框 + 日历图标；这里用日期选择器并保留前后翻页 -->
+            <el-button-group class="pb-daynav">
+              <button class="cms-btn cms-btn-sq" title="前一天" @click="shiftDay(-1)">‹</button>
+              <button class="cms-btn cms-btn-sq" title="后一天" :disabled="isToday" @click="shiftDay(1)">›</button>
+            </el-button-group>
+            <el-date-picker
+              v-model="day"
+              type="date"
+              placeholder="选择日期"
+              :clearable="false"
+              :editable="false"
+              value-format="YYYY-MM-DD"
+              class="pb-sel-date"
+              style="width: 150px"
+              @change="onDayChange"
+            />
+            <button
+              class="cms-btn"
+              :disabled="searching"
+              title="按当前通道与日期重新检索"
+              @click="search"
+            >检索</button>
+            <button class="cms-btn" @click="toggleView">
+              {{ viewMode === 'timeline' ? '列表视图' : '时间轴视图' }}
+            </button>
           </div>
-          <!--
-            不画「当前播放位置」指针：回放用的是模态弹窗，遮罩会把整条时间轴盖住，
-            指针即使算了也永远看不到。真要跟随进度，得先把播放器改成非模态浮层
-            或右侧抽屉，那是另一个量级的交互改动，不在这里假装实现。
-          -->
-          <div v-if="!timelineSegments.length" class="timeline-empty">
-            {{ timelineEmptyText }}
-          </div>
-        </div>
-        <div class="timeline-foot">
-          <span class="tl-legend"><i class="tl-dot seg-time" />定时</span>
-          <span class="tl-legend"><i class="tl-dot seg-alarm" />报警</span>
-          <span class="tl-legend"><i class="tl-dot seg-manual" />手动</span>
-          <span class="tl-spacer" />
-          <span v-if="timelineSegments.length" class="tl-sum">
-            共 {{ timelineSegments.length }} 段 · 当日累计 {{ fmtDuration(timelineTotalSeconds) }}
-          </span>
         </div>
 
         <!--
-          框选后的操作条。
+          播放区：对齐 CMS 的 700×394 黑底居中。
 
-          不直接「框完就下载」：拖拽很容易误触（尤其想点某段播放时手抖），
-          而下载一旦开始就要占一路回放会话。让它停在这里等一次明确的点击，
-          同时把「多长、要等多久」写在同一行，用户能一眼判断值不值得下。
+          <p>播放器用的是 LivePlayer 官方组件，<b>控制栏就是它自带的那个</b>
+          （播放/暂停、进度条、音量、全屏、截图），不另做一套 ——
+          自己画的控件既做不到全屏、截图这些能力，也会和组件内部状态打架。
+
+          <p>没有回放时显示「No Video」，与 CMS 一致：黑块上加一句白字，
+          比纯黑更像「播放器已就位、只是还没选片」，而不是「加载失败」。
         -->
-        <div v-if="selection" class="tl-selbar">
-          <el-icon class="selbar-icon"><Scissor /></el-icon>
-          <span class="selbar-range mono">
-            {{ selection.startText }} ~ {{ selection.endText }}
-          </span>
-          <span class="selbar-dur">
-            {{ fmtDuration(selection.seconds) }} · 下载约需 {{ fmtDuration(selection.seconds) }}
-          </span>
-          <span class="tl-spacer" />
-          <el-button size="small" type="primary" @click="downloadSelection">
-            <el-icon><Download /></el-icon> 下载这一区间
-          </el-button>
-          <el-button size="small" text @click="clearSelection">取消</el-button>
+        <div ref="playStage" class="pb-player">
+          <div ref="videoContainer" class="pb-video" />
+          <div v-if="!current" class="pb-no-video">No Video</div>
         </div>
-        <p v-else-if="timelineSegments.length" class="tl-draghint">
-          在时间轴上按住拖动可框选区间 —— 只下载需要的那一段，画质不受影响
-        </p>
-      </div>
 
+        <!--
+          这里<b>不再有</b>「时间范围 / 进度计数 / 停止回放」那一行。
+
+          <p>CMS（LiveGBS）的页面就是「标题 → 工具栏 → 播放器 → 时间轴」四段，
+          播放器下方直接接时间轴，没有任何信息行。之前我们额外加了一行，
+          显示 {@code 04:00~06:00}、{@code 01:08:40 / 02:00:00} 和「停止回放」，
+          与参照页面不一致，看起来就像多出来的一块。
+
+          <p>这些信息在新布局里由别处承担：
+          <ul>
+            <li><b>进度</b> —— 播放器自带控制栏的进度条（已把段时长喂给
+                {@code customDuration}），以及时间轴上的红色游标；</li>
+            <li><b>段范围</b> —— 点过的那个刻度块本身就是位置指示；</li>
+            <li><b>停止</b> —— 播放器控制栏的暂停，或直接点别的刻度块换段
+                （服务端会自动替换旧会话）。</li>
+          </ul>
+        -->
+
+        <!--
+          时间轴：1:1 对齐 CMS 的 LiveGBS 实现。
+
+          <p>结构（与 CMS 完全一致）：
+          <ul>
+            <li>{@code .time-rule} —— 外框，50px 高、灰底 {@code #ccc}、{@code overflow:hidden}；</li>
+            <li>{@code .time-day} —— 固定 1440px 宽（一天 1440 分钟，<b>1px = 1 分钟</b>），绝对定位；</li>
+            <li>288 个 {@code .time-minute}（每块 5px = 5 分钟，高 8px），有录像的加
+                {@code .active} 变深色 {@code #404d59}；</li>
+            <li>24 个 {@code .time-text}（每格 60px = 1 小时，高 25px），带 {@code #999} 左边框与上边框；</li>
+            <li>{@code .time-cursor} —— 2px 红竖线 + 下方白底红框时刻标签。</li>
+          </ul>
+
+          <p><b>外框是 {@code width:100% + max-width:1440px}，而内层固定 1440px</b>：
+          窗口窄于 1440px 时右侧会被裁掉，这是 CMS 的原样行为，保持一致。
+        -->
+        <div
+          v-show="viewMode === 'timeline'"
+          v-loading="searching"
+          class="time-rule"
+          @click="onTrackClick"
+        >
+          <div class="time-day">
+            <div
+              v-for="b in minuteBlocks"
+              :key="b.i"
+              class="time-minute"
+              :class="{ active: b.has }"
+              :title="b.has ? b.tip : ''"
+            />
+            <div
+              v-for="h in hourTicks"
+              :key="'h' + h"
+              :class="h === 0 ? 'time-text-first' : 'time-text'"
+            >{{ pad2(h) }}:00</div>
+          </div>
+          <div
+            v-if="cursorPx !== null"
+            class="time-cursor"
+            :style="{ left: cursorPx + 'px' }"
+          >
+            <div class="time-cursor-text">{{ cursorClock }}</div>
+          </div>
+          <div v-if="!timelineSegments.length && searched" class="time-empty">
+            {{ timelineEmptyText }}
+          </div>
+        </div>
+
+      <!--
+        列表视角。与时间轴同源数据，只是呈现方式不同，切换不会重新发起 SIP 查询。
+
+        <p>{@code v-if} 而不是 {@code v-else}：上面的时间轴用 {@code v-show}
+        控制显隐（切换视角时保留 DOM，避免重建 288 个刻度块），
+        {@code v-else} 只能跟 {@code v-if} 配对。
+      -->
       <el-table
-        v-else
+        v-if="viewMode === 'list'"
         v-loading="searching"
         :data="records"
         stripe
@@ -272,50 +259,40 @@
             />
           </el-select>
         </template>
+        </div>
       </div>
-    </el-card>
-
-    <!-- 回放对话框 -->
-    <el-dialog
-      v-model="playDialog"
-      :title="playTitle"
-      width="900px"
-      top="5vh"
-      @close="closePlay"
-      @closed="onPlayClosed"
-    >
-      <div class="video-box">
-        <div ref="videoContainer" class="video-container" />
-      </div>
-
-      <!--
-        进度条 / 暂停 / 倍速 全部由 xgplayer 自带控制栏提供（回放模式不禁用这些插件），
-        底层动作转成设备 SIP INFO。这里不再自绘任何时间文字 ——
-        播放器已经显示了「当前秒 / 总时长」，再加一行只会重复。
-      -->
-      <div class="play-bar">
-        <el-tag :type="stateType" size="small">{{ state }}</el-tag>
-      </div>
-
-      <template #footer>
-        <el-button @click="closePlay">关闭</el-button>
-      </template>
-    </el-dialog>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CircleCheck, Download, Loading, Scissor, VideoPlay } from '@element-plus/icons-vue'
-import { useRoute } from 'vue-router'
+import { Download, Loading, VideoPlay } from '@element-plus/icons-vue'
+import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls } from '@/player/resolvePlayUrls'
-import { useXgPlayer } from '@/composables/useXgPlayer'
-import { usePlayerStateType } from '@/composables/usePlayerState'
+import { useLivePlayer } from '@/composables/useLivePlayer'
 import { useDownloadStore } from '@/stores/download'
 
 const route = useRoute()
+const router = useRouter()
+
+/**
+ * 返回上一页。
+ *
+ * <p>用 {@code router.back()} 而不是固定跳某个路由：本页可从「设备管理」
+ * 的通道列表、通道管理、以及直接输入 URL 三种方式进入，
+ * 回退到「用户来的地方」才符合直觉。没有历史记录时（直接打开链接）
+ * 退回首页，避免点了没反应。
+ */
+function goBack() {
+  if (window.history.length > 1) {
+    router.back()
+  } else {
+    router.push('/dashboard')
+  }
+}
 /** 后台下载任务（全局）：本页只负责发起，进度统一在顶栏面板看。 */
 const downloads = useDownloadStore()
 
@@ -339,7 +316,6 @@ const deviceUnanswered = ref(false)
  */
 const deviceNotice = ref('')
 const query = reactive({ channelKey: '' })
-
 /** 呈现视角：`timeline` 时间轴（默认）/ `list` 明细列表。 */
 const viewMode = ref('timeline')
 
@@ -357,19 +333,32 @@ const viewMode = ref('timeline')
  */
 const day = ref(todayStr())
 
-const playDialog = ref(false)
 const current = ref(null)
 const mediaHttpPort = ref(null)
 
-/** 播放器容器（xgplayer 在内部创建 video 元素）。 */
+/** 播放器容器（LivePlayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
-const player = useXgPlayer(videoContainer)
+const player = useLivePlayer(videoContainer)
+/** 播放区容器：列表视图点「回放」后要滚到这里（否则画面在屏幕外，看不到自己在播）。 */
+const playStage = ref(null)
 const playing = computed(() => player.playing.value)
-const state = computed(() => player.state.value)
-const stateType = usePlayerStateType(state)
 
 const serial = computed(() => query.channelKey.split('/')[0] || '')
 const code = computed(() => query.channelKey.split('/')[1] || '')
+
+/**
+ * 标题里的「(设备-通道)」。
+ *
+ * <p>格式对齐 CMS：{@code 设备录像时间轴(34020000001320000111-34020000001310000001)}。
+ * 用编码而不是名称 —— 名称可能重名（本平台就有两个「南坑水库」），
+ * 只有编码才能唯一定位到一路通道，运维报障时也是拿编码沟通。
+ *
+ * <p>未选通道时给占位文案，而不是留一对空括号：空括号看起来像数据没加载出来。
+ */
+const timelineTitle = computed(() => {
+  if (!serial.value || !code.value) return '未选择通道'
+  return `${serial.value}-${code.value}`
+})
 
 /**
  * 当前通道设备声明支持的下载倍速档位。
@@ -424,9 +413,6 @@ const allNoFileName = computed(
 
 /** 一天的毫秒数：时间轴的横轴全长就是这个常数。 */
 const DAY_MS = 24 * 3600 * 1000
-
-/** 横向刻度：每 2 小时一个，末尾补 24:00 收尾（共 13 个）。 */
-const TICK_LABELS = Array.from({ length: 13 }, (_, i) => String(i * 2).padStart(2, '0') + ':00')
 
 /** 查询日 00:00:00 的本地毫秒时间戳；日期非法时为 null。 */
 const dayStartMs = computed(() => {
@@ -494,39 +480,101 @@ const timelineSegments = computed(() => {
   return out
 })
 
+/* ==================== CMS 风格时间轴 ==================== */
+
 /**
- * 当日累计录像时长（秒）。
+ * 时间轴内层固定宽度：一天 1440 分钟，<b>1px = 1 分钟</b>。
  *
- * <p><b>必须按「时间轴实际被覆盖的长度」算，不能把各段直接相加</b>：
- * 设备上报的录像段经常<b>互相重叠</b>（同一时段既有定时录像又有报警/手动录像，
- * 实测一个通道里有 5 段都从 12:00 开始）。逐段相加会得到一个自相矛盾的数字 ——
- * 页面上曾出现「当日累计 28 时 58 分」，一天不可能超过 24 小时。
- *
- * <p>做法是把各段按起点排序后求<b>并集</b>：相邻或重叠的合并成一段再累加。
- * 这样得到的就是「这一天里有多少时间有录像」，既不会超过 24 小时，
- * 也和用户在时间轴上看到的色块总宽度一致（跨天部分已裁到当天，近跨天时两边各算一半）。
+ * <p>与 CMS（LiveGBS）完全一致 —— 它的 {@code .time-day} 就是写死 1440px，
+ * 外框 {@code width:100%; max-width:1440px}。窗口窄于 1440px 时右侧被裁掉，
+ * 这是原样行为，不做「自适应缩放」的改良：一改，刻度和录像块的位置关系
+ * 就与 CMS 对不上，用户对照两边看时会以为数据不同。
  */
-const timelineTotalSeconds = computed(() => {
-  const spans = timelineSegments.value
-    .map((s) => [s.clippedStartMs, s.clippedEndMs])
-    .sort((a, b) => a[0] - b[0])
-  let total = 0
-  let curStart = null
-  let curEnd = null
-  for (const [start, end] of spans) {
-    if (curEnd === null || start > curEnd) {
-      // 与上一段不相接：结算上一段，另起一段
-      if (curEnd !== null) total += curEnd - curStart
-      curStart = start
-      curEnd = end
-    } else if (end > curEnd) {
-      // 重叠或首尾相接：向右延伸
-      curEnd = end
+const TIME_AXIS_PX = 1440
+
+/** 每个刻度块代表的分钟数：1440px / 288 块 = 5px = 5 分钟。 */
+const MINUTE_BLOCK_MIN = 5
+
+/** 一天有多少个刻度块。 */
+const MINUTE_BLOCK_COUNT = TIME_AXIS_PX / MINUTE_BLOCK_MIN
+
+/** 两位补零。 */
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+/** 小时刻度：0..23（CMS 显示到 23:00，不显示 24:00）。 */
+const hourTicks = Array.from({ length: 24 }, (_, i) => i)
+
+/**
+ * 288 个刻度块，标记每个 5 分钟区间有没有录像。
+ *
+ * <p><b>为什么不复用 {@code timelineSegments} 的百分比</b>：CMS 的时间轴不是
+ * 若干个彩色块，而是<b>一整排等宽小块</b>，有录像的变深色。要 1:1 就得
+ * 按分钟网格离散化，而不是画任意位置任意宽度的矩形。
+ *
+ * <p>离散化规则：段覆盖到的每一块都算「有」。因此 1 秒的碎片段也会点亮
+ * 它所在的 5 分钟块 —— 这与 CMS 的观感一致（它同样按整块点亮），
+ * 也避免「明明查到了录像，时间轴上却什么都没有」。
+ */
+const minuteBlocks = computed(() => {
+  const base = dayStartMs.value
+  const has = new Array(MINUTE_BLOCK_COUNT).fill(false)
+  const rules = new Array(MINUTE_BLOCK_COUNT).fill(null)
+  if (base !== null) {
+    const blockMs = MINUTE_BLOCK_MIN * 60_000
+    for (const s of timelineSegments.value) {
+      const from = Math.max(0, Math.floor((s.clippedStartMs - base) / blockMs))
+      const to = Math.min(MINUTE_BLOCK_COUNT, Math.ceil((s.clippedEndMs - base) / blockMs))
+      for (let i = from; i < to; i++) {
+        has[i] = true
+        // 同一块被多段覆盖时只留第一段的提示，够用了
+        if (!rules[i]) rules[i] = s
+      }
     }
   }
-  if (curEnd !== null) total += curEnd - curStart
-  return total / 1000
+  return has.map((h, i) => ({
+    i,
+    has: h,
+    tip: h && rules[i] ? segTitle(rules[i]) : ''
+  }))
 })
+
+/**
+ * 红色游标的像素位置（相对 {@code .time-day} 左边缘）。
+ *
+ * <p>优先跟播放进度走（时间轴兼作进度条）；没在播放时退回「当前时刻」，
+ * 与 CMS 一致 —— 它的红线就是「现在」。
+ *
+ * <p>返回 {@code null} 表示不显示：日期不是今天、且没在播放时，
+ * 画一条「今天此刻」的线在历史日期上是错的。
+ */
+const cursorPx = computed(() => {
+  const base = dayStartMs.value
+  if (base === null) return null
+  if (playhead.value) {
+    return Math.min(TIME_AXIS_PX, Math.max(0, (playhead.value.percent / 100) * TIME_AXIS_PX))
+  }
+  const now = nowTick.value
+  if (now < base || now >= base + DAY_MS) return null
+  return ((now - base) / DAY_MS) * TIME_AXIS_PX
+})
+
+/**
+ * 游标上显示的时刻。
+ *
+ * <p>只到分钟（{@code HH:mm}），与 CMS 一致 —— 它的游标标签是 60px 宽的
+ * 白底红框，塞下 {@code HH:mm} 刚好，带上秒就溢出了。
+ */
+const cursorClock = computed(() => {
+  const text = playhead.value ? playhead.value.clock : fmtClock(nowTick.value)
+  return text.slice(0, 5)
+})
+
+/** 时间轴 / 列表 视角切换（CMS 是一个按钮，不是单选组）。 */
+function toggleView() {
+  viewMode.value = viewMode.value === 'timeline' ? 'list' : 'timeline'
+}
 
 /** 色块的悬浮提示：起止 + 时长（跨天段额外说明）。 */
 function segTitle(s) {
@@ -538,188 +586,50 @@ function segTitle(s) {
 /**
  * 把鼠标位置换算成「当天第几毫秒 + 百分比」。
  *
- * <p>点击与悬停共用同一套换算，否则两处各自算一遍迟早会算出不同的值 ——
- * 用户看到 tip 显示有录像，点下去却提示没有，是最难排查的那类 bug。
+ * <p><b>必须按内层 {@code .time-day} 量宽度，不能按外框 {@code .time-rule}</b>：
+ * 外框是 {@code max-width:1440px} + {@code overflow:hidden}，窗口窄于 1440px 时
+ * 它只有几百像素，而里面那条轨道仍然是完整的 1440px（右侧被裁掉）。
+ * 用外框宽度当分母，会把「可见部分」拉伸成一整天 ——
+ * 实测点 15:00 附近会跳到 23:00 的录像段，用户完全无法理解。
+ *
+ * <p>比例夹在 0~100%，所以点到被裁掉的区域之外也会自然落在 24:00。
  */
 function trackPoint(ev) {
   const base = dayStartMs.value
   if (base === null) return null
-  const rect = ev.currentTarget.getBoundingClientRect()
+  const rule = ev.currentTarget
+  const track = rule && rule.querySelector ? rule.querySelector('.time-day') : null
+  const rect = (track || rule).getBoundingClientRect()
   if (!rect.width) return null
   const ratio = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width))
   return { at: base + ratio * DAY_MS, percent: ratio * 100 }
 }
 
 /**
- * 悬停状态：显示鼠标所指的时刻，命中录像段时附带该段的起止与时长。
+ * 「当前时刻」的脉冲值。
  *
- * <p>只更新一个响应式对象、不做任何查询，因此可以跟着 mousemove 直接跑。
- * {@code percent} 限制在 [0.5, 99.5] 内给 CSS 用于防溢出（tip 有最小宽度，
- * 贴边时会被裁掉一半）。
+ * <p>游标在未播放时要跟着真实时间走，但 {@code Date.now()} 不是响应式的 ——
+ * 直接写在 computed 里，值会被缓存住，游标永远停在进入页面那一刻。
+ * 由定时器推进这个 ref 来驱动重算（见 {@link onMounted}）。
  */
-const hoverAt = ref(null)
+const nowTick = ref(Date.now())
+
+/** 推进 {@link nowTick} 的定时器句柄。 */
+let nowTimer = null
 
 /**
- * 时间轴拖拽框选。
+ * 时间轴点击：播放命中时刻的那一段。
  *
- * <h3>为什么用拖拽来「选下载区间」</h3>
- * 无损下载的耗时由内容时长决定 —— 设备是按 1 倍速推流的，2 小时的录像
- * 就得等 2 小时，这是物理上限，任何平台都改不了。想更快只有两条路：
+ * <p>时间轴兼作进度条 —— 点哪播哪。
  * <ul>
- *   <li>让设备只推关键帧（现有「快进」模式）—— 快，但画质没了；</li>
- *   <li><b>少下一部分</b> —— 快得更多，且画质完全不受影响。</li>
+ *   <li>正在播同一段 → 当作「定位」（拖动进度条）；</li>
+ *   <li>正在播别的段或还没播 → 从该时刻起播。</li>
  * </ul>
- * 用户真正需要的往往只是几小时里那几分钟（事故、异常），
- * 所以「框选区间」比任何倍速都更贴近实际需求。
  *
- * <h3>为什么要区分点击与拖拽</h3>
- * 「点色块回放」是这一页的主要操作，不能被拖拽抢走。用位移阈值区分：
- * 按下到抬起位移小于 {@link DRAG_THRESHOLD_PX} 视为点击，照常回放。
- */
-const DRAG_THRESHOLD_PX = 4
-
-const drag = reactive({ active: false, startX: 0, startAt: 0, moved: false })
-
-/**
- * 最近一次拖拽结束的时刻（毫秒）。
- *
- * <p>用于吞掉浏览器在松手后补发的那次 click。用一个时间戳而不是
- * {@code moved} 标志：松手位置可能在轨道外，那时根本不会有 click，
- * 标志会一直挂着，把<b>下一次正常点击</b> 吞掉 —— 表现为「点色块没反应，
- * 要再点一次」。
- */
-let dragEndedAt = 0
-
-/** 框选结果；`null` 表示没有选区。 */
-const selection = ref(null)
-
-/**
- * 框选区的渲染矩形（百分比 + 标签）。
- *
- * <p>宽度下限 0.6%：选 30 秒在 1000px 轨道上不足 1px，看不见自己选了什么。
- */
-const dragRect = computed(() => {
-  const s = selection.value
-  const base = dayStartMs.value
-  if (!s || base === null) return null
-  const left = ((s.startMs - base) / DAY_MS) * 100
-  const width = ((s.endMs - s.startMs) / DAY_MS) * 100
-  return {
-    left: Math.max(0, left),
-    width: Math.max(width, 0.6),
-    label: fmtDuration(s.seconds)
-  }
-})
-
-function onDragStart(ev) {
-  const point = trackPoint(ev)
-  if (!point) return
-  drag.active = true
-  drag.moved = false
-  drag.startX = ev.clientX
-  drag.startAt = point.at
-  selection.value = null
-}
-
-function onTrackMove(ev) {
-  const point = trackPoint(ev)
-  if (!point) {
-    hoverAt.value = null
-    return
-  }
-  if (drag.active) {
-    // 位移不足阈值：还没决定是点击还是拖拽，先不画选区
-    if (!drag.moved && Math.abs(ev.clientX - drag.startX) < DRAG_THRESHOLD_PX) {
-      return
-    }
-    drag.moved = true
-    selection.value = buildSelection(drag.startAt, point.at)
-    hoverAt.value = null
-    return
-  }
-  const hit = timelineSegments.value.find(
-    (s) => point.at >= s.clippedStartMs && point.at < s.clippedEndMs
-  )
-  hoverAt.value = {
-    percent: Math.min(99.5, Math.max(0.5, point.percent)),
-    clock: fmtClock(point.at),
-    hit: !!hit,
-    segText: hit
-      ? `${fmtClock(hit.startMs)}–${fmtClock(hit.endMs)} · ${fmtDuration((hit.endMs - hit.startMs) / 1000)}`
-      : ''
-  }
-}
-
-/**
- * 把拖拽的两个端点整理成选区。
- *
- * <p>端点可能左拖也可能右拖，先归一化再交给下游；不足 1 秒的选区直接丢弃，
- * 避免用户手抖点出「0 秒区间」后点下载拿到空文件。
- */
-function buildSelection(atA, atB) {
-  const a = Math.min(atA, atB)
-  const b = Math.max(atA, atB)
-  const seconds = Math.round((b - a) / 1000)
-  if (seconds < 1) return null
-  return {
-    startMs: a,
-    endMs: b,
-    seconds,
-    startText: fmtClock(a),
-    endText: fmtClock(b)
-  }
-}
-
-function onTrackLeave() {
-  hoverAt.value = null
-  /*
-   * 拖拽<b>不</b>在鼠标移出轨道时结束。
-   *
-   * <p>一是用户经常会拖到轨道边缘之外（想选到 24:00），提前结束会让选区
-   * 停在半路；{@link trackPoint} 已经把比例夹在 0~100%，拖出外面反而是
-   * 自然的「选到头」交互。
-   *
-   * <p>二是真正的结束点必须覆盖「在轨道外松手」这种情况，那只能靠
-   * window 上的 mouseup（见 {@link onDragEnd}）。在这里提前置 false 反而会
-   * 让「按住拖出轨道再拖回来」变成两个动作。
-   */
-}
-
-/**
- * 结束拖拽。必须挂在 <b>window</b> 的 mouseup 上。
- *
- * <p>改造前只在轨道上监听 mousedown/mousemove，没有任何 mouseup ——
- * 松开鼠标后 {@code drag.active} 一直是 true，之后再移动鼠标（不用按键）
- * 选区就继续跟着长，表现为「松手了还在选」。这是用户直接看到的现象。
- *
- * <p>挂在 window 而不是轨道上：用户很可能是在<b>轨道外</b>松手的
- * （拖到边缘想选到 24:00，或拖过头）。只挂轨道就收不到那种 mouseup，
- * 同样的 bug 依旧存在，只是触发条件更隐蔽。
- */
-function onDragEnd() {
-  if (!drag.active) return
-  drag.active = false
-  if (drag.moved) {
-    // 拖拽结束会紧跟一次 click，打上时间戳让 onTrackClick 吞掉它
-    dragEndedAt = Date.now()
-    drag.moved = false
-  }
-}
-
-/**
- * 时间轴点击：有选区时先清选区（用户的意图是回到「点播」），
- * 否则播命中时刻的那一段。
- *
- * <p>拖拽结束后浏览器会补一个 click，必须吞掉 —— 否则松手瞬间会在
- * 选区之外又开始播放一段录像，两个动作打架。用时间戳判定而不是标志位，
- * 这样无论在哪松手、有没有补发 click，下一次真实点击都不会被误吞。
+ * <p>定位优先用 SIP {@code INFO}（npt），设备原地跳，不必拆会话重新协商 ——
+ * 后者的代价是 2~3 秒黑屏。
  */
 function onTrackClick(ev) {
-  if (Date.now() - dragEndedAt < 400) return
-  if (selection.value) {
-    clearSelection()
-    return
-  }
   const base = dayStartMs.value
   if (base === null) return
   const point = trackPoint(ev)
@@ -731,147 +641,24 @@ function onTrackClick(ev) {
     ElMessage.info('该时刻没有录像')
     return
   }
-  play(hit.row)
-}
-
-function clearSelection() {
-  selection.value = null
-  drag.active = false
-  drag.moved = false
-}
-
-/**
- * 下载框选的区间。
- *
- * <p>与「整段下载」走同一套后端流程，只是把时长换成选区秒数：
- * {@code playback/start} 的 t= 用选区起止，{@code download/start} 的
- * duration 用选区长度，收尾时按 wall clock 卡住，正好录完这一截。
- *
- * <p><b>区间下载必须快进模式之外保持 1 倍速</b>：倍速会掉帧，
- * 而用户框选区间的目的就是「少下一点、画质别动」，两者不能混。
- */
-async function downloadSelection() {
-  const s = selection.value
-  if (!s) return
   /*
-   * 局部变量<b>不能叫 day</b>：`const day = day.value` 会让声明出来的 day
-   * 在自己的初始化表达式里就进入暂时性死区（TDZ），运行时直接抛
-   * {@code ReferenceError: Cannot access 'day' before initialization} ——
-   * 表现为「点了『下载这一区间』什么都没发生」。
-   * 压缩后变量名变成单字母 t，报错信息里完全看不出是这个原因。
+   * 时间轴兼作进度条：点哪播哪。
+   *
+   * <p>正在播同一段 → 当作「定位」（拖动进度条）。
+   * 正在播别的段或还没播 → 从该时刻起播。
+   *
+   * <p>定位优先用 SIP {@code INFO}（npt），设备原地跳，
+   * 不必拆会话重新协商 —— 后者的代价是 2~3 秒黑屏。
    */
-  const dayStr = day.value
-  const row = {
-    startTime: `${dayStr}T${s.startText}`,
-    endTime: `${dayStr}T${s.endText}`,
-    filePath: '',
-    fileSize: 0
+  const offset = Math.floor((point.at - parseWall(hit.row.startTime)) / 1000)
+  if (current.value && hit.row === current.value && playing.value) {
+    seekTo(Math.max(0, offset))
+    return
   }
-  await startDownload(row, { seconds: s.seconds, speed: 1 })
-  clearSelection()
+  play(hit.row, { startOffset: Math.max(0, offset) })
 }
 
 /* ==================== 设备录像状态 ==================== */
-
-/**
- * 设备当前是否在录像：`null` 未知 / `true` 在录 / `false` 未录。
- *
- * <p>用「最近一段时间有没有覆盖到当前时刻的录像段」来判断，是当前
- * GB/T 28181 下唯一通用的办法 —— 设备不会主动上报「我要开始录像了」，
- * 目录应答里也没有录像状态字段。
- */
-const recordingNow = ref(null)
-const recChecking = ref(false)
-
-/** 判为「正在录」的容差：段尾距当前不超过这么久就算在录（秒）。 */
-const REC_TOLERANCE_SECOND = 180
-
-/** 状态查询区间：往回看 15 分钟。计划录像常见 2 小时一段，够覆盖。 */
-const REC_LOOKBACK_MS = 15 * 60 * 1000
-
-const recStateText = computed(() => {
-  if (!query.channelKey) return '录像状态 —'
-  if (recChecking.value) return '状态查询中…'
-  if (recordingNow.value === null) return '录像状态 —'
-  return recordingNow.value ? '● 正在录像' : '○ 当前未录像'
-})
-
-const recStateType = computed(() => {
-  if (recordingNow.value === true) return 'success'
-  if (recordingNow.value === false) return 'info'
-  return ''
-})
-
-const recStateHint = computed(() => {
-  if (!query.channelKey) return '先选择通道'
-  if (recChecking.value) return '正在向设备查询最近 15 分钟有无录像'
-  if (recordingNow.value === null) return '点一下重新查询设备录像状态'
-  return recordingNow.value
-    ? '设备最近 15 分钟有录像覆盖到当前时刻（点击重新查询）'
-    : '设备最近 15 分钟没有覆盖到当前时刻的录像（点击重新查询）'
-})
-
-/**
- * 这批录像段里是否有某一段覆盖到给定的时刻。
- *
- * <p>不能只看「查到了段」：设备常见 2 小时一段，停止录像后 15 分钟内
- * 仍能查到与区间有交集的旧段。必须看段尾有没有覆盖到现在。
- */
-function isRecordingAt(list, at) {
-  const deadline = at - REC_TOLERANCE_SECOND * 1000
-  return list.some((r) => {
-    const end = parseWall(r.endTime)
-    return Number.isFinite(end) && end >= deadline
-  })
-}
-
-/**
- * 查询设备当前录像状态。
- *
- * <p>刻意<b>不</b>用当天的检索结果判断：那查的是「用户选中的日期」，
- * 用户翻到上周三时，看的是上周三有没有录像，与「现在是否在录」无关。
- * 必须单独问一次设备「最近 15 分钟」。
- *
- * <p><b>但「今天」是例外</b>：当天检索的区间本来就覆盖了此刻，
- * 直接从它的结果里判断即可。这不是为了省事 —— 设备侧 RecordInfo 是
- * 串行问答，多发一次就要多等一次，而且并发查询会互相覆盖应答回调
- * （见 RecordService 的说明）。
- *
- * <p>查询失败一律记为「未知」而不是「未录像」：设备离线、SIP 超时都会
- * 走到异常分支，把它们显示成「未录像」会变成误报 —— 用户可能据此去
- * 现场检查一台其实在正常录像的设备。
- *
- * @param {boolean} [force] 忽略当天检索结果，强制向设备再问一次（用户点标签时用）
- */
-async function refreshRecState(force = false) {
-  if (!query.channelKey || recChecking.value || searching.value) return
-  if (!force && day.value === todayStr() && searched.value && records.value.length) {
-    recordingNow.value = isRecordingAt(records.value, Date.now())
-    return
-  }
-  recChecking.value = true
-  recordingNow.value = null
-  try {
-    const now = Date.now()
-    const data = await playbackApi.recordList({
-      serial: serial.value,
-      code: code.value,
-      starttime: fmtFull(new Date(now - REC_LOOKBACK_MS)),
-      endtime: fmtFull(new Date(now)),
-      // 状态探测只需“有没有”，不必等满 15 秒：后端同通道查询是串行的，
-      // 这里等太久会把后面的检索一起拖慢。
-      timeout: 8
-    })
-    // 设备没应答时保持「未知」，不能当成「未录像」
-    recordingNow.value = data?.deviceAnswered === false
-      ? null
-      : isRecordingAt(data?.recordList || [], now)
-  } catch (e) {
-    recordingNow.value = null
-  } finally {
-    recChecking.value = false
-  }
-}
 
 /** 设备侧的录像类型 → 中文（与时间轴图例保持一致）。 */
 const TYPE_LABELS = { time: '定时', alarm: '报警', manual: '手动' }
@@ -924,15 +711,14 @@ function onChannelChange() {
   searched.value = false
   deviceUnanswered.value = false
   deviceNotice.value = ''
-  hoverAt.value = null
   /*
-   * 先检索、拿到结果后再判录像状态。
+   * 直接检索当天。
    *
-   * <p>两者不能并发：设备侧的录像检索是<b>串行问答</b>，同通道两个查询会
-   * 互相覆盖应答回调，导致其中一个必然超时（表现为「查询录像老是查不出来」）。
-   * 先等当天结果、再从中判状态，一次通道切换只发一条 SIP 查询。
+   * <p>设备侧的录像检索是<b>串行问答</b>，同通道两个并发查询会互相覆盖
+   * 应答回调（其中一个必然超时，表现为「查询录像老是查不出来」），
+   * 所以一次通道切换只发这一条 SIP 查询。
    */
-  search().then(() => refreshRecState())
+  search()
 }
 
 /** 日期 → `YYYY-MM-DD`（本地时区，不用 toISOString 以免被 UTC 拉走一天）。 */
@@ -1012,7 +798,6 @@ async function search() {
     return
   }
   const seq = ++searchSeq
-  const dayOfQuery = day.value
   searching.value = true
   try {
     const data = await playbackApi.recordList({
@@ -1038,9 +823,6 @@ async function search() {
       ElMessage.warning(data.notice || '设备未应答录像检索')
     } else if (!records.value.length) {
       ElMessage.info('当日无录像')
-    } else if (dayOfQuery === todayStr()) {
-      // 今天的数据顺手把「是否在录」也确定下来，省一次 SIP 查询
-      recordingNow.value = isRecordingAt(records.value, Date.now())
     }
   } catch (e) {
     if (seq === searchSeq) ElMessage.error(e.message || '检索失败')
@@ -1072,12 +854,19 @@ async function play(row, opts = {}) {
   if (!opts.rebuild) stallRetry = 0
   const offset = Math.max(0, Math.floor(Number(opts.startOffset) || 0))
   /*
-   * 【先请求、成功后再开窗】
+   * 列表视图点「回放」时把播放区滚进视野。
    *
-   * <p>改造前这里第一步就是 {@code playDialog=true}，于是请求被拒时
-   * （典型场景：该通道正在后台下载，回放会话被锁）用户会看到一个
-   * 空弹窗 + 一条错误提示 —— 弹窗里没有任何内容，关掉还得再点一次。
-   * 先拿到结果再开窗，失败时停在列表页、只留一条说明原因的提示。
+   * <p>回放不再用弹窗，画面在页面顶部的播放区。用户在表格里点了「回放」，
+   * 播放区可能在屏幕外 —— 画面在下面播、用户看不到，还以为没反应。
+   */
+  if (playStage.value) {
+    playStage.value.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  /*
+   * 【先请求、成功后再起播】
+   *
+   * <p>请求被拒时（典型场景：该通道正在后台下载，回放会话被锁），
+   * 页面只留一条说明原因的提示，不会把播放器切到「有画面但其实是空白」的状态。
    */
   await ensureMediaPort()
 
@@ -1098,9 +887,10 @@ async function play(row, opts = {}) {
   }
 
   current.value = row
-  playDialog.value = true
   // 进度条总长取录像段的起止时间差；位置归零
   segmentSeconds.value = segmentLengthOf(row)
+  // 本段从第 offset 秒开始推，媒体时间轴的 0 点对应段内这个位置
+  positionOffset.value = offset
   await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
@@ -1119,6 +909,29 @@ async function play(row, opts = {}) {
    */
   await player.play(playbackKey.value, urls, {
     proto: 'wsflv',
+    /*
+     * <b>不传 {@code _vod}：设备回放就是直播形式。</b>
+     *
+     * <p>国标回放的媒体面就是「设备主动往平台推一路 RTP」，与直播同一形状 ——
+     * flv.js 也必须按 {@code isLive=true} 处理（它会因此不尝试 seek、
+     * 不等待 duration），这才是真实语义。早先按「点播」传会让 flv.js
+     * 去等一个永远不会来的时长。
+     *
+     * <p><b>代价与弥补</b>：live 模式下没有进度条。本平台的定位入口是
+     * 页面自己的时间轴（点刻度 → SIP INFO 让设备跳），不依赖播放器进度条，
+     * 所以这不是能力缺失。
+     */
+    /*
+     * <b>控制栏保持开启</b>（引擎默认 {@code controls:true}）。
+     *
+     * <p>早先这里传 {@code _noControls: true} 把控制栏关掉，注释写「控制条由
+     * 本页面提供」—— 但页面从未提供过，于是用户拿不到任何播放操作：
+     * 没有暂停、没有音量、没有全屏、没有截图。这就是「播放器不可操作」的由来。
+     * 该开关已于本次一并删除（无任何调用方）。
+     *
+     * <p>控制栏里最终保留 播放/暂停、音量、拉伸(STD)、截图、全屏。
+     * 没有进度条 —— 由引擎按「实时流」统一隐藏（见 {@code useLivePlayer#play}）。
+     */
     /*
      * 画面永远起不来时重拉整条流。
      *
@@ -1139,13 +952,14 @@ async function play(row, opts = {}) {
      * 丢包坏帧一次…）会把 2 次预算永久耗光，之后再出问题就直接放弃了。
      */
     onStable: () => { stallRetry = 0 },
+    /*
+     * 国标回放控制：官方进度条/播放控件的动作转成设备 SIP 指令。
+     *
+     * <p>这些是国标协议的语义（INFO 定位 / PLAY / PAUSE / Scale），
+     * 播放器本身不做任何自定义实现。
+     */
     vod: {
       duration: segmentSeconds.value,
-      /*
-       * 起始偏移：本段从第 offset 秒开始推，所以媒体时间轴 0 点对应段内的 offset。
-       * 进度条显示 = offset + media.currentTime，总长仍是整段时长。
-       */
-      startOffset: offset,
       onSeek: (sec) => seekTo(sec),
       onPause: () => control('pause'),
       onResume: () => resumePlayback(),
@@ -1305,6 +1119,21 @@ async function startDownload(row, override = {}) {
 const downloadingKey = ref('')
 
 /**
+ * 下载当前正在回放的那一段。
+ *
+ * <p>工具栏的「下载」按钮走这里。早先模板绑的是 {@code downloadCurrent}，
+ * 但函数从未定义过 —— 点一下就是 {@code ReferenceError}，
+ * 表现为「下载按钮没反应」，控制台里只有一条 undefined 的报错。
+ *
+ * <p>复用列表视图的行下载逻辑（{@link startDownload}）：两者下的是同一段，
+ * 只是入口不同，没必要写第二套。
+ */
+async function downloadCurrent() {
+  if (!current.value) return
+  await startDownload(current.value)
+}
+
+/**
  * 下载按钮的悬浮提示：把「要等多久」提前说清楚。
  *
  * <p>完整模式（默认）耗时 ≈ 段长本身，下载在后台跑，用户可以去干别的事。
@@ -1389,15 +1218,61 @@ async function resumePlayback() {
 
 /* ==================== 进度显示 ==================== */
 /*
- * 进度条本身由 xgplayer 控制（回放模式不 ignores 进度插件），
- * 拖动/暂停/倍速都通过 vod 回调转成设备信令。
- * 这里只做两件事：把播放器报上来的位置换算成墙钟时间、给下载算段长。
+ * 进度条与播放控制全部由 LivePlayer 的<b>官方控制栏</b>提供（含官方进度条）。
+ *
+ * <p>国标回放是「伪点播」—— 平台收到的是设备持续推来的 FLV 流，流里没有
+ * 总时长（ZLM 的 .live.flv 不带 duration 字段）。整段录像的起止时间只有
+ * 业务侧知道（来自录像检索应答），由 {@code useLivePlayer} 的 vod 控制层
+ * 喂给 video.js 的官方 {@code customDuration}，官方进度条即可正确显示长度。
+ *
+ * <p>拖动/暂停/倍速同样走官方控件，动作由 vod 控制层转成国标 SIP 指令
+ * （{@code INFO} / {@code PLAY} / {@code PAUSE} / {@code Scale}）。
  */
 
 /** 录像段总时长（秒）。 */
 const segmentSeconds = ref(0)
-/** 播放位置（相对录像段起点的秒数）；由播放器的 timeupdate 驱动。 */
-const playPosition = computed(() => player.position.value)
+/**
+ * 本段起始偏移（秒）：从段中间开始播时，媒体时间轴的 0 点对应的段内位置。
+ *
+ * <p>进度条显示位置 = positionOffset + player.position。
+ */
+const positionOffset = ref(0)
+/** 播放位置（相对录像段起点的秒数）。 */
+const playPosition = computed(() =>
+  Math.min(segmentSeconds.value, positionOffset.value + (player.position.value || 0))
+)
+/** 回放倍速（国标 Scale）。 */
+const playRate = ref(1)
+
+/**
+ * 播放头：当前播放位置在当天时间轴上的位置。
+ *
+ * <p><b>时间轴兼作进度条</b> —— 它既标出「现在播到哪儿」，也是定位入口。
+ * 位置换算：段的起始绝对时刻 + 段内偏移 + 媒体已播放时间，
+ * 再换算成「距当天 00:00 的毫秒数 / 一天」得到百分比。
+ *
+ * @returns {{percent:number, clock:string}|null}
+ */
+const playhead = computed(() => {
+  const row = current.value
+  const base = dayStartMs.value
+  if (!row || base === null) return null
+  const segStart = parseWall(row.startTime)
+  if (!Number.isFinite(segStart)) return null
+  const at = segStart + (positionOffset.value + (player.position.value || 0)) * 1000
+  const percent = ((at - base) / DAY_MS) * 100
+  if (!Number.isFinite(percent)) return null
+  return {
+    percent: Math.min(100, Math.max(0, percent)),
+    clock: fmtClock(at)
+  }
+})
+
+/** 倍速切换：国标 Scale，设备侧变速推流。 */
+async function onRateChange(rate) {
+  playRate.value = rate
+  await control('scale', { scale: rate })
+}
 
 /**
  * 回放会话键。
@@ -1409,22 +1284,8 @@ const playPosition = computed(() => player.position.value)
  */
 const playbackKey = computed(() => `${serial.value}/${code.value}_playback`)
 
-/**
- * 回放弹窗标题。
- *
- * <p>不能拼 {@code filePath}：大量设备（LiveGBS、多数国产摄像机）根本不填
- * FilePath，标题会变成「录像回放 · —」这种没有信息量的东西。
- * 时间段才是用户真正用来确认「我点的是哪一段」的依据。
- */
-const playTitle = computed(() => {
-  const r = current.value
-  if (!r) return '录像回放'
-  if (r.startTime && r.endTime) {
-    return `录像回放 ${r.startTime.replace('T', ' ')} ~ `
-      + `${String(r.endTime).slice(11).replace('T', ' ')}`
-  }
-  return r.filePath ? `录像回放 · ${shortName(r.filePath)}` : '录像回放'
-})
+
+
 
 /**
  * 当前播放画面对应的墙钟时间。
@@ -1452,36 +1313,31 @@ function segmentLengthOf(row) {
   return Number.isFinite(diff) && diff > 0 ? diff : 0
 }
 
-/** * 关闭回放弹窗。
+/**
+ * 释放当前回放会话（停播放器 + 通知设备停流）。
  *
- * <p><b>必须显式把 {@code playDialog} 置 false</b>。早先这里只做了
- * 「停播放器 + 停设备回放 + 清 current」，底部那个「关闭」按钮就变成了
- * 一句空指令 —— 点了既不关窗也不断流，看起来像按钮坏了。
- * （右上角 × 走的是 el-dialog 内部的 {@code update:modelValue false}，
- * 跟这个函数无关，所以那边一直正常。）
+ * <p>界面上已经没有「停止回放」按钮了（对齐 CMS，它的页面只有
+ * 标题/工具栏/播放器/时间轴）。这个方法现在<b>只在离开页面时</b>调用，
+ * 见 {@code onUnmounted}。
  *
- * <p>清 {@code current} 放到 {@link onPlayClosed}：这里清掉的话，
- * 标题（依赖 current.filePath）会在关闭动画还没跑完时先变成空串，闪一下。
+ * <p>为什么离开页面必须主动停：不停的话设备会继续按回放通道推流，
+ * 平台侧会话要等空闲巡检（45 秒）才回收 —— 用户看到的就是
+ * 「页面都关了，设备还在被拉流」，白占上行带宽。
+ *
+ * <p>正在下载时<b>不要</b>主动停流：下载与回放共用同一路回放流（同一个会话键），
+ * 停掉它等于把正在录制的源掐了，用户拿到的 MP4 会是半截。
+ * 与后端一致：{@code playback/stop} 在下载中也会返回 ok=false 并跳过停流，
+ * 真正的保护在服务端。
  */
-function closePlay() {
-  playDialog.value = false
-  // 立即停播并通知设备停止回放：别等 300ms 的关闭动画
+function releasePlayback() {
   player.stop()
-  /*
-   * 正在下载时不要主动停流：下载与回放共用同一路回放流（同一个会话键），
-   * 停掉它等于把正在录制的源掐了，用户拿到的 MP4 会是半截。
-   * 与后端一致：{@code playback/stop} 在下载中也会返回 ok=false 并跳过停流，
-   * 这里少发一次请求只是省一个无用调用；真正的保护在服务端。
-   */
-  if (current.value && !downloads.runningCount) {
-    playbackApi.stop({ serial: serial.value, code: code.value }).catch(() => {})
-  }
-}
-
-/** 弹窗完全关闭（动画结束、DOM 销毁后）再清数据。 */
-function onPlayClosed() {
+  const had = !!current.value
   current.value = null
   segmentSeconds.value = 0
+  positionOffset.value = 0
+  if (had && !downloads.runningCount) {
+    playbackApi.stop({ serial: serial.value, code: code.value }).catch(() => {})
+  }
 }
 
 function shortName(path) {
@@ -1519,13 +1375,13 @@ function sleep(ms) {
 
 onMounted(async () => {
   /*
-   * 拖拽的收尾必须挂在 window 上。
+   * 时间脉冲：游标在「未播放」状态下显示的是当前时刻，要自己往前走。
    *
-   * <p>挂在轨道上只能覆盖「在轨道内松手」，而用户拖到边缘时经常是在
-   * 轨道外松手的 —— 那时收不到 mouseup，drag.active 会一直为 true，
-   * 之后不按键只移动鼠标也会继续改选区。见 {@link onDragEnd}。
+   * <p>30 秒一次足够：游标位置按分钟算，1 分钟 = 1px，
+   * 更密的刷新用户看不出差别，只是白费 CPU。播放中游标跟的是
+   * {@code playhead}（由播放器 timeupdate 驱动），与本定时器无关。
    */
-  window.addEventListener('mouseup', onDragEnd)
+  nowTimer = setInterval(() => { nowTick.value = Date.now() }, 30_000)
   await loadChannels()
   // 从通道列表点「设备录像」跳进来时预填设备/通道
   const serial = String(route.query.serial || '').trim()
@@ -1541,329 +1397,375 @@ onMounted(async () => {
      * 必须先手动点一次「检索」才看得到内容 —— 而他跳进来的目的
      * 往往就是直接找某一段。
      */
-    search().then(() => refreshRecState())
+    search()
   }
 })
 onUnmounted(() => {
-  window.removeEventListener('mouseup', onDragEnd)
-  player.stop()
+  if (nowTimer) clearInterval(nowTimer)
+  nowTimer = null
+  /*
+   * 离开页面必须释放设备侧的会话。
+   *
+   * <p>界面上没有「停止回放」按钮了（对齐 CMS），所以这是唯一的释放入口 ——
+   * 只调 {@code player.stop()} 会断掉浏览器与 ZLM 之间的拉流，但设备仍在
+   * 按回放通道推流，平台侧会话要等 45 秒空闲巡检才回收。
+   */
+  releasePlayback()
 })
 </script>
 
 <style scoped>
-/* ==================== 时间轴 ==================== */
+/* ============================================================
+   CMS（LiveGBS）风格：设备录像时间轴页
+   ------------------------------------------------------------
+   颜色与尺寸取自 CMS 实际渲染值：
+     卡片      #fff，圆角 3px，阴影 0 1px 1px rgba(0,0,0,.1)，内边距 10px
+     主按钮    bg #556677 / border #404d59 / 白字
+     次按钮    bg #f4f4f4 / border #ddd   / 字 #444
+     按钮尺寸  高 29px、字号 12px、圆角 3px（Bootstrap btn-sm）
+     时间轴    外框 #ccc、高 50px；刻度块 #404d59、5×8px；小时格 60×25px、边线 #999
+     游标      2px 红竖线 + 白底红框标签
+   ============================================================ */
 
-.timeline {
-  padding: var(--sp-2) 0 var(--sp-1);
+/* 卡片：对齐 CMS 的 .box */
+.pb-card {
+  background: #fff;
+  border-radius: 3px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
-/* 日期导航按钮组与日期框贴紧，视为一个整体控件 */
-.day-nav :deep(.el-button) {
-  padding-left: 8px;
-  padding-right: 8px;
+/* 标题：CMS 是 h4，18px / 500 / 居中 / 上下 10px */
+.pb-title {
+  margin: 10px 0;
+  font-size: 18px;
+  font-weight: 500;
+  text-align: center;
+  color: #333;
+  line-height: 1.1;
 }
 
-/* 视角切换靠右：用 margin-left:auto 而不是塞一个 flex:1 的占位 span，
-   占位 span 会把剩余宽度全吃掉，后面的控件只能换行 */
-.view-switch {
-  margin-left: auto;
+.pb-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
-/* 列表页脚：左侧数量、右侧下载倍速 */
-.list-footer {
+/* ==================== 工具栏 ==================== */
+
+.pb-toolbar {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  justify-content: space-between;
+  gap: 8px;
+  /*
+   * 能放下就保持一行（对齐 CMS），放不下才换行。
+   * 去掉 wrap 会在窄屏把按钮挤出可见区域，比换行更糟。
+   */
+  flex-wrap: wrap;
+  margin-bottom: 15px;
 }
 
-.lf-spacer {
-  flex: 1;
+.pb-tools-left,
+.pb-tools-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-wrap: wrap;
 }
 
-.lf-label {
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+/* CMS 用 8px 的空 span 当间隔，这里同样处理 */
+.cms-gap {
+  display: inline-block;
+  width: 8px;
 }
 
-/*
- * 刻度条。
- *
- * 每个刻度绝对定位在 {@code (i / 12) * 100%} 处再自左平移自身宽度的一半，
- * 让文字中心严格压在网格线上。首尾两个例外：00:00 左对齐、24:00 右对齐，
- * 否则文字会溢出到轨道外面（0% 处居中的话有一半在轨道左侧）。
- *
- * 之前用 flex + space-between 看着也行，但文字宽度不参与定位，
- * 首位标签实际落在「内边距 + 半个文字宽」的位置，在 1440px 宽的轨道上
- * 相当于偏了十几分钟，把时间轴当刻度尺用时会误判。
- */
-.timeline-scale {
-  position: relative;
-  height: 18px;
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
-  user-select: none;
-}
-
-.timeline-scale span {
-  position: absolute;
-  top: 0;
-  transform: translateX(-50%);
-  white-space: nowrap;
-}
-
-.timeline-scale span.first {
-  transform: none;
-}
-
-.timeline-scale span.last {
-  transform: translateX(-100%);
+.cms-ico {
+  font-size: 15px;
+  line-height: 1;
+  margin-right: 2px;
 }
 
 /*
- * 轨道本体。
+ * CMS 的 .btn：29px 高、12px 字、3px 圆角。
  *
- * 高度 54px 是个折中：太薄（<30px）色块上点不准、悬浮提示也不好触发；
- * 太厚会把这页的主角（下面的播放器/列表）挤下去。
- * cursor: pointer 表示「整条轨道可点」，点空白处会提示无录像，
- * 不会让人以为点了没反应。
+ * <p>不用 el-button —— element-plus 的 small 是 24px、default 是 32px，
+ * 和日期框、下拉并排都会差几像素，工具栏看起来就参差不齐。
  */
-.timeline-track {
-  position: relative;
-  height: 54px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm, 6px);
-  background:
-    repeating-linear-gradient(
-      to right,
-      var(--fill-color, rgba(128, 128, 128, 0.06)) 0,
-      var(--fill-color, rgba(128, 128, 128, 0.06)) 1px,
-      transparent 1px,
-      transparent calc(100% / 12)
-    );
-  overflow: hidden;
+.cms-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 29px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 3px;
+  border: 1px solid #ddd;
+  background: #f4f4f4;
+  color: #444;
   cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s, border-color 0.12s;
 }
 
-/* 录像色块：垂直居中一条，上下留白让「稀疏」和「密集」都看得清 */
-.timeline-seg {
+.cms-btn:hover:not(:disabled) {
+  background: #e6e6e6;
+  border-color: #adadad;
+}
+
+.cms-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cms-btn-primary {
+  background: #556677;
+  border-color: #404d59;
+  color: #fff;
+}
+
+.cms-btn-primary:hover:not(:disabled) {
+  background: #46545f;
+  border-color: #333c45;
+}
+
+/* 方形的翻页按钮：宽度收到最小，只放一个箭头 */
+.cms-btn-sq {
+  width: 26px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.pb-daynav {
+  display: inline-flex;
+}
+
+.pb-daynav .cms-btn:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.pb-daynav .cms-btn:last-child {
+  border-radius: 0 3px 3px 0;
+  border-left: 0;
+}
+
+/* ==================== 下拉与日期框（压到 29px 高） ==================== */
+
+.pb-sel {
+  width: 150px;
+}
+
+.pb-sel-channel {
+  width: 200px;
+}
+
+.pb-sel-rate {
+  width: 96px;
+}
+
+/*
+ * 日期选择器。
+ *
+ * <p>宽度用模板上的 {@code style="width:150px"} 设定，不在这里写：
+ * Element Plus 的 {@code .el-date-editor.el-input} 是<b>双类</b>选择器
+ * （{@code width: var(--el-date-editor-width)}），scoped 下的单类规则压不过它，
+ * 实测写 {@code width:150px} 与 {@code --el-date-editor-width} 都无效、
+ * 渲染出来仍是 220px， toolbar 因此多占 70px 被迫换行。
+ */
+.pb-sel-date {
+  margin: 0 8px 0 0;
+}
+
+.pb-sel :deep(.el-select__wrapper),
+.pb-sel-date :deep(.el-input__wrapper) {
+  min-height: 29px;
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px #ddd inset;
+}
+
+.pb-sel :deep(.el-select__wrapper.is-focused),
+.pb-sel-date :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px #556677 inset;
+}
+
+.pb-sel :deep(.el-select__selected-item),
+.pb-sel-date :deep(.el-input__inner) {
+  font-size: 12px;
+  color: #444;
+}
+
+/* ==================== 播放区 ==================== */
+
+/*
+ * 700×394 是 CMS 的实测尺寸（16:9）。用 max-width 而不是写死宽度：
+ * 窗口更窄时按比例收缩，宽屏时也不无限撑大 —— 录像回放不需要铺满整屏，
+ * 太大的画面反而让时间轴被挤出视野。
+ */
+.pb-player {
+  position: relative;
+  width: 100%;
+  max-width: 700px;
+  aspect-ratio: 16 / 9;
+  margin: 0 auto 15px;
+  background: #000;
+  /* 窄屏时高度按宽度收缩，避免 aspect-ratio 把页面撑出滚动条 */
+  max-height: 394px;
+}
+
+.pb-video {
   position: absolute;
-  top: 12px;
-  bottom: 12px;
-  min-width: 2px;
-  border-radius: 2px;
-  background: var(--accent, #3b82f6);
-  opacity: 0.85;
-  transition: opacity 0.12s, transform 0.12s;
+  inset: 0;
 }
 
-.timeline-seg:hover {
-  opacity: 1;
-  transform: scaleY(1.25);
+/*
+ * 精简回放控制栏。
+ *
+ * <p>LivePlayer 用的是 video.js 默认控制栏，默认会把这些按钮全摆上：
+ * 直播标识、Seek to live、章节、字幕、音轨、画中画。它们对<b>录像回放</b>
+ * 全都不适用 —— 回放不是直播（没有「回到直播」这回事）、设备录像也没有
+ * 章节和字幕轨。留着只会让控制栏拥挤，还容易让用户以为「点了能回到实时画面」。
+ *
+ * <p>最终保留：播放/暂停、音量、拉伸（STD）、截图、全屏 —— 与 CMS 一致。
+ * <b>没有进度条</b>：进度条由引擎层统一隐藏（{@code .lp-no-seek}，
+ * 见 {@code LivePlayerEngine#ensureFillStyle} 的说明），这里不再重复声明。
+ *
+ * <p>用 {@code :deep} 是因为控制栏是 LivePlayer 在运行时注入的 DOM，
+ * 没有本组件的 scopeId，普通 scoped 选择器选不中。
+ */
+.pb-player :deep(.vjs-live-control),
+.pb-player :deep(.vjs-seek-to-live-control),
+.pb-player :deep(.vjs-chapters-button),
+.pb-player :deep(.vjs-descriptions-button),
+.pb-player :deep(.vjs-subs-caps-button),
+.pb-player :deep(.vjs-audio-button),
+.pb-player :deep(.vjs-picture-in-picture-control) {
+  display: none !important;
 }
 
-/* 按录像类型区分颜色：定时录像是常态（主色），报警/手动是重点（暖色） */
-.timeline-seg.seg-alarm {
-  background: var(--danger, #ef4444);
-}
-
-.timeline-seg.seg-manual {
-  background: var(--warning, #f59e0b);
-}
-
-
-.timeline-empty {
+/* 无流时的占位：CMS 在白字居中显示 No Video */
+.pb-no-video {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: #fff;
+  font-size: 14px;
   pointer-events: none;
 }
+
+/* ==================== 时间轴（1:1 对齐 CMS） ==================== */
 
 /*
- * 悬停提示。
- *
- * 定位在轨道上方（bottom:100%），不遮住色块 —— 提示里会显示所在段的
- * 起止时间，恰好是用户想拿它去对照的东西，挡住比不显示更糟。
- * pointer-events:none 避免提示本身吃 mousemove 导致抖动。
+ * 外框。注意 max-width:1440px 与内层固定 1440px 的组合 ——
+ * 这是 CMS 的原样行为：窄窗口时右侧被 overflow:hidden 裁掉。
  */
-.timeline-tip {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  transform: translateX(-50%);
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 7px;
-  border-radius: 4px;
-  background: var(--bg-elevated, #1f2937);
-  color: #fff;
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  pointer-events: none;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-}
-
-/* 命中录像段时左侧加一条与色块同色的竖线，视线不用二次确认 */
-.timeline-tip.tip-hit::before {
-  content: '';
-  width: 3px;
-  align-self: stretch;
-  border-radius: 1px;
-  background: var(--accent, #3b82f6);
-}
-
-.tip-clock {
-  font-weight: 600;
-}
-
-.tip-seg {
-  opacity: 0.8;
-}
-
-/* 录像状态标签：可点击重查，要给出手型光标 */
-.rec-tag.clickable {
+.time-rule {
+  position: relative;
+  overflow: hidden;
+  height: 50px;
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  font-size: 12px;
+  background-color: #ccc;
   cursor: pointer;
-}
-
-.rec-tag.clickable:hover {
-  opacity: 0.8;
-}
-
-/*
- * 框选区。
- *
- * 用半透明色块盖在录像色块上（不在下面，否则会被色块盖住看不见），
- * overflow 不裁切，让两端的小手柄能突出去一点，明确「可再拖」。
- */
-.timeline-sel {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: rgba(59, 130, 246, 0.24);
-  border-left: 2px solid var(--accent, #3b82f6);
-  border-right: 2px solid var(--accent, #3b82f6);
-  pointer-events: none;
-  z-index: 2;
-}
-
-/* 时长标签：贴选区顶部中间，太窄时允许溢出（比看不到好） */
-.sel-label {
-  position: absolute;
-  top: 2px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--accent, #3b82f6);
-  color: #fff;
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
-}
-
-/* 拖拽中：整条轨道用十字光标，暗示「这里可以拖」 */
-.timeline-track.is-dragging,
-.timeline-track:active {
-  cursor: crosshair;
-}
-
-/* 框选后的操作条 */
-.tl-selbar {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: var(--sp-2);
-  padding: 6px 10px;
-  border: 1px solid var(--accent, #3b82f6);
-  border-radius: var(--radius-sm, 6px);
-  background: rgba(59, 130, 246, 0.06);
-  font-size: var(--fs-sm);
-}
-
-.selbar-icon {
-  color: var(--accent, #3b82f6);
-}
-
-.selbar-range {
-  font-variant-numeric: tabular-nums;
-}
-
-.selbar-dur {
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-}
-
-.tl-draghint {
-  margin: var(--sp-2) 0 0;
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-}
-
-/* 图例 + 汇总：一行放完，汇总靠右 */
-.timeline-foot {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding-top: var(--sp-2);
-  font-size: var(--fs-xs);
-  color: var(--text-tertiary);
-}
-
-.tl-spacer {
-  flex: 1;
-}
-
-.tl-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
   user-select: none;
 }
 
-.tl-dot {
-  display: inline-block;
-  width: 10px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--accent, #3b82f6);
-}
-
-.tl-dot.seg-alarm {
-  background: var(--danger, #ef4444);
-}
-
-.tl-dot.seg-manual {
-  background: var(--warning, #f59e0b);
-}
-
-.tl-sum {
-  font-variant-numeric: tabular-nums;
-}
-
-.play-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 16px;
-  flex-wrap: wrap;
-}
-
-.play-bar .spacer {
-  flex: 1;
+/* 内层轨道：一天 1440 分钟 → 1440px */
+.time-day {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1440px;
+  height: 100%;
 }
 
 /*
- * 后台下载提示。下载进度已改到顶栏的「下载任务」面板（全局、跨页面），
- * 本页只在表格底部提一句「有几个任务在跑」，避免用户以为点了没反应。
+ * 分钟刻度块：288 个 × 5px（= 5 分钟），float 排成一行。
+ * 有录像的点亮成深色，无录像的透出外框的 #ccc。
  */
-.dl-hint {
-  margin-left: 6px;
-  color: var(--accent-ink, #2563eb);
+.time-minute {
+  float: left;
+  width: 5px;
+  height: 8px;
+  margin: 0;
+  cursor: default;
 }
+
+.time-minute.active {
+  background-color: #404d59;
+  cursor: pointer;
+}
+
+/*
+ * 小时格：24 个 × 60px（= 1 小时），高 25px。
+ * 左/上各一条 #999 细线 —— 这就是 CMS 的网格线，不是装饰。
+ */
+.time-text-first,
+.time-text {
+  float: left;
+  width: 60px;
+  height: 25px;
+  line-height: 25px;
+  text-align: center;
+  border-left: 1px solid #999;
+  border-top: 1px solid #999;
+  color: #333;
+  user-select: none;
+}
+
+.time-text-first {
+  border-left: 0;
+}
+
+/* 红色游标：2px 竖线，高 30px，与 CMS 一致 */
+.time-cursor {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 30px;
+  background-color: red;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* 游标标签：白底红框，挂在竖线下方，水平居中（left:-30px 让 60px 宽的框居中） */
+.time-cursor-text {
+  position: absolute;
+  top: 30px;
+  left: -30px;
+  width: 60px;
+  height: 15px;
+  padding: 0 5px;
+  line-height: 15px;
+  border: 1px solid red;
+  background-color: #fff;
+  color: #333;
+  white-space: nowrap;
+}
+
+/* 空轨道提示：CMS 没有，但完全空白会让人以为检索失败 */
+.time-empty {
+  position: absolute;
+  inset: 33px 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+  pointer-events: none;
+}
+
+/* ==================== 列表视角 ==================== */
+
+.empty-cell {
+  padding: 24px 0;
+  color: var(--text-tertiary); }
 </style>

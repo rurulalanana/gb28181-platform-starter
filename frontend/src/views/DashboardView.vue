@@ -130,6 +130,40 @@ let timer = null
 let ro = null
 const charts = {}
 
+/**
+ * 组件是否已卸载。
+ *
+ * <p>用途见 {@link load}：{@code await} 期间用户可能切走页面，
+ * 此时图表已全部 dispose，后续任何 {@code setOption}/{@code resize}
+ * 都会在 ECharts 内部拿 null canvas 并抛
+ * {@code Cannot read properties of null (reading 'tagName')}。
+ *
+ * <p>{@link disposeCharts} 也会清空 {@code charts}，两者互为双保险：
+ * 标志位挡住异步回调，清空对象挡住同步遍历。
+ */
+let unmounted = false
+
+/**
+ * 销毁全部图表并清空句柄。
+ *
+ * <p><b>必须清空 {@code charts}</b>：只 dispose 不删除引用的话，
+ * 对象里留着一堆已销毁的实例，任何后续遍历（{@link onResize} 的
+ * {@code c.resize()}、重复卸载）都会再次踩到它们。
+ * 而 {@code charts} 是 setup 作用域内的对象，同一组件重新挂载时
+ * 若沿用旧引用，新图表会被写进已被污染的对象。
+ */
+function disposeCharts() {
+  for (const k of Object.keys(charts)) {
+    const c = charts[k]
+    delete charts[k]
+    try {
+      c?.dispose()
+    } catch (e) {
+      // 已销毁的实例再 dispose 会抛，忽略即可
+    }
+  }
+}
+
 /* ---------------- 主题色（取自自家设计令牌） ---------------- */
 function cssVar(name, fallback) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -173,6 +207,19 @@ async function load(manual = false) {
       deviceApi.onlineStats().catch(() => null),
       metricsApi.get().catch(() => null)
     ])
+    /*
+     * 卸载后不能再碰图表。
+     *
+     * <p>两个 await 期间用户完全可能切走页面：此时 onUnmounted 已把所有
+     * 图表 dispose 掉，而这里继续往下走就会对已销毁的实例调 setOption。
+     * ECharts 内部会用 canvas 的 DOM 做尺寸计算，拿到 null 后抛
+     * {@code TypeError: Cannot read properties of null (reading 'tagName')}
+     * —— 报错堆栈指向 echarts，看起来与页面毫无关系，极难定位。
+     *
+     * <p>放在 await 之后判断（而不是函数开头）：请求已经发出去了，
+     * 让它自然完成即可，只是不再写状态。
+     */
+    if (unmounted) return
     if (s) stats.value = s
     if (m) metrics.value = m
     applyHistory(m?.history)
@@ -201,6 +248,13 @@ function applyHistory(h) {
 
 /* ---------------- 图表 ---------------- */
 function initCharts() {
+  /*
+   * 重复初始化会泄漏：echarts.init 在同一个 DOM 上再调一次会新建实例，
+   * 旧实例的 canvas 与事件监听都不会被回收。组件被 keep-alive 缓存后
+   * 反复激活/停用，或在同一挂载周期里被调用两次，就会堆出多份实例，
+   * 卸载时只 dispose 最后一份。
+   */
+  if (Object.keys(charts).length) return
   const ink = cssVar('--ink-400', '#909399')
   const line = cssVar('--line', '#e5e7eb')
   const axisCommon = {
@@ -297,6 +351,8 @@ function lineOption(grid, axisCommon, unit, max, color) {
 
 /** 用最新数据刷新各图表。 */
 function updateCharts() {
+  // 卸载后一律不碰：图表已 dispose，setOption 会在 ECharts 内部炸
+  if (unmounted) return
   const m = metrics.value
   if (charts.load) {
     charts.load.setOption({
@@ -329,10 +385,17 @@ function toggleFullscreen() {
 }
 
 function onResize() {
+  /*
+   * ResizeObserver 的回调被 rAF 包过一层，意味着它总比 disconnect() 晚一拍：
+   * 用户切走页面时，卸载流程已经跑完，这一帧的回调才被调度进来。
+   * 此时图表全已 dispose，resize() 同样会在 ECharts 内部踩到 null canvas。
+   */
+  if (unmounted) return
   for (const c of Object.values(charts)) c.resize()
 }
 
 onMounted(async () => {
+  unmounted = false
   await load()
   await nextTick()
   initCharts()
@@ -346,9 +409,21 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
+  /*
+   * 顺序很重要：先立标志位再清理。
+   *
+   * <p>标志位挡住「已在飞行中的异步回调」（{@link load} 的 await 之后、
+   * {@link onResize} 的 rAF），它们在本函数返回后仍会被调度执行；
+   * 先清 timer/observer 只能阻止「新」的回调产生。
+   */
+  unmounted = true
+  if (timer) {
+    clearInterval(timer)
+    timer = null
+  }
   ro?.disconnect()
-  for (const c of Object.values(charts)) c.dispose()
+  ro = null
+  disposeCharts()
 })
 </script>
 
