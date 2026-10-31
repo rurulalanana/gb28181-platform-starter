@@ -486,16 +486,16 @@ const stateType = usePlayerStateType(state)
 const hasPtz = computed(() => !!previewTarget.value && supportsPtz(previewTarget.value.ptzType))
 
 /**
- * 协议短名（只用于画面右上角那个胶囊）。
+ * 当前协议的显示名（控制栏按钮上那一段文字）。
  *
- * <p>不放到 {@code resolvePlayUrls} 里：那是共享的协议定义，
- * 里面刻意只用完整名（下拉要看清）；而胶囊只有 24px 高，
- * “WebSocket-FLV” 这种长名会把角标撑得很宽 —— 它纯属本页的展示细节。
+ * <p>直接取 {@code LIVE_PROTOCOLS} 的 label，不再本地另存一份映射：
+ * 两份名字一旦不同步，就会出现「下拉里写 WS-FLV、按钮上写 FLV」的错位。
+ * {@code LIVE_PROTOCOLS} 里的名字本来就按「短到能塞进按钮」设计。
  */
-const PROTO_PILL = { webrtc: 'WebRTC', wsflv: 'FLV', httpflv: 'HTTP-FLV', hls: 'HLS' }
-
-/** 当前协议的短名。 */
-const protoShort = computed(() => PROTO_PILL[proto.value] || proto.value)
+const protoShort = computed(() => {
+  const hit = LIVE_PROTOCOLS.find((o) => o.value === proto.value)
+  return hit ? hit.label : proto.value
+})
 
 const renameDialog = ref(false)
 const renameTarget = ref(null)

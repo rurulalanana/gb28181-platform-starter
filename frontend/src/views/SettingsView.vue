@@ -112,7 +112,12 @@
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">媒体服务</span>
-            <el-tag size="small" effect="plain" type="success">WebSocket-FLV（默认）</el-tag>
+            <!--
+              标注浏览器默认走哪条通路。原来写的是「WebSocket-FLV（默认）」，
+              但默认协议早已改为 WebRTC（见 resolvePlayUrls 的 LIVE_DEFAULT_PROTOCOL），
+              这里一并改正 —— 否则排障时会照着这条去查 FLV 端口。
+            -->
+            <el-tag size="small" effect="plain" type="success">默认 WebRTC</el-tag>
           </div>
           <div class="info-list info-list--pairs">
             <div v-for="row in mediaRows" :key="row.label" class="info-row">

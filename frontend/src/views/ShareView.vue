@@ -24,7 +24,7 @@
 
       <div v-if="!error" class="share-foot">
         <el-radio-group v-model="proto" size="small" @change="switchProto">
-          <el-radio-button value="wsflv">WebSocket-FLV</el-radio-button>
+          <el-radio-button value="wsflv">WS-FLV</el-radio-button>
           <el-radio-button value="webrtc">WebRTC</el-radio-button>
         </el-radio-group>
         <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>

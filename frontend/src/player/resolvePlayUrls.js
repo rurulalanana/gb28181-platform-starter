@@ -184,11 +184,18 @@ export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
  * 下拉项过长、挤在一起读不清，且这些特性会随设备编码变化（同一路流，
  * H.264 与 H.265 的表现就不同），写死在标签上反而会误导。
  * 各协议的实测特性以上面的注释为准。
+ *
+ * <p><b>两个 FLV 用短名</b>：{@code WS-FLV} 与 {@code FLV}。
+ * 原来写全称 {@code WebSocket-FLV} 时是 13 个字符，在下拉里比
+ * {@code WebRTC} 宽一倍，一列排下来像没对齐；
+ * 而 {@code HTTP-FLV} 直接去掉 "HTTP-" 叫 {@code FLV} ——
+ * 浏览器场景下 HTTP-FLV 才是默认认知（ws-flv 是它的 WebSocket 变体），
+ * 所以短名留给它、长一点的那个加 {@code WS-} 前缀区分。
  */
 export const LIVE_PROTOCOLS = [
   { value: 'webrtc', label: 'WebRTC' },
-  { value: 'wsflv', label: 'WebSocket-FLV' },
-  { value: 'httpflv', label: 'HTTP-FLV' },
+  { value: 'wsflv', label: 'WS-FLV' },
+  { value: 'httpflv', label: 'FLV' },
   { value: 'hls', label: 'HLS' }
 ]
 
