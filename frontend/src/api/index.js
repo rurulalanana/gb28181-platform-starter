@@ -217,6 +217,21 @@ export const opLogApi = {
 }
 
 /**
+ * 菜单外观配置（`/api/v1/menu/*`）。
+ *
+ * <p>`config` 任何登录用户可读（渲染侧栏要用），写入需 `system:write`。
+ * 服务端只存覆盖值，默认值在前端 `router/routes.js`，读到后合并。
+ * 目录与菜单项在服务端是同一张表，用 `menu_type` 区分（D / M）。
+ */
+export const menuApi = {
+  config: () => get('/menu/config'),
+  /** 字段全部可选：不传 = 不覆盖（用默认值）。menu_type=D 时 title 必填。 */
+  save: (params) => post('/menu/save', params),
+  reset: (menuKey) => post('/menu/reset', { menu_key: menuKey }),
+  resetAll: () => post('/menu/resetall')
+}
+
+/**
  * 角色与权限点接口（`/api/v1/role/*`，需 user:read / user:write）。
  *
  * <p>权限点目录（{@code permissions}）来自后端常量，前端用它渲染勾选框 ——

@@ -95,6 +95,9 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
         m.put("/api/v1/cascade", new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_WRITE));
         m.put("/api/v1/user", new Rule(Permissions.USER_READ, Permissions.USER_WRITE));
         m.put("/api/v1/role", new Rule(Permissions.USER_READ, Permissions.USER_WRITE));
+        // 菜单外观：读对所有人开放（侧栏都要用，见 SELF_SERVICE_PATHS），
+        // 改写全站导航 -> system:write
+        m.put("/api/v1/menu", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/config", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/acl", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/tls", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
@@ -127,7 +130,10 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
             "/api/v1/user/setpassword",
             // 当前登录用户信息与平台概览：每个登录用户都要用
             "/api/v1/userinfo",
-            "/api/v1/getserverinfo"
+            "/api/v1/getserverinfo",
+            // 菜单外观配置：渲染侧栏要读，每个登录用户都要用；
+            // 里面只有「菜单叫什么名字」，不含任何业务数据。写接口不经此白名单
+            "/api/v1/menu/config"
     ));
 
     /**

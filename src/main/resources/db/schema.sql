@@ -537,6 +537,55 @@ WHERE NOT EXISTS (
 )
 ON CONFLICT DO NOTHING;
 
+-- -------------------- gb_menu --------------------
+-- 菜单外观配置：<b>目录与菜单项同表</b>，用 menu_type 区分、parent_key 自关联。
+--
+-- 参照若依 sys_menu 的形态（目录是表里的一行，而不是单独一张分组表）。
+-- 早先拆成 gb_menu + gb_menu_group 两张表是多余的：分组改名只用 UPDATE 一行，
+-- 不存在「改了一半」的风险，自增主键的方案也不会有「路由名与分组码争主键」的问题
+-- —— 这里用 menu_key 做业务主键，目录和菜单项的编码天然处于不同命名空间
+-- （目录 monitor/resource/…，菜单项 dashboard/devices/…）。
+--
+-- 与 sys_menu 的两点<b>刻意不同</b>：
+--   1. 不存 component 路径。菜单项与 `component: () => import(...)` 一一对应，
+--      属于构建产物；存成字符串下发就得改成 import.meta.glob 动态解析，
+--      失去构建期静态分析，且代码回滚后会出现「点了 404 的项」。
+--   2. 不存 perms。权限点是跨菜单的抽象（device:write 同时管 setname/remove/setinfo），
+--      不是「一个按钮一个权限点」；我们的权限点由 Java 常量 Permissions 定义、
+--      由 gb_role_permission 授权。菜单表只决定「怎么显示」，<b>永远不能放宽谁能看</b>。
+--
+-- 本表<b>只存覆盖值</b>：库里没有的行/列为 NULL 的列，都用前端 router/routes.js 的默认值。
+-- 因此无需任何种子数据。
+CREATE TABLE IF NOT EXISTS gb_menu (
+    -- 目录(D)：分组编码（g-monitor / g-resource / g-cloud / g-ops / g-system）
+    -- 菜单(M)：Vue 路由 name（dashboard / devices / ...），稳定标识，不用 path（会变）
+    --
+    -- 分组编码必须带 g- 前缀：它与路由 name 共用主键，而两者可能撞名
+    -- （"cloud" 既是云录像分组、又是云录像页的路由 name）。加前缀后两个
+    -- 命名空间错开，不需要复合主键。前缀不进界面，界面上只显示 title。
+    menu_key    VARCHAR(64) PRIMARY KEY,
+    -- 菜单项所属目录的 menu_key；NULL = 用代码里的默认分组
+    parent_key  VARCHAR(64),
+    -- D 目录 / M 菜单
+    menu_type   CHAR(1)     NOT NULL DEFAULT 'M',
+    title       VARCHAR(64),
+    icon        VARCHAR(64),
+    sort_order  INTEGER,
+    hidden      BOOLEAN,
+    update_time TIMESTAMP   DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gb_menu_parent ON gb_menu (parent_key);
+
+COMMENT ON TABLE  gb_menu IS '菜单外观覆盖：目录与菜单项同表（menu_type 区分），只存与代码默认值的差异';
+COMMENT ON COLUMN gb_menu.menu_key   IS '目录：分组编码；菜单：Vue 路由 name（稳定标识，与前端 appRoutes[].name 对应）';
+COMMENT ON COLUMN gb_menu.parent_key IS '菜单项所属目录的 menu_key，NULL 用代码默认分组';
+COMMENT ON COLUMN gb_menu.menu_type  IS 'D 目录 / M 菜单';
+COMMENT ON COLUMN gb_menu.title      IS '显示名，NULL 用代码默认';
+COMMENT ON COLUMN gb_menu.icon       IS '图标（Element Plus 组件名），NULL 用代码默认';
+COMMENT ON COLUMN gb_menu.sort_order IS '同级排序，NULL 用代码里的声明顺序';
+COMMENT ON COLUMN gb_menu.hidden     IS '是否在菜单中隐藏（不影响路由与权限）';
+
 -- -------------------- sa_token_store --------------------
 -- Sa-Token 会话存储（登录 token 持久化）：由 SaTokenJdbcDao 读写，
 -- 服务重启后登录态不丢失。值为 JDK 序列化的对象（String / SaSession 等）。

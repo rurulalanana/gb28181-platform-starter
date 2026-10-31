@@ -19,7 +19,7 @@
           <div v-if="!collapsed" class="nav-group-label">{{ group.label }}</div>
           <router-link
             v-for="item in group.items"
-            :key="item.path"
+            :key="item.key"
             :to="item.path"
             class="nav-item"
             :class="{ 'is-active': route.path === item.path }"
@@ -155,12 +155,11 @@ syncViewport()
 /*
  * 菜单项不再写在这里。
  *
- * <p>菜单 = {@code router/routes.js} 里 {@code appRoutes} 的 meta（title / icon / group / perm），
- * 由 {@link buildMenu} 按当前账号权限过滤并分组。
- * 早先这里是又一份手写的 `allItems`，和路由表各存一份，加页面得改两处，
- * 且图标体系还不一致（一处 mdi 字符串、一处 Element Plus 组件名）。
+ * <p>菜单 = {@code router/routes.js} 里 {@code appRoutes} 的 meta（title / icon / group / perm）
+ * ⊕ 后端 {@code gb_menu} 的覆盖值（名称/图标/分组/排序/隐藏）。
+ * 由 {@link buildMenu} 合并后按当前账号权限过滤并分组。
  */
-const menuGroups = computed(() => buildMenu(auth))
+const menuGroups = computed(() => buildMenu(auth, auth.menuConfig))
 
 const online = computed(() => auth.serverInfo?.deviceOnline ?? 0)
 const total = computed(() => auth.serverInfo?.deviceTotal ?? 0)

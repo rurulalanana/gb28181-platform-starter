@@ -26,9 +26,48 @@
  *
  * <h3>隐藏页</h3>
  *
+ * <h3>隐藏页</h3>
+ *
  * <p>{@code hidden: true} 的路由（云端录像详情/列表/计划）不进菜单，
  * 但保留 {@code perm}，所以直输 URL 仍然受路由守卫管辖。
+ *
+ * <h3>可配置部分归谁管</h3>
+ *
+ * <p>标题、图标、分组、排序、显隐可以被数据库覆盖（{@code gb_menu} /
+ * {@code gb_menu_group}），运维在「菜单维护」页自己改，不用发版。
+ * 但<b>权限判断始终用代码里的 {@code perm}</b> —— 覆盖配置只能改「怎么显示」，
+ * 不能放宽「谁能看」，否则菜单维护就成了绕过 RBAC 的口子。
+ *
+ * <p>覆盖配置只存<b>差异</b>：库里多出来的未知 name 直接忽略，缺的项用默认值。
+ * 这样代码回滚到旧版本也不会出现「点了 404 的菜单项」。
  */
+
+/**
+ * 分组默认标题（{@code 编码 → 标题}）。库里 {@code gb_menu} 的 D 行可覆盖。
+ *
+ * <p><b>编码统一加 {@code g-} 前缀</b>：分组编码与菜单项的路由 name 共用
+ * {@code gb_menu.menu_key} 这个主键，而两者可能撞名 —— 最初用的 {@code cloud}
+ * 既是「录像」分组的编码、又是云端录像页的路由 name，同一行无法同时表示
+ * 两种含义，改分组名会把菜单项一起覆盖掉。加前缀后两个命名空间彻底错开，
+ * 不需要复合主键，也不需要改表结构。
+ *
+ * <p>编码只用于存储关联，界面上一律显示标题，所以前缀不会暴露给使用者。
+ */
+export const DEFAULT_GROUP_TITLES = {
+  'g-monitor': '监控',
+  'g-resource': '资源',
+  'g-cloud': '录像',
+  'g-ops': '运维',
+  'g-system': '系统'
+}
+
+/** 可选的图标名（Element Plus 图标组件名，{@code main.js} 已全局注册）。 */
+export const ICON_OPTIONS = [
+  'Odometer', 'VideoCamera', 'Monitor', 'List', 'Film', 'Cloudy', 'Bell', 'Share',
+  'User', 'Key', 'Document', 'Setting', 'Cpu', 'DataLine', 'Folder', 'Files',
+  'Camera', 'Location', 'MapLocation', 'Lock', 'Menu', 'Grid', 'Histogram',
+  'Picture', 'Postcard', 'Ticket', 'TrendCharts', 'View', 'Warning'
+]
 
 /** 免登录的对外页面。 */
 export const publicRoutes = [
@@ -87,37 +126,37 @@ export const appRoutes = [
     path: 'dashboard',
     name: 'dashboard',
     component: () => import('@/views/DashboardView.vue'),
-    meta: { title: '总览', icon: 'Odometer', group: '监控', perm: 'device:read' }
+    meta: { title: '总览', icon: 'Odometer', group: 'g-monitor', perm: 'device:read' }
   },
   {
     path: 'live',
     name: 'live',
     component: () => import('@/views/LiveView.vue'),
-    meta: { title: '实时预览', icon: 'VideoCamera', group: '监控', perm: 'play:live' }
+    meta: { title: '实时预览', icon: 'VideoCamera', group: 'g-monitor', perm: 'play:live' }
   },
   {
     path: 'devices',
     name: 'devices',
     component: () => import('@/views/DeviceView.vue'),
-    meta: { title: '设备管理', icon: 'Monitor', group: '资源', perm: 'device:read' }
+    meta: { title: '设备管理', icon: 'Monitor', group: 'g-resource', perm: 'device:read' }
   },
   {
     path: 'channels',
     name: 'channels',
     component: () => import('@/views/ChannelView.vue'),
-    meta: { title: '通道管理', icon: 'List', group: '资源', perm: 'channel:read' }
+    meta: { title: '通道管理', icon: 'List', group: 'g-resource', perm: 'channel:read' }
   },
   {
     path: 'playback',
     name: 'playback',
     component: () => import('@/views/PlaybackView.vue'),
-    meta: { title: '设备录像', icon: 'Film', group: '录像', perm: 'play:record' }
+    meta: { title: '设备录像', icon: 'Film', group: 'g-cloud', perm: 'play:record' }
   },
   {
     path: 'cloud',
     name: 'cloud',
     component: () => import('@/views/CloudRecordChannelView.vue'),
-    meta: { title: '云端录像', icon: 'Cloudy', group: '录像', perm: 'cloud:read' }
+    meta: { title: '云端录像', icon: 'Cloudy', group: 'g-cloud', perm: 'cloud:read' }
   },
   {
     // 云端录像详情：某通道的时间轴视图（对齐 LiveGBS 的 timeview）
@@ -144,64 +183,189 @@ export const appRoutes = [
     path: 'alarms',
     name: 'alarms',
     component: () => import('@/views/AlarmView.vue'),
-    meta: { title: '报警管理', icon: 'Bell', group: '运维', perm: 'alarm:read' }
+    meta: { title: '报警管理', icon: 'Bell', group: 'g-ops', perm: 'alarm:read' }
   },
   {
     path: 'cascade',
     name: 'cascade',
     component: () => import('@/views/CascadeView.vue'),
-    meta: { title: '级联配置', icon: 'Share', group: '运维', perm: 'cascade:read' }
+    meta: { title: '级联配置', icon: 'Share', group: 'g-ops', perm: 'cascade:read' }
   },
   {
     path: 'users',
     name: 'users',
     component: () => import('@/views/UserView.vue'),
-    meta: { title: '用户管理', icon: 'User', group: '系统', perm: 'user:read' }
+    meta: { title: '用户管理', icon: 'User', group: 'g-system', perm: 'user:read' }
   },
   {
     path: 'roles',
     name: 'roles',
     component: () => import('@/views/RoleView.vue'),
-    meta: { title: '角色权限', icon: 'Key', group: '系统', perm: 'user:read' }
+    meta: { title: '角色权限', icon: 'Key', group: 'g-system', perm: 'user:read' }
+  },
+  {
+    path: 'menus',
+    name: 'menus',
+    component: () => import('@/views/MenuView.vue'),
+    // 菜单维护改的是全站导航，与系统配置同级；只改「怎么叫」，不涉及权限
+    meta: { title: '菜单维护', icon: 'Menu', group: 'g-system', perm: 'system:read' }
   },
   {
     path: 'oplogs',
     name: 'oplogs',
     component: () => import('@/views/OpLogView.vue'),
-    meta: { title: '操作日志', icon: 'Document', group: '系统', perm: 'oplog:read' }
+    meta: { title: '操作日志', icon: 'Document', group: 'g-system', perm: 'oplog:read' }
   },
   {
     path: 'settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),
-    meta: { title: '系统设置', icon: 'Setting', group: '系统', perm: 'system:read' }
+    meta: { title: '系统设置', icon: 'Setting', group: 'g-system', perm: 'system:read' }
   }
 ]
 
 /**
- * 生成侧栏菜单（已过滤权限，按 group 聚合）。
+ * 覆盖值索引：目录行（{@code menuType='D'}）与菜单行（{@code 'M'}）分开。
  *
- * <p>放在这里而不是组件里，是为了让「菜单有哪些项」这件事可以在别处复用
- * （例如无权限时的兜底跳转要按菜单顺序找第一个可进页面）。
+ * <p>后端只有一张 {@code gb_menu} 表，目录与菜单项混在同一个数组里，
+ * 所以这里按类型分拣一次。未知 key、未知类型一律忽略 ——
+ * 代码回滚后库里可能残留已删掉的菜单项，静默丢弃比报错安全。
+ */
+function indexOverrides(config) {
+  const dirs = new Map()
+  const menus = new Map()
+  ;(config?.items || []).forEach((o) => {
+    if (!o || !o.menuKey) return
+    const key = String(o.menuKey).toLowerCase()
+    if (o.menuType === 'D') {
+      dirs.set(key, o)
+    } else if (o.menuType === 'M' || !o.menuType) {
+      menus.set(key, o)
+    }
+  })
+  return { dirs, menus }
+}
+
+/** 菜单项（已合并覆盖值，但未过滤权限）—— 供「菜单维护」页展示。 */
+function resolveItems(config) {
+  const { menus } = indexOverrides(config)
+  const out = []
+  appRoutes.forEach((r, idx) => {
+    if (r.meta?.hidden) return
+    const ov = menus.get(r.name) || {}
+    out.push({
+      name: r.name,
+      path: '/' + r.path,
+      perm: r.meta.perm,
+      /** 默认值：页面上做占位符、也给「恢复默认」用。 */
+      defaultTitle: r.meta.title,
+      defaultIcon: r.meta.icon || 'Document',
+      defaultGroup: r.meta.group,
+      defaultSort: idx,
+      /** 生效值。 */
+      title: ov.title || r.meta.title,
+      icon: ov.icon || r.meta.icon || 'Document',
+      groupCode: ov.parentKey || r.meta.group,
+      sortOrder: ov.sortOrder == null ? idx : ov.sortOrder,
+      hidden: ov.hidden === true,
+      customized: !!(ov.title || ov.icon || ov.parentKey || ov.sortOrder != null || ov.hidden != null)
+    })
+  })
+  return out
+}
+
+/**
+ * 分组（已合并覆盖值）。
+ *
+ * <p>分组就是 {@code gb_menu} 里 {@code menu_type='D'} 的行 ——
+ * 与若依 {@code sys_menu} 的目录层同一个思路，不需要第二张表。
+ * 代码里没有的目录编码但库里有的，也认（允许现场自建分组）。
+ */
+function resolveGroups(config) {
+  const { dirs } = indexOverrides(config)
+  const defaults = new Map()
+  let order = 0
+  appRoutes.forEach((r) => {
+    const g = r.meta?.group
+    if (g && !defaults.has(g)) {
+      defaults.set(g, { code: g, title: DEFAULT_GROUP_TITLES[g] || g, defaultSort: order++ })
+    }
+  })
+  // 库里可能出现代码里没有的目录（用户自建分组），也要能显示
+  dirs.forEach((ov, code) => {
+    if (!defaults.has(code)) {
+      defaults.set(code, { code, title: ov.title || code, defaultSort: order++ })
+    }
+  })
+  return [...defaults.values()].map((g) => {
+    const ov = dirs.get(g.code) || {}
+    return {
+      code: g.code,
+      defaultTitle: g.title,
+      defaultSort: g.defaultSort,
+      title: ov.title || g.title,
+      sortOrder: ov.sortOrder == null ? g.defaultSort : ov.sortOrder,
+      customized: !!(ov.title || ov.sortOrder != null)
+    }
+  })
+}
+
+/**
+ * 「菜单维护」页的数据：全部菜单项 + 分组（含默认值与生效值）。
+ *
+ * @param {object} config 后端返回的覆盖配置 {@code {groups, items}}
+ */
+export function menuCatalog(config) {
+  const items = resolveItems(config)
+  const groups = resolveGroups(config).sort((a, b) => a.sortOrder - b.sortOrder)
+  return {
+    groups,
+    items,
+    /** 按分组挂好 children，直接喂给 el-table 的树形行。 */
+    tree: groups.map((g) => ({
+      ...g,
+      rowKey: 'g:' + g.code,
+      title: g.title,
+      isGroup: true,
+      children: items
+        .filter((i) => i.groupCode === g.code)
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((i) => ({ ...i, rowKey: 'i:' + i.name, isGroup: false }))
+    }))
+  }
+}
+
+/**
+ * 生成侧栏菜单（已合并覆盖值，并过滤权限）。
+ *
+ * <p>权限判断始终用代码里的 {@code perm}：覆盖配置只能改「怎么显示」，
+ * <b>不能放宽谁能看</b>。否则「菜单维护」就成了绕过 RBAC 的口子。
  *
  * @param {object} auth auth store（提供 {@code can(perm)}）
- * @returns {Array<{label: string, items: Array<{path: string, title: string, icon: string}>}>}
+ * @param {object} [config] 后端返回的覆盖配置 {@code {groups, items}}
+ * @returns {Array<{label: string, items: Array<{key: string, path: string, title: string, icon: string}>}>}
  */
-export function buildMenu(auth) {
-  const visible = appRoutes
-    .filter((r) => !r.meta?.hidden)
-    .filter((r) => auth.can(r.meta?.perm))
-    .map((r) => ({
-      path: '/' + r.path,
-      title: r.meta.title,
-      icon: r.meta.icon || 'Document',
-      group: r.meta.group || '其它'
-    }))
+export function buildMenu(auth, config) {
+  const items = resolveItems(config).filter((i) => !i.hidden && auth.can(i.perm))
+  const groupsById = new Map(resolveGroups(config).map((g) => [g.code, g]))
 
-  const groups = new Map()
-  visible.forEach((item) => {
-    if (!groups.has(item.group)) groups.set(item.group, [])
-    groups.get(item.group).push(item)
+  const buckets = new Map()
+  items.forEach((i) => {
+    if (!buckets.has(i.groupCode)) buckets.set(i.groupCode, [])
+    buckets.get(i.groupCode).push(i)
   })
-  return [...groups.entries()].map(([label, items]) => ({ label, items }))
+
+  const used = [...buckets.keys()].map((code) => {
+    const g = groupsById.get(code)
+    return { code, title: g ? g.title : code, order: g ? g.sortOrder : 9999 }
+  })
+  used.sort((a, b) => a.order - b.order)
+
+  return used.map((g) => ({
+    label: g.title,
+    items: buckets
+      .get(g.code)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((i) => ({ key: i.name, path: i.path, title: i.title, icon: i.icon }))
+  }))
 }

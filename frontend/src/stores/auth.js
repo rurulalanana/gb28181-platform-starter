@@ -1,14 +1,22 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { systemApi } from '@/api'
+import { menuApi, systemApi } from '@/api'
 
 /**
- * 登录态与当前用户。
+ * 登录态、当前用户与菜单外观配置。
  */
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('gb_token') || '')
   const user = ref(null)
   const serverInfo = ref(null)
+  /**
+   * 菜单外观覆盖配置（`{items}`）。
+   *
+   * <p>后端只有一张 `gb_menu` 表，目录与菜单项混在 `items` 里（用 `menuType` 区分）。
+   * 只含「改过的那几项」，默认值在前端 `router/routes.js`，
+   * 渲染时用 {@code buildMenu(auth, menuConfig)} 合并。
+   */
+  const menuConfig = ref({ items: [] })
 
   const loggedIn = computed(() => !!token.value)
 
@@ -21,12 +29,29 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function loadUser() {
-    try {
-      user.value = await systemApi.userinfo()
-    } catch (e) {
-      user.value = null
+    // 用户信息与菜单配置并行拉：两者都是渲染主界面必需的，串行会多一次往返
+    const [userResult, menuResult] = await Promise.allSettled([
+      systemApi.userinfo(),
+      menuApi.config()
+    ])
+    user.value = userResult.status === 'fulfilled' ? userResult.value : null
+    if (menuResult.status === 'fulfilled' && menuResult.value) {
+      menuConfig.value = menuResult.value
+    } else {
+      // 读不到就退回纯默认菜单：菜单丑一点好过整个侧栏空着
+      menuConfig.value = { items: [] }
     }
     return user.value
+  }
+
+  /** 重新拉菜单配置（在「菜单维护」页保存后调用，让侧栏立刻生效）。 */
+  async function loadMenuConfig() {
+    try {
+      menuConfig.value = (await menuApi.config()) || { items: [] }
+    } catch (e) {
+      // 保留旧配置，不要因为一次刷新失败就清空菜单
+    }
+    return menuConfig.value
   }
 
   async function loadServerInfo() {
@@ -42,6 +67,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     token.value = ''
     user.value = null
+    menuConfig.value = { items: [] }
     localStorage.removeItem('gb_token')
   }
 
@@ -107,7 +133,8 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     token, user, serverInfo, loggedIn, permissions: permissionSet,
-    login, logout, loadUser, loadServerInfo,
+    menuConfig,
+    login, logout, loadUser, loadMenuConfig, loadServerInfo,
     isAdmin, can, canAny, readonly
   }
 })
