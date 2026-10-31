@@ -2,6 +2,7 @@ package io.github.rurulalanana.starter.web;
 
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.service.OperationLogService;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.OpLogListVo;
@@ -58,8 +59,7 @@ public class OpLogController {
      */
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.OPLOG_CLEAR);
         int deleted = operationLogService.clear();
         log.info("操作日志已清空：{} 条（操作人 {}）", deleted, StpUtil.getLoginId());
         DeletedVo vo = new DeletedVo();

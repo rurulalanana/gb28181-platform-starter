@@ -473,6 +473,70 @@ CREATE TABLE IF NOT EXISTS gb_user (
     UNIQUE (username)
 );
 
+-- -------------------- gb_role / gb_role_permission --------------------
+-- 角色与权限点（RBAC）。权限点编码的权威定义在 Java 侧 Permissions.java，
+-- 这里只存「角色拥有哪些编码」，不做外键 —— 权限点随代码增删，
+-- 加了外键就得同步迁移表，而残留的已下线编码在读取时会被忽略（见 Permissions.expand）。
+--
+-- gb_user.role 存的是逗号分隔的角色编码，引用的就是 gb_role.code。
+-- 之所以没有 gb_user_role 关联表：现场一个人只会挂一两个角色，
+-- 逗号分隔已经够用，而加关联表要把 UserService / 登录 / 权限解析全改一遍，
+-- 收益远小于风险。
+CREATE TABLE IF NOT EXISTS gb_role (
+    code        VARCHAR(32)  PRIMARY KEY,
+    name        VARCHAR(64)  NOT NULL,
+    description VARCHAR(255),
+    -- 内置角色（admin/operator/user）：不可删除；admin 恒有全部权限且不可编辑，
+    -- 防止管理员把唯一的管理入口改没了导致再也进不来。
+    builtin     BOOLEAN      DEFAULT FALSE,
+    enable      BOOLEAN      DEFAULT TRUE,
+    create_time TIMESTAMP    DEFAULT NOW(),
+    update_time TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS gb_role_permission (
+    role_code       VARCHAR(32) NOT NULL,
+    permission_code VARCHAR(64) NOT NULL,
+    PRIMARY KEY (role_code, permission_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gb_role_permission_role ON gb_role_permission (role_code);
+
+-- 内置角色（幂等）。名称与描述这里给一份初始值，之后以库里的为准。
+INSERT INTO gb_role (code, name, description, builtin) VALUES
+    ('admin',    '管理员',   '全部权限，含用户、角色、系统配置与安全设置', TRUE),
+    ('operator', '操作员',   '日常运维：设备编辑、云台控制、录像与报警处理', TRUE),
+    ('user',     '只读用户', '只能查看与播放，不能执行任何修改',           TRUE)
+ON CONFLICT (code) DO NOTHING;
+
+-- 内置角色的默认权限点。
+--
+-- 只在「该角色当前一条权限都没有」时写入：管理员在页面上改过的授权
+-- 不能被每次重启的建库脚本冲掉。刻意不用简单的 ON CONFLICT DO NOTHING，
+-- 因为那会把管理员删掉的权限点又补回来。
+INSERT INTO gb_role_permission (role_code, permission_code)
+SELECT v.role_code, v.permission_code
+FROM (VALUES
+    ('admin', '*'),
+
+    ('operator', 'device:read'),  ('operator', 'device:write'),
+    ('operator', 'channel:read'), ('operator', 'channel:write'), ('operator', 'channel:ptz'),
+    ('operator', 'play:live'),    ('operator', 'play:record'),
+    ('operator', 'cloud:read'),   ('operator', 'cloud:write'),
+    ('operator', 'alarm:read'),   ('operator', 'alarm:write'),
+    ('operator', 'cascade:read'), ('operator', 'cascade:control'),
+    ('operator', 'system:read'),  ('operator', 'oplog:read'),
+
+    ('user', 'device:read'),  ('user', 'channel:read'),
+    ('user', 'play:live'),    ('user', 'play:record'),
+    ('user', 'cloud:read'),   ('user', 'alarm:read'),
+    ('user', 'cascade:read')
+) AS v(role_code, permission_code)
+WHERE NOT EXISTS (
+    SELECT 1 FROM gb_role_permission p WHERE p.role_code = v.role_code
+)
+ON CONFLICT DO NOTHING;
+
 -- -------------------- sa_token_store --------------------
 -- Sa-Token 会话存储（登录 token 持久化）：由 SaTokenJdbcDao 读写，
 -- 服务重启后登录态不丢失。值为 JDK 序列化的对象（String / SaSession 等）。

@@ -26,7 +26,7 @@
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
       </el-button>
-      <el-button size="small" type="danger" plain @click="clearAll">
+      <el-button v-if="canDelete" size="small" type="danger" plain @click="clearAll">
         <el-icon><Delete /></el-icon> 清空报警
       </el-button>
     </div>
@@ -56,9 +56,10 @@
         </el-table-column>
         <el-table-column label="操作" width="80" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button link type="danger" @click="removeOne(row)">
+            <el-button v-if="canWrite" link type="danger" @click="removeOne(row)">
               <el-icon><Delete /></el-icon>
             </el-button>
+            <span v-else class="text-muted">—</span>
           </template>
         </el-table-column>
         <template #empty>
@@ -77,13 +78,21 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { alarmApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
+
+const auth = useAuthStore()
+
+/** 处理单条报警。 */
+const canWrite = computed(() => auth.can('alarm:write'))
+/** 清空全部报警：与单条删除分开，因为它不可恢复。 */
+const canDelete = computed(() => auth.can('alarm:delete'))
 
 const alarms = ref([])
 

@@ -7,7 +7,7 @@
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
       </el-button>
-      <el-button size="small" type="primary" @click="openEdit(null)">
+      <el-button size="small" type="primary" :disabled="!canWrite" @click="openEdit(null)">
         <el-icon><Plus /></el-icon> 新增用户
       </el-button>
     </div>
@@ -20,11 +20,20 @@
         <el-table-column label="昵称" width="132">
           <template #default="{ row }">{{ row.nickname || '—' }}</template>
         </el-table-column>
-        <el-table-column label="角色" width="110" align="center">
+        <el-table-column label="角色" width="150" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.role === 'admin' ? 'primary' : (row.role === 'operator' ? 'warning' : 'info')" size="small" effect="light">
-              {{ row.role === 'admin' ? '管理员' : (row.role === 'operator' ? '操作员' : '只读用户') }}
-            </el-tag>
+            <div class="role-tags">
+              <el-tag
+                v-for="r in splitRoles(row.role)"
+                :key="r"
+                :type="r === 'admin' ? 'primary' : (r === 'operator' ? 'warning' : 'info')"
+                size="small"
+                effect="light"
+              >
+                {{ roleName(r) }}
+              </el-tag>
+              <span v-if="!splitRoles(row.role).length" class="text-muted">—</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
@@ -48,18 +57,18 @@
           <template #default="{ row }">
             <div class="row-actions">
               <el-tooltip content="编辑">
-                <el-button @click="openEdit(row)"><el-icon><Edit /></el-icon></el-button>
+                <el-button :disabled="!canWrite" @click="openEdit(row)"><el-icon><Edit /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip content="重置密码">
-                <el-button @click="openReset(row)"><el-icon><Key /></el-icon></el-button>
+                <el-button :disabled="!canWrite" @click="openReset(row)"><el-icon><Key /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip :content="row.enable ? '停用' : '启用'">
-                <el-button @click="toggleEnable(row)"><el-icon><SwitchButton /></el-icon></el-button>
+                <el-button :disabled="!canWrite" @click="toggleEnable(row)"><el-icon><SwitchButton /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip content="删除">
                 <el-button
                   class="is-danger"
-                  :disabled="row.username === 'admin'"
+                  :disabled="!canWrite || row.username === 'admin'"
                   @click="removeOne(row)"
                 >
                   <el-icon><Delete /></el-icon>
@@ -94,13 +103,17 @@
           <el-input v-model="form.nickname" />
         </el-form-item>
         <el-form-item label="角色">
-          <el-select v-model="form.role">
-            <el-option label="管理员（含系统配置与用户管理）" value="admin" />
-            <el-option label="操作员（设备控制与日常运维）" value="operator" />
-            <el-option label="只读用户（只能查看与播放）" value="user" />
+          <el-select v-model="form.role" placeholder="选择角色">
+            <el-option
+              v-for="r in roleOptions"
+              :key="r.code"
+              :label="`${r.name}（${r.code}）`"
+              :value="r.code"
+              :disabled="r.enable === false"
+            />
           </el-select>
           <div class="role-hint">
-            只读用户不能执行任何修改操作；操作员可控制设备与录像，但不能改系统配置、管理用户或调整安全设置。
+            {{ roleHint }}
           </div>
         </el-form-item>
       </el-form>
@@ -122,19 +135,52 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
-import { userApi } from '@/api'
+import { roleApi, userApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
 
+const auth = useAuthStore()
+
 const users = ref([])
+const roles = ref([])
 const loading = ref(false)
 const saving = ref(false)
 
+const canWrite = computed(() => auth.can('user:write'))
+
+/** 可选角色（停用的不出现在下拉里，因为选了也不会生效）。 */
+const roleOptions = computed(() => roles.value.filter((r) => r.enable !== false))
+
+/** 角色编码 → 中文名，找不到时退回编码本身（自定义角色被删后的残留值）。 */
+const roleNameMap = computed(() => {
+  const map = new Map()
+  roles.value.forEach((r) => map.set(r.code, r.name))
+  return map
+})
+
+function roleName(code) {
+  return roleNameMap.value.get(code) || code
+}
+
+/** 用户表里存的是逗号分隔的角色编码。 */
+function splitRoles(raw) {
+  return String(raw || '').split(',').map((s) => s.trim()).filter(Boolean)
+}
+
 const editDialog = ref(false)
 const form = reactive({ id: null, username: '', password: '', nickname: '', role: 'user' })
+
+/** 表单里的角色提示：直接复用角色自己的说明，避免界面与配置脱节。 */
+const roleHint = computed(() => {
+  const r = roles.value.find((x) => x.code === form.role)
+  if (!r) return '从「角色权限」页可自定义每个角色能做什么。'
+  const count = r.superRole ? '全部' : `${r.permissions?.length || 0} 项`
+  return `${r.description || r.name}；拥有 ${count} 项权限。可在「角色权限」页调整。`
+})
 
 const resetDialog = ref(false)
 const resetTarget = ref(null)
@@ -145,6 +191,16 @@ const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
   load: () => load()
 })
 
+async function loadRoles() {
+  try {
+    const data = await roleApi.list()
+    roles.value = data?.roleList || []
+  } catch (e) {
+    // 拉不到角色时页面仍可浏览用户，只是新增/编辑里的下拉为空
+    roles.value = []
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -152,7 +208,7 @@ async function load() {
     users.value = data?.userList || []
     setTotal(data?.userCount ?? users.value.length)
   } catch (e) {
-    ElMessage.error(e.message || '加载用户失败（需管理员权限）')
+    ElMessage.error(e.message || '加载用户失败（需 user:read 权限）')
   } finally {
     loading.value = false
   }
@@ -235,7 +291,10 @@ async function removeOne(row) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadRoles()
+})
 </script>
 
 <style scoped>
@@ -261,6 +320,14 @@ onMounted(load)
   justify-content: center;
   gap: 2px;
   flex-wrap: nowrap;
+}
+
+/* 角色列：多角色时自动换行，避免撑破单元格 */
+.role-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
 }
 
 /* .card-header 由 styles/main.css 统一提供 */

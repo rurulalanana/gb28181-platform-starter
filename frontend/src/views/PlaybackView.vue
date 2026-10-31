@@ -53,6 +53,7 @@
             </el-select>
             <span class="cms-gap" />
             <button
+              v-if="canDownload"
               class="cms-btn"
               :disabled="!current"
               title="下载当前正在回放的这一段录像"
@@ -209,6 +210,7 @@
               <el-icon><VideoPlay /></el-icon> 回放
             </el-button>
             <el-button
+              v-if="canDownload"
               link
               type="primary"
               :loading="isDownloadingRow(row)"
@@ -274,9 +276,20 @@ import { deviceApi, playbackApi, systemApi } from '@/api'
 import { resolvePlayUrls } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { useDownloadStore } from '@/stores/download'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
+
+/**
+ * 能否下载录像。
+ *
+ * <p>后端对 {@code /playback/download/*} 要求 {@code cloud:write} ——
+ * 下载会让服务器拉流并写盘，不只是「看」。没权限时干脆不画按钮，
+ * 而不是让人点了才收到 403。
+ */
+const canDownload = computed(() => auth.can('cloud:write'))
 
 /**
  * 返回上一页。

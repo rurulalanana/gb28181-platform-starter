@@ -83,8 +83,8 @@
             <el-icon
               :size="18"
               :color="row.important ? '#e6a23c' : '#c0c4cc'"
-              class="star"
-              @click="toggleImportant(row)"
+              :class="canWrite ? 'star' : ''"
+              @click="canWrite && toggleImportant(row)"
             >
               <StarFilled v-if="row.important" />
               <Star v-else />
@@ -109,7 +109,7 @@
             >
               <el-icon><Download /></el-icon> 下载
             </el-button>
-            <el-button link type="danger" @click="removeOne(row)">
+            <el-button v-if="canDelete" link type="danger" @click="removeOne(row)">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
           </template>
@@ -179,6 +179,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { usePagination } from '@/composables/usePagination'
 import { useLivePlayer } from '@/composables/useLivePlayer'
@@ -199,6 +200,12 @@ import TablePager from '@/components/TablePager.vue'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
+
+/** 重要标记：可撤销，cloud:write 即可。 */
+const canWrite = computed(() => auth.can('cloud:write'))
+/** 删除录像：不可恢复，cloud:delete。 */
+const canDelete = computed(() => auth.can('cloud:delete'))
 
 const records = ref([])
 const monthFlags = ref('')

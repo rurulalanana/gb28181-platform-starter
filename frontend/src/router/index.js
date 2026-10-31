@@ -55,88 +55,94 @@ const routes = [
         path: 'dashboard',
         name: 'dashboard',
         component: () => import('@/views/DashboardView.vue'),
-        meta: { title: '总览', icon: 'mdi-view-dashboard' }
+        meta: { title: '总览', icon: 'mdi-view-dashboard', perm: 'device:read' }
       },
       {
         path: 'live',
         name: 'live',
         component: () => import('@/views/LiveView.vue'),
-        meta: { title: '实时预览', icon: 'mdi-video' }
+        meta: { title: '实时预览', icon: 'mdi-video', perm: 'play:live' }
       },
       {
         path: 'devices',
         name: 'devices',
         component: () => import('@/views/DeviceView.vue'),
-        meta: { title: '设备管理', icon: 'mdi-cctv' }
+        meta: { title: '设备管理', icon: 'mdi-cctv', perm: 'device:read' }
       },
       {
         path: 'channels',
         name: 'channels',
         component: () => import('@/views/ChannelView.vue'),
-        meta: { title: '通道管理', icon: 'mdi-view-list' }
+        meta: { title: '通道管理', icon: 'mdi-view-list', perm: 'channel:read' }
       },
       {
         path: 'playback',
         name: 'playback',
         component: () => import('@/views/PlaybackView.vue'),
-        meta: { title: '设备录像', icon: 'mdi-history' }
+        meta: { title: '设备录像', icon: 'mdi-history', perm: 'play:record' }
       },
       {
         path: 'cloud',
         name: 'cloud',
         component: () => import('@/views/CloudRecordChannelView.vue'),
-        meta: { title: '云端录像', icon: 'mdi-cloud' }
+        meta: { title: '云端录像', icon: 'mdi-cloud', perm: 'cloud:read' }
       },
       {
         // 云端录像详情：某通道的时间轴视图（对齐 LiveGBS 的 timeview）
         path: 'cloud/detail',
         name: 'cloud-detail',
         component: () => import('@/views/CloudRecordDetailView.vue'),
-        meta: { title: '云端录像详情', hidden: true }
+        meta: { title: '云端录像详情', hidden: true, perm: 'cloud:read' }
       },
       {
         // 云端录像列表视图：独立表格页（对齐 LiveGBS 的 listview）
         path: 'cloud/detail/list',
         name: 'cloud-detail-list',
         component: () => import('@/views/CloudRecordListView.vue'),
-        meta: { title: '云端录像列表', hidden: true }
+        meta: { title: '云端录像列表', hidden: true, perm: 'cloud:read' }
       },
       {
         // 录像计划：定义哪些通道在什么时段录云端录像（对齐 LiveGBS）
         path: 'cloud/plans',
         name: 'cloud-plans',
         component: () => import('@/views/CloudRecordPlanView.vue'),
-        meta: { title: '录像计划', hidden: true }
+        meta: { title: '录像计划', hidden: true, perm: 'cloud:read' }
       },
       {
         path: 'alarms',
         name: 'alarms',
         component: () => import('@/views/AlarmView.vue'),
-        meta: { title: '报警管理', icon: 'mdi-bell-alert' }
+        meta: { title: '报警管理', icon: 'mdi-bell-alert', perm: 'alarm:read' }
       },
       {
         path: 'cascade',
         name: 'cascade',
         component: () => import('@/views/CascadeView.vue'),
-        meta: { title: '级联配置', icon: 'mdi-sitemap' }
+        meta: { title: '级联配置', icon: 'mdi-sitemap', perm: 'cascade:read' }
       },
       {
         path: 'users',
         name: 'users',
         component: () => import('@/views/UserView.vue'),
-        meta: { title: '用户管理', icon: 'mdi-account-group', admin: true }
+        meta: { title: '用户管理', icon: 'mdi-account-group', perm: 'user:read' }
+      },
+      {
+        path: 'roles',
+        name: 'roles',
+        component: () => import('@/views/RoleView.vue'),
+        meta: { title: '角色权限', icon: 'mdi-shield-account', perm: 'user:read' }
       },
       {
         path: 'oplogs',
         name: 'oplogs',
         component: () => import('@/views/OpLogView.vue'),
-        meta: { title: '操作日志', icon: 'mdi-clipboard-text-clock' }
+        meta: { title: '操作日志', icon: 'mdi-clipboard-text-clock', perm: 'oplog:read' }
       },
       {
         path: 'settings',
         name: 'settings',
         component: () => import('@/views/SettingsView.vue'),
-        meta: { title: '系统设置', icon: 'mdi-cog' }
+        meta: { title: '系统设置', icon: 'mdi-cog', perm: 'system:read' }
       }
     ]
   },
@@ -148,15 +154,67 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const token = localStorage.getItem('gb_token')
   if (!to.meta.public && !token) {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
   if (to.path === '/login' && token) {
-    return { path: '/dashboard' }
+    return { path: fallbackPath(null) }
   }
-  return true
+  if (!to.meta.perm) {
+    return true
+  }
+
+  /*
+   * 动态 import 而不是顶层 import：
+   * eslint 之外还有个真实原因 —— api/http.js 顶层 import 了 router，
+   * 而 stores/auth.js 又依赖 api，三者一旦静态互相引用就是循环依赖，
+   * 在路由守卫里拿到的是 undefined（表现为「刷新后一直跳登录页」）。
+   * 守卫执行时路由模块已经求值完毕，此时再导入是安全的。
+   */
+  const { useAuthStore } = await import('@/stores/auth')
+  const auth = useAuthStore()
+  // 硬刷新后 user 还是空的，必须先拉一次 /userinfo，否则所有带 perm 的路由都会被误判为无权限
+  if (!auth.user) {
+    await auth.loadUser()
+  }
+  if (auth.can(to.meta.perm)) {
+    return true
+  }
+  const target = fallbackPath(auth)
+  return target === to.path ? false : { path: target }
 })
+
+/**
+ * 无权限时的兜底页。
+ *
+ * <p>不能一律回 /dashboard —— 一个只有「报警查看」权限的角色
+ * 在 /dashboard 上会被再次拒绝，然后又被踢回 /dashboard，形成循环。
+ * 所以按菜单顺序找第一个真正有权限的页面。
+ *
+ * @param {object|null} auth auth store（null 表示尚未加载，返回登录后的默认页）
+ */
+function fallbackPath(auth) {
+  const candidates = [
+    ['/dashboard', 'device:read'],
+    ['/live', 'play:live'],
+    ['/devices', 'device:read'],
+    ['/channels', 'channel:read'],
+    ['/playback', 'play:record'],
+    ['/cloud', 'cloud:read'],
+    ['/alarms', 'alarm:read'],
+    ['/cascade', 'cascade:read'],
+    ['/users', 'user:read'],
+    ['/oplogs', 'oplog:read'],
+    ['/settings', 'system:read']
+  ]
+  if (auth) {
+    for (const [path, perm] of candidates) {
+      if (auth.can(perm)) return path
+    }
+  }
+  return '/dashboard'
+}
 
 export default router

@@ -5,7 +5,7 @@
         <el-button size="small" @click="goBack">
           <el-icon><ArrowLeft /></el-icon> 返回
         </el-button>
-        <el-button size="small" type="primary" @click="openEdit(null)">
+        <el-button size="small" type="primary" :disabled="!canWrite" @click="openEdit(null)">
           <el-icon><Plus /></el-icon> 添加录像计划
         </el-button>
         <span class="filter-bar-spacer" />
@@ -53,13 +53,13 @@
         </el-table-column>
         <el-table-column label="操作" width="230" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row)">
+            <el-button link type="primary" :disabled="!canWrite" @click="openEdit(row)">
               <el-icon><Edit /></el-icon> 编辑
             </el-button>
             <el-button link type="primary" @click="openChannels(row)">
               <el-icon><Link /></el-icon> 关联通道
             </el-button>
-            <el-button link type="danger" @click="removePlan(row)">
+            <el-button link type="danger" :disabled="!canWrite" @click="removePlan(row)">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
           </template>
@@ -235,7 +235,7 @@
       </div>
       <template #footer>
         <el-button @click="chanDialog = false">取消</el-button>
-        <el-button type="primary" :loading="chanSaving" @click="saveChannels">确定</el-button>
+        <el-button type="primary" :loading="chanSaving" :disabled="!canWrite" @click="saveChannels">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -247,11 +247,16 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
 const router = useRouter()
+const auth = useAuthStore()
+
+/** 录像计划属于「管理云端录像」，cloud:write。 */
+const canWrite = computed(() => auth.can('cloud:write'))
 
 const rows = ref([])
 const loading = ref(false)

@@ -55,12 +55,24 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(NotRoleException.class)
     public ApiResponse<Void> handleNotRole(NotRoleException e) {
-        return ApiResponse.fail(ApiResponse.CODE_FORBIDDEN, "无权限访问：需要管理员角色");
+        log.warn("拒绝越权请求（角色断言）：role={}", e.getRole());
+        return ApiResponse.fail(ApiResponse.CODE_FORBIDDEN, "没有「" + e.getRole() + "」角色，请联系管理员");
     }
 
     @ExceptionHandler(NotPermissionException.class)
     public ApiResponse<Void> handleNotPermission(NotPermissionException e) {
-        return ApiResponse.fail(ApiResponse.CODE_FORBIDDEN, "无权限访问：" + e.getMessage());
+        /*
+         * 把权限点编码翻译成中文名再返回。
+         *
+         * <p>Sa-Token 原始消息形如「无此权限：device:write」，直接吐给使用者
+         * 既看不懂也帮不上忙 —— 他不知道该找管理员要哪个权限。
+         * 翻成「编辑设备」之后，报错本身就能指导后续动作。
+         */
+        String code = e.getPermission();
+        Permissions.Def def = Permissions.defOf(code);
+        String name = def == null ? code : def.name();
+        log.warn("拒绝越权请求（接口内断言）：permission={}", code);
+        return ApiResponse.fail(ApiResponse.CODE_FORBIDDEN, "没有「" + name + "」权限，请联系管理员调整角色");
     }
 
     @ExceptionHandler(BizException.class)

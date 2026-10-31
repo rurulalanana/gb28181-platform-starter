@@ -5,6 +5,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.PlayUrls;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbRecord;
 import io.github.rurulalanana.starter.dto.PageQuery;
@@ -203,8 +204,7 @@ public class CloudRecordController {
     public ApiResponse<Void> remove(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
                                     @RequestParam String period) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.CLOUD_DELETE);
         String channelId = DeviceRef.channelOf(serial, code);
         GbRecord record = recordService.findByPeriod(channelId, period);
         if (record == null) {
@@ -219,8 +219,7 @@ public class CloudRecordController {
     @PostMapping("/removechannel")
     public ApiResponse<DeletedVo> removeChannel(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.CLOUD_DELETE);
         String channelId = DeviceRef.channelOf(serial, code);
         int deleted = 0;
         for (GbRecord r : recordService.cloudRecords(channelId, null, null)) {
@@ -238,8 +237,7 @@ public class CloudRecordController {
     public ApiResponse<DeletedVo> removeDaily(@RequestParam String serial,
                                               @RequestParam(required = false) String code,
                                               @RequestParam String period) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.CLOUD_DELETE);
         String channelId = DeviceRef.channelOf(serial, code);
         LocalDateTime day = TimeFormats.parse(period);
         if (day == null) {

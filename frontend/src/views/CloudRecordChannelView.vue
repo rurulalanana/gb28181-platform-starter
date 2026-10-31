@@ -84,7 +84,7 @@
             <el-button link type="primary" @click="openDetail(row)">
               <el-icon><VideoPlay /></el-icon> 查看录像
             </el-button>
-            <el-button link type="danger" @click="removeChannel(row)">
+            <el-button v-if="canDelete" link type="danger" @click="removeChannel(row)">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
           </template>
@@ -108,16 +108,21 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { cloudRecordApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
 const router = useRouter()
+const auth = useAuthStore()
+
+/** 删录像不可恢复，用独立的 cloud:delete（默认只有管理员有）。 */
+const canDelete = computed(() => auth.can('cloud:delete'))
 
 const rows = ref([])
 const loading = ref(false)

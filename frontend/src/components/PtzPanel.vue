@@ -293,6 +293,12 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { controlApi, deviceApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+
+/** 云台控制能力：只读账号不该能转镜头。 */
+const canPtz = computed(() => auth.can('channel:ptz'))
 
 const props = defineProps({
   /** 设备编码 */
@@ -318,8 +324,11 @@ const props = defineProps({
  * 而 {@code channel} 并非本组件的 prop（只有 {@code serial}/{@code code}），
  * 在 {@code <script setup>} 中解析为 undefined，{@code !channel} 恒为 true，
  * 导致整个面板的按钮永久禁用、点不动。
+ *
+ * <p>另外叠加 {@code channel:ptz} 权限：没有云台权限的账号看到的按钮应当是灰的，
+ * 而不是点了才收到 403 —— 后者会让人以为设备坏了。
  */
-const inactive = computed(() => props.disabled || !props.serial)
+const inactive = computed(() => props.disabled || !props.serial || !canPtz.value)
 
 /**
  * 云台速度（0~255）。

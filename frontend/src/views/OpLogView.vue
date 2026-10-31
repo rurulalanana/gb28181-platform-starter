@@ -34,7 +34,14 @@
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
       </el-button>
-      <el-button size="small" type="danger" plain :disabled="!pager.total" @click="clearAll">
+      <el-button
+        v-if="canClear"
+        size="small"
+        type="danger"
+        plain
+        :disabled="!pager.total"
+        @click="clearAll"
+      >
         <el-icon><Delete /></el-icon> 清空
       </el-button>
     </div>
@@ -113,13 +120,19 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { opLogApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
+
+const auth = useAuthStore()
+
+/** 清空审计日志是独立的敏感权限，不能等同于「能看日志」。 */
+const canClear = computed(() => auth.can('oplog:clear'))
 
 const rows = ref([])
 

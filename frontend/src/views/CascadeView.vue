@@ -7,7 +7,7 @@
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
       </el-button>
-      <el-button size="small" type="primary" @click="openEdit(null)">
+      <el-button size="small" type="primary" :disabled="!canWrite" @click="openEdit(null)">
         <el-icon><Plus /></el-icon> 新增级联
       </el-button>
     </div>
@@ -36,6 +36,7 @@
             <el-switch
               :model-value="!!row.enable"
               size="small"
+              :disabled="!canWrite"
               @change="(v) => toggleEnable(row, v)"
             />
           </template>
@@ -58,22 +59,22 @@
         <el-table-column label="操作" width="186" align="center" fixed="right">
           <template #default="{ row }">
             <el-tooltip content="选择共享通道">
-              <el-button link type="primary" @click="openChannels(row)">
+              <el-button link type="primary" :disabled="!canWrite" @click="openChannels(row)">
                 <el-icon><Connection /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="推送目录到上级">
-              <el-button link type="primary" @click="pushCatalog(row)">
+              <el-button link type="primary" :disabled="!canWrite" @click="pushCatalog(row)">
                 <el-icon><Refresh /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="编辑">
-              <el-button link type="primary" @click="openEdit(row)">
+              <el-button link type="primary" :disabled="!canWrite" @click="openEdit(row)">
                 <el-icon><Edit /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="删除">
-              <el-button link type="danger" @click="removeOne(row)">
+              <el-button link type="danger" :disabled="!canWrite" @click="removeOne(row)">
                 <el-icon><Delete /></el-icon>
               </el-button>
             </el-tooltip>
@@ -363,14 +364,20 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { Connection, Picture } from '@element-plus/icons-vue'
 import { cascadeApi, deviceApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
+
+const auth = useAuthStore()
+
+/** 改级联配置会影响对端平台的目录，用独立的 cascade:write。 */
+const canWrite = computed(() => auth.can('cascade:write'))
 
 const list = ref([])
 

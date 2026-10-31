@@ -2,6 +2,7 @@ package io.github.rurulalanana.starter.web;
 
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.service.TlsCertificateService;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -55,8 +56,7 @@ public class TlsController {
     @PostMapping("/install")
     public ApiResponse<TlsCertificateService.TlsStatus> install(
             @RequestBody TlsInstallRequest request) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
         // 只记录长度，绝不把证书/私钥内容写进日志
         log.info("收到 HTTPS 证书安装请求：证书 {} 字节，私钥 {} 字节",
                 request == null || request.getCert() == null ? 0 : request.getCert().length(),
@@ -70,8 +70,7 @@ public class TlsController {
     /** 停用 HTTPS。 */
     @PostMapping("/disable")
     public ApiResponse<TlsCertificateService.TlsStatus> disable() {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
         log.warn("收到停用 HTTPS 请求");
         return ApiResponse.ok(tlsService.disable());
     }
@@ -85,8 +84,7 @@ public class TlsController {
      */
     @PostMapping("/regenerate")
     public ApiResponse<TlsCertificateService.TlsStatus> regenerate() {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
         return ApiResponse.ok(tlsService.regenerate());
     }
 

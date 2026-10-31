@@ -23,7 +23,7 @@
         <el-button size="small" @click="goBack">
           <el-icon><ArrowLeft /></el-icon> 返回
         </el-button>
-        <el-button size="small" :disabled="!playingRecord" @click="shareCurrent">
+        <el-button size="small" :disabled="!canWrite || !playingRecord" @click="shareCurrent">
           <el-icon><Share /></el-icon> 分享页
         </el-button>
         <el-button size="small" :disabled="!canDownloadRecord(playingRecord)" @click="downloadCurrent">
@@ -96,7 +96,13 @@
           <el-button size="small" :disabled="!canDownloadRecord(playingRecord)" @click="download(playingRecord)">
             <el-icon><Download /></el-icon> 下载本段
           </el-button>
-          <el-button size="small" type="danger" plain :disabled="!records.length" @click="removeDaily">
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="!canDelete || !records.length"
+            @click="removeDaily"
+          >
             <el-icon><Delete /></el-icon> 删除当日
           </el-button>
         </div>
@@ -158,6 +164,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cloudRecordApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import {
   canDownloadRecord,
@@ -175,6 +182,18 @@ import {
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
+
+/** 删除当日录像不可恢复，用独立的 cloud:delete。 */
+const canDelete = computed(() => auth.can('cloud:delete'))
+
+/**
+ * 生成分享链接需要 cloud:write。
+ *
+ * <p>分享页免登录、凭签名令牌访问 —— 生成分享等于把这段录像交给平台之外的人，
+ * 属于「管理」而不是「观看」，因此不给只看不放的账号。
+ */
+const canWrite = computed(() => auth.can('cloud:write'))
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))

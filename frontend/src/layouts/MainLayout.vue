@@ -151,25 +151,31 @@ function syncViewport() {
 window.addEventListener('resize', syncViewport)
 syncViewport()
 
+/*
+ * 菜单项。
+ *
+ * <p>`perm` 是该页所需的最小权限点，必须与 `router/index.js` 里的 `meta.perm` 一致：
+ * 路由守卫管「直接输 URL 进不进得来」，这里管「侧栏画不画」，
+ * 两处用的是同一份权限判断，不会出现「菜单看不到但地址能打开」。
+ */
 const allItems = [
-  { path: '/dashboard', title: '总览', icon: 'Odometer', group: '监控' },
-  { path: '/live', title: '实时预览', icon: 'VideoCamera', group: '监控' },
-  { path: '/devices', title: '设备管理', icon: 'Monitor', group: '资源' },
-  { path: '/channels', title: '通道管理', icon: 'List', group: '资源' },
-  { path: '/playback', title: '设备录像', icon: 'Film', group: '录像' },
-  { path: '/cloud', title: '云端录像', icon: 'Cloudy', group: '录像' },
-  { path: '/alarms', title: '报警管理', icon: 'Bell', group: '运维' },
-  { path: '/cascade', title: '级联配置', icon: 'Share', group: '运维' },
-  { path: '/users', title: '用户管理', icon: 'User', group: '系统', admin: true },
-  { path: '/oplogs', title: '操作日志', icon: 'Document', group: '系统' },
-  { path: '/settings', title: '系统设置', icon: 'Setting', group: '系统' }
+  { path: '/dashboard', title: '总览', icon: 'Odometer', group: '监控', perm: 'device:read' },
+  { path: '/live', title: '实时预览', icon: 'VideoCamera', group: '监控', perm: 'play:live' },
+  { path: '/devices', title: '设备管理', icon: 'Monitor', group: '资源', perm: 'device:read' },
+  { path: '/channels', title: '通道管理', icon: 'List', group: '资源', perm: 'channel:read' },
+  { path: '/playback', title: '设备录像', icon: 'Film', group: '录像', perm: 'play:record' },
+  { path: '/cloud', title: '云端录像', icon: 'Cloudy', group: '录像', perm: 'cloud:read' },
+  { path: '/alarms', title: '报警管理', icon: 'Bell', group: '运维', perm: 'alarm:read' },
+  { path: '/cascade', title: '级联配置', icon: 'Share', group: '运维', perm: 'cascade:read' },
+  { path: '/users', title: '用户管理', icon: 'User', group: '系统', perm: 'user:read' },
+  { path: '/roles', title: '角色权限', icon: 'Key', group: '系统', perm: 'user:read' },
+  { path: '/oplogs', title: '操作日志', icon: 'Document', group: '系统', perm: 'oplog:read' },
+  { path: '/settings', title: '系统设置', icon: 'Setting', group: '系统', perm: 'system:read' }
 ]
 
-const isAdmin = computed(() => auth.isAdmin())
-
-/** 按 group 字段聚合成带分组标题的菜单 */
+/** 按 group 字段聚合成带分组标题的菜单；没有对应权限的整项不渲染。 */
 const menuGroups = computed(() => {
-  const visible = allItems.filter((i) => !i.admin || isAdmin.value)
+  const visible = allItems.filter((i) => auth.can(i.perm))
   const map = new Map()
   visible.forEach((item) => {
     if (!map.has(item.group)) map.set(item.group, [])

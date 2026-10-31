@@ -106,7 +106,7 @@
             <el-switch
               v-model="row.ondemand"
               :loading="ondemandPending.has(row.id)"
-              :disabled="ondemandPending.has(row.id)"
+              :disabled="!canWrite || ondemandPending.has(row.id)"
               inline-prompt
               active-text="开"
               inactive-text="关"
@@ -128,7 +128,7 @@
             <el-switch
               v-model="row.cloudRecord"
               :loading="recordPending.has(row.id)"
-              :disabled="recordPending.has(row.id)"
+              :disabled="!canWrite || recordPending.has(row.id)"
               inline-prompt
               active-text="开"
               inactive-text="关"
@@ -160,6 +160,7 @@
               解决：命令值带上通道编码，由 handlePtzCommand 拆开去对应行上应用。
             -->
             <el-dropdown
+              v-if="canWrite"
               trigger="click"
               :disabled="ptzPending.has(row.id)"
               @command="handlePtzCommand"
@@ -181,15 +182,17 @@
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+            <span v-else class="text-muted">{{ ptzText(row) }}</span>
           </template>
         </el-table-column>
 
         <el-table-column label="位置" min-width="140" align="center">
           <template #default="{ row }">
             <span
-              class="position-text is-editable"
-              title="点击修改经纬度"
-              @click="openPosition(row)"
+              class="position-text"
+              :class="{ 'is-editable': canWrite }"
+              :title="canWrite ? '点击修改经纬度' : ''"
+              @click="canWrite && openPosition(row)"
             >{{ positionText(row) }}</span>
           </template>
         </el-table-column>
@@ -415,6 +418,7 @@ import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
+import { useAuthStore } from '@/stores/auth'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TablePager from '@/components/TablePager.vue'
 import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
@@ -423,6 +427,11 @@ import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 /** 上屏预览需要跳转路由。 */
 const router = useRouter()
 const route = useRoute()
+
+const auth = useAuthStore()
+
+/** 能否编辑通道（改名称/编号、云录与按需开关、云台类型、位置）。 */
+const canWrite = computed(() => auth.can('channel:write'))
 
 const channels = ref([])
 const loading = ref(false)

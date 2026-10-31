@@ -87,6 +87,7 @@
               由 handleTransportCommand 拆开，自己去对应行上应用。
             -->
             <el-dropdown
+              v-if="canWrite"
               trigger="click"
               :disabled="transportPending.has(row.id)"
               @command="handleTransportCommand"
@@ -108,6 +109,8 @@
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+            <!-- 只读账号只看到当前模式，不给切换入口 -->
+            <span v-else class="text-muted">{{ transportText(row) }}</span>
           </template>
         </el-table-column>
         <!-- 通道数不排序：数字排序用处不大，而排序箭头会把「通道数」表头挤到换行 -->
@@ -154,14 +157,14 @@
             <div class="row-actions">
               <el-button link type="primary" @click="viewChannels(row)">查看通道</el-button>
               <el-button
-                v-if="row.online"
+                v-if="row.online && canWrite"
                 link
                 class="act-collect"
                 :loading="busy === row.id"
                 @click="collect(row)"
               >更新通道</el-button>
-              <el-button link class="act-edit" @click="openEdit(row)">编辑</el-button>
-              <el-button v-if="!row.online" link type="danger" @click="remove(row)">删除</el-button>
+              <el-button v-if="canWrite" link class="act-edit" @click="openEdit(row)">编辑</el-button>
+              <el-button v-if="!row.online && canWrite" link type="danger" @click="remove(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -262,6 +265,14 @@ import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
+
+/**
+ * 能否编辑设备。
+ *
+ * <p>只读账号仍可「查看通道」与播放，但不再看到编辑/删除/切换传输模式 ——
+ * 界面显隐只是不让用户白点一次，真正的拦截在后端 {@code device:write}。
+ */
+const canWrite = computed(() => auth.can('device:write'))
 
 const devices = ref([])
 

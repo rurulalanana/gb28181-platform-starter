@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.web;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbAlarm;
@@ -101,9 +102,8 @@ public class AlarmController {
     /** 清空报警。 */
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
-        StpUtil.checkLogin();
-        // 清空是破坏性操作：普通用户误点会丢掉全部历史警情，仅管理员可执行
-        StpUtil.checkRoleOr("admin");
+        // 清空是破坏性操作：误点会丢掉全部历史警情，需要独立的 alarm:delete
+        StpUtil.checkPermission(Permissions.ALARM_DELETE);
         int deleted = alarmService.clear();
         return ApiResponse.ok(DeletedVo.of(deleted));
     }

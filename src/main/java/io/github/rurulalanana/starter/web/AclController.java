@@ -2,6 +2,7 @@ package io.github.rurulalanana.starter.web;
 
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.entity.GbAcl;
 import io.github.rurulalanana.starter.service.AccessControlService;
 import io.github.rurulalanana.starter.vo.AclListVo;
@@ -78,16 +79,14 @@ public class AclController {
             @RequestParam String kind,
             @RequestParam String value,
             @RequestParam(required = false) String remark) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
         return ApiResponse.ok(toVo(aclService.add(listType, kind, value, remark)));
     }
 
     /** 删除规则（立即生效）。 */
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam Long id) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
         aclService.remove(id);
         return ApiResponse.ok();
     }

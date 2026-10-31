@@ -3,10 +3,12 @@ package io.github.rurulalanana.starter.web;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.dto.PageQuery;
 import io.github.rurulalanana.starter.entity.GbUser;
 import io.github.rurulalanana.starter.mapper.GbUserMapper;
+import io.github.rurulalanana.starter.service.RoleService;
 import io.github.rurulalanana.starter.service.UserService;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.IdVo;
@@ -47,6 +49,7 @@ import java.util.List;
 public class UserController {
 
     private final UserService userService;
+    private final RoleService roleService;
     private final GbUserMapper userMapper;
 
     /** 用户列表。 */
@@ -55,8 +58,7 @@ public class UserController {
             @RequestParam(defaultValue = "0") int start,
             @RequestParam(defaultValue = "1000") int limit,
             @RequestParam(required = false) String q) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.USER_READ);
         QueryWrapper<GbUser> wrapper = new QueryWrapper<>();
         if (q != null && !q.isBlank()) {
             String needle = q.trim();
@@ -86,7 +88,7 @@ public class UserController {
         }
         // 非管理员只能看自己
         if (id != null && !id.equals(StpUtil.getLoginIdAsLong())) {
-            StpUtil.checkRoleOr("admin");
+            StpUtil.checkPermission(Permissions.USER_READ);
         }
         return ApiResponse.ok(userView(user));
     }
@@ -99,10 +101,16 @@ public class UserController {
                                   @RequestParam(required = false) String role,
                                   @RequestParam(required = false) Long id,
                                   @RequestParam(required = false) Boolean enable) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.USER_WRITE);
         if (username.isBlank()) {
             throw BizException.badRequest("username 不能为空");
+        }
+        // 角色编码必须真实存在：写入一个不存在的编码，这个人会「什么权限都没有」
+        // 且页面上查不出原因，排障成本极高。
+        String normalizedRole = role == null ? null : role;
+        if (normalizedRole != null && !normalizedRole.isBlank()) {
+            normalizedRole = String.join(",",
+                    roleService.requireExistingRoles(Permissions.splitRoles(normalizedRole)));
         }
         GbUser user;
         if (id == null) {
@@ -116,7 +124,8 @@ public class UserController {
             user.setUsername(username);
             user.setPassword(userService.encodePassword(password));
             user.setNickname(nickname == null ? username : nickname);
-            user.setRole(role == null ? "user" : role);
+            user.setRole(normalizedRole == null || normalizedRole.isBlank()
+                    ? Permissions.ROLE_VIEWER : normalizedRole);
             user.setEnable(enable == null ? Boolean.TRUE : enable);
             userMapper.insert(user);
         } else {
@@ -126,8 +135,8 @@ public class UserController {
             }
             user.setUsername(username);
             user.setNickname(nickname == null ? user.getNickname() : nickname);
-            if (role != null && !role.isBlank()) {
-                user.setRole(role);
+            if (normalizedRole != null && !normalizedRole.isBlank()) {
+                user.setRole(normalizedRole);
             }
             if (enable != null) {
                 user.setEnable(enable);
@@ -143,8 +152,7 @@ public class UserController {
     /** 删除用户。 */
     @PostMapping("/remove")
     public ApiResponse<DeletedVo> remove(@RequestParam String id) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.USER_WRITE);
         int deleted = 0;
         for (String token : id.split(",")) { // secret-scan: allow 这里 token 是逗号分隔的 ID 片段，不是凭据
             if (token.isBlank()) {
@@ -177,8 +185,7 @@ public class UserController {
     @PostMapping("/setenable")
     public ApiResponse<Void> setEnable(@RequestParam Long id,
                                        @RequestParam(defaultValue = "true") Boolean enable) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.USER_WRITE);
         if (id.equals(StpUtil.getLoginIdAsLong()) && !Boolean.TRUE.equals(enable)) {
             throw BizException.badRequest("不能停用当前登录用户");
         }
@@ -199,8 +206,7 @@ public class UserController {
     @PostMapping("/resetpassword")
     public ApiResponse<Void> resetPassword(@RequestParam Long id,
                                            @RequestParam String password) {
-        StpUtil.checkLogin();
-        StpUtil.checkRoleOr("admin");
+        StpUtil.checkPermission(Permissions.USER_WRITE);
         if (password == null || password.isBlank()) {
             throw BizException.badRequest("password 不能为空");
         }

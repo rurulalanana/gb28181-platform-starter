@@ -157,6 +157,7 @@
               type="danger"
               plain
               :icon="RefreshRight"
+              :disabled="!canWrite"
               :loading="restarting"
               @click="restartServer"
             >
@@ -274,7 +275,7 @@
                 <el-button
                   type="primary"
                   size="small"
-                  :disabled="!isDirty(row) || isInvalid(row)"
+                  :disabled="!canWrite || !isDirty(row) || isInvalid(row)"
                   :loading="cfgSaving === row.key"
                   @click="saveConfig(row)"
                 >
@@ -282,7 +283,7 @@
                 </el-button>
                 <el-button
                   size="small"
-                  :disabled="!row.overridden"
+                  :disabled="!canWrite || !row.overridden"
                   @click="resetConfig(row)"
                 >
                   恢复默认
@@ -307,7 +308,7 @@
           </div>
           <div class="acl-head-actions">
             <el-button text :icon="Refresh" :loading="aclLoading" @click="loadAcl">刷新</el-button>
-            <el-button type="primary" :icon="Plus" @click="openAclDialog">添加规则</el-button>
+            <el-button type="primary" :icon="Plus" :disabled="!canWrite" @click="openAclDialog">添加规则</el-button>
           </div>
         </header>
 
@@ -408,7 +409,7 @@
             </el-table-column>
             <el-table-column label="操作" width="80" align="right">
               <template #default="{ row }">
-                <el-button link type="danger" size="small" @click="removeAcl(row)">删除</el-button>
+                <el-button link type="danger" size="small" :disabled="!canWrite" @click="removeAcl(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -583,7 +584,7 @@
               <el-button
                 type="primary"
                 :loading="tlsInstalling"
-                :disabled="!tlsForm.cert.trim() || !tlsForm.key.trim()"
+                :disabled="!canWrite || !tlsForm.cert.trim() || !tlsForm.key.trim()"
                 @click="installCert"
               >
                 校验并启用
@@ -595,6 +596,7 @@
               <el-button
                 v-if="tlsStatus.hasCertificate"
                 :loading="tlsRegenerating"
+                :disabled="!canWrite"
                 @click="regenerateTls"
               >
                 按当前端口重新生成
@@ -602,6 +604,7 @@
               <el-button
                 v-if="tlsStatus.configured"
                 :loading="tlsDisabling"
+                :disabled="!canWrite"
                 @click="disableTls"
               >
                 停用 HTTPS
@@ -891,6 +894,15 @@ import HelpTip from '@/components/HelpTip.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
+
+/**
+ * 能否修改系统配置。
+ *
+ * <p>{@code system:read} 只够进来看看（运行概览、指标），
+ * 改配置 / 装证书 / 重启服务都要 {@code system:write}。
+ * 这两个权限点刻意分开：排障时经常需要「让人看得见状态但动不了」。
+ */
+const canWrite = computed(() => auth.can('system:write'))
 
 /* ==================== 分区导航 ==================== */
 

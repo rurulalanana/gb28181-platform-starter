@@ -216,6 +216,20 @@ export const opLogApi = {
   clear: () => post('/oplog/clear')
 }
 
+/**
+ * 角色与权限点接口（`/api/v1/role/*`，需 user:read / user:write）。
+ *
+ * <p>权限点目录（{@code permissions}）来自后端常量，前端用它渲染勾选框 ——
+ * 这样新增权限点只需改后端一处，页面自动出现。
+ */
+export const roleApi = {
+  list: () => get('/role/list'),
+  permissions: () => get('/role/permissions'),
+  save: (params) => post('/role/save', params),
+  remove: (code) => post('/role/remove', { code }),
+  setEnable: (params) => post('/role/setenable', params)
+}
+
 /** 级联接口（`/api/v1/cascade/*`）。 */
 export const cascadeApi = {
   list: (params) => get('/cascade/list', params),

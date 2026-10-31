@@ -1,1 +1,0 @@
-import{D as n}from"./index-CM2qxmZq.js";function i(r){return n(()=>{const e=(r==null?void 0:r.value)||"";return e==="播放中"?"success":e.includes("失败")||e.includes("异常")||e.includes("中断")||e.includes("超时")?"danger":"info"})}export{i as u};

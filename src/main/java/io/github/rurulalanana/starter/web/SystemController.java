@@ -7,6 +7,7 @@ import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.entity.GbUser;
 import io.github.rurulalanana.starter.service.DeviceService;
+import io.github.rurulalanana.starter.service.RoleService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.service.UserService;
 import io.github.rurulalanana.starter.vo.ServerInfoVo;
@@ -31,6 +32,7 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
 
@@ -54,6 +56,7 @@ public class SystemController {
     private final UserService userService;
     private final DeviceService deviceService;
     private final StreamService streamService;
+    private final RoleService roleService;
     private final Gb28181MediaPlatform platform;
     private final Gb28181Properties props;
 
@@ -140,6 +143,9 @@ public class SystemController {
         vo.setNickname(user.getNickname());
         vo.setRoles(user.getRole() == null ? null
                 : Arrays.stream(user.getRole().split(",")).map(String::trim).toList());
+        // 权限点是「角色展开后的并集」。前端据此控制菜单与按钮显隐，
+        // 真正的拦截仍在 WritePermissionInterceptor —— 这里只是让界面别骗人。
+        vo.setPermissions(new ArrayList<>(roleService.permissionsOfUserRoles(user.getRole())));
         vo.setPhoneNumber(user.getPhoneNumber());
         vo.setEmail(user.getEmail());
         vo.setDescription(user.getDescription());
