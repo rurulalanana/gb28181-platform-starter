@@ -89,7 +89,7 @@
             </div>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="settings">
+                <el-dropdown-item v-if="auth.can('system:read')" command="settings">
                   <el-icon><Setting /></el-icon> 系统设置
                 </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>
@@ -133,6 +133,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { buildMenu } from '@/router/routes'
 import { useDownloadStore } from '@/stores/download'
 import DownloadTasks from '@/components/DownloadTasks.vue'
 
@@ -152,37 +153,14 @@ window.addEventListener('resize', syncViewport)
 syncViewport()
 
 /*
- * 菜单项。
+ * 菜单项不再写在这里。
  *
- * <p>`perm` 是该页所需的最小权限点，必须与 `router/index.js` 里的 `meta.perm` 一致：
- * 路由守卫管「直接输 URL 进不进得来」，这里管「侧栏画不画」，
- * 两处用的是同一份权限判断，不会出现「菜单看不到但地址能打开」。
+ * <p>菜单 = {@code router/routes.js} 里 {@code appRoutes} 的 meta（title / icon / group / perm），
+ * 由 {@link buildMenu} 按当前账号权限过滤并分组。
+ * 早先这里是又一份手写的 `allItems`，和路由表各存一份，加页面得改两处，
+ * 且图标体系还不一致（一处 mdi 字符串、一处 Element Plus 组件名）。
  */
-const allItems = [
-  { path: '/dashboard', title: '总览', icon: 'Odometer', group: '监控', perm: 'device:read' },
-  { path: '/live', title: '实时预览', icon: 'VideoCamera', group: '监控', perm: 'play:live' },
-  { path: '/devices', title: '设备管理', icon: 'Monitor', group: '资源', perm: 'device:read' },
-  { path: '/channels', title: '通道管理', icon: 'List', group: '资源', perm: 'channel:read' },
-  { path: '/playback', title: '设备录像', icon: 'Film', group: '录像', perm: 'play:record' },
-  { path: '/cloud', title: '云端录像', icon: 'Cloudy', group: '录像', perm: 'cloud:read' },
-  { path: '/alarms', title: '报警管理', icon: 'Bell', group: '运维', perm: 'alarm:read' },
-  { path: '/cascade', title: '级联配置', icon: 'Share', group: '运维', perm: 'cascade:read' },
-  { path: '/users', title: '用户管理', icon: 'User', group: '系统', perm: 'user:read' },
-  { path: '/roles', title: '角色权限', icon: 'Key', group: '系统', perm: 'user:read' },
-  { path: '/oplogs', title: '操作日志', icon: 'Document', group: '系统', perm: 'oplog:read' },
-  { path: '/settings', title: '系统设置', icon: 'Setting', group: '系统', perm: 'system:read' }
-]
-
-/** 按 group 字段聚合成带分组标题的菜单；没有对应权限的整项不渲染。 */
-const menuGroups = computed(() => {
-  const visible = allItems.filter((i) => auth.can(i.perm))
-  const map = new Map()
-  visible.forEach((item) => {
-    if (!map.has(item.group)) map.set(item.group, [])
-    map.get(item.group).push(item)
-  })
-  return [...map.entries()].map(([label, items]) => ({ label, items }))
-})
+const menuGroups = computed(() => buildMenu(auth))
 
 const online = computed(() => auth.serverInfo?.deviceOnline ?? 0)
 const total = computed(() => auth.serverInfo?.deviceTotal ?? 0)

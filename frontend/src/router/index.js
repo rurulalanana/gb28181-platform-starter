@@ -1,150 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { appRoutes, publicRoutes, buildMenu } from './routes'
 
 /**
- * 路由表。除登录页外全部要求登录态。
+ * 路由装配。
+ *
+ * <p><b>业务路由与侧栏菜单的定义全部在 {@link ./routes.js}</b>。
+ * 本文件只负责装配实例 + 守卫；加页面请改 {@code routes.js}，
+ * 不要在这里追加，否则菜单和路由又会变成两份。
  */
 const routes = [
-  {
-    path: '/login',
-    name: 'login',
-    component: () => import('@/views/LoginView.vue'),
-    meta: { public: true, title: '登录' }
-  },
-  {
-    // 录像分享页：免登录，凭签名令牌观看某段录像
-    path: '/share/:token',
-    name: 'share',
-    component: () => import('@/views/ShareView.vue'),
-    meta: { public: true, title: '录像分享' }
-  },
-  {
-    /*
-     * 直播分享页：免登录，对齐 LiveGBS 的 play.html。
-     *
-     * <p>路径用 {@code /play} 而不是 {@code /share/live}：前者与 CMS 的
-     * {@code play.html} 语义一致（「播放某个通道」），也不会和录像分享
-     * {@code /share/:token} 的动态段混淆 —— 那会让 {@code /share/live}
-     * 被当成「令牌为 live 的录像分享」。
-     *
-     * <p>参数：{@code ?serial=<设备编码>&code=<通道编码>}。
-     */
-    path: '/play',
-    name: 'play',
-    component: () => import('@/views/LiveShareView.vue'),
-    meta: { public: true, title: '直播分享' }
-  },
-  {
-    /*
-     * iframe 嵌入测试页：免登录。
-     *
-     * <p>免登录是刻意的：这一页要在「别人的机器、别人的浏览器」上打开，
-     * 用来判断「嵌到我站里能不能播」。要登录就等于多一道门槛，
-     * 而它本身不含任何敏感数据 —— 通道编码由使用者自己填。
-     */
-    path: '/iframe-test',
-    name: 'iframeTest',
-    component: () => import('@/views/IframeTestView.vue'),
-    meta: { public: true, title: 'iframe 嵌入测试' }
-  },
+  ...publicRoutes,
   {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
-    children: [
-      {
-        path: 'dashboard',
-        name: 'dashboard',
-        component: () => import('@/views/DashboardView.vue'),
-        meta: { title: '总览', icon: 'mdi-view-dashboard', perm: 'device:read' }
-      },
-      {
-        path: 'live',
-        name: 'live',
-        component: () => import('@/views/LiveView.vue'),
-        meta: { title: '实时预览', icon: 'mdi-video', perm: 'play:live' }
-      },
-      {
-        path: 'devices',
-        name: 'devices',
-        component: () => import('@/views/DeviceView.vue'),
-        meta: { title: '设备管理', icon: 'mdi-cctv', perm: 'device:read' }
-      },
-      {
-        path: 'channels',
-        name: 'channels',
-        component: () => import('@/views/ChannelView.vue'),
-        meta: { title: '通道管理', icon: 'mdi-view-list', perm: 'channel:read' }
-      },
-      {
-        path: 'playback',
-        name: 'playback',
-        component: () => import('@/views/PlaybackView.vue'),
-        meta: { title: '设备录像', icon: 'mdi-history', perm: 'play:record' }
-      },
-      {
-        path: 'cloud',
-        name: 'cloud',
-        component: () => import('@/views/CloudRecordChannelView.vue'),
-        meta: { title: '云端录像', icon: 'mdi-cloud', perm: 'cloud:read' }
-      },
-      {
-        // 云端录像详情：某通道的时间轴视图（对齐 LiveGBS 的 timeview）
-        path: 'cloud/detail',
-        name: 'cloud-detail',
-        component: () => import('@/views/CloudRecordDetailView.vue'),
-        meta: { title: '云端录像详情', hidden: true, perm: 'cloud:read' }
-      },
-      {
-        // 云端录像列表视图：独立表格页（对齐 LiveGBS 的 listview）
-        path: 'cloud/detail/list',
-        name: 'cloud-detail-list',
-        component: () => import('@/views/CloudRecordListView.vue'),
-        meta: { title: '云端录像列表', hidden: true, perm: 'cloud:read' }
-      },
-      {
-        // 录像计划：定义哪些通道在什么时段录云端录像（对齐 LiveGBS）
-        path: 'cloud/plans',
-        name: 'cloud-plans',
-        component: () => import('@/views/CloudRecordPlanView.vue'),
-        meta: { title: '录像计划', hidden: true, perm: 'cloud:read' }
-      },
-      {
-        path: 'alarms',
-        name: 'alarms',
-        component: () => import('@/views/AlarmView.vue'),
-        meta: { title: '报警管理', icon: 'mdi-bell-alert', perm: 'alarm:read' }
-      },
-      {
-        path: 'cascade',
-        name: 'cascade',
-        component: () => import('@/views/CascadeView.vue'),
-        meta: { title: '级联配置', icon: 'mdi-sitemap', perm: 'cascade:read' }
-      },
-      {
-        path: 'users',
-        name: 'users',
-        component: () => import('@/views/UserView.vue'),
-        meta: { title: '用户管理', icon: 'mdi-account-group', perm: 'user:read' }
-      },
-      {
-        path: 'roles',
-        name: 'roles',
-        component: () => import('@/views/RoleView.vue'),
-        meta: { title: '角色权限', icon: 'mdi-shield-account', perm: 'user:read' }
-      },
-      {
-        path: 'oplogs',
-        name: 'oplogs',
-        component: () => import('@/views/OpLogView.vue'),
-        meta: { title: '操作日志', icon: 'mdi-clipboard-text-clock', perm: 'oplog:read' }
-      },
-      {
-        path: 'settings',
-        name: 'settings',
-        component: () => import('@/views/SettingsView.vue'),
-        meta: { title: '系统设置', icon: 'mdi-cog', perm: 'system:read' }
-      }
-    ]
+    children: appRoutes
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' }
 ]
@@ -187,31 +57,20 @@ router.beforeEach(async (to) => {
 })
 
 /**
- * 无权限时的兜底页。
+ * 无权限时的兜底页：按菜单顺序找第一个真正有权限的页面。
  *
  * <p>不能一律回 /dashboard —— 一个只有「报警查看」权限的角色
  * 在 /dashboard 上会被再次拒绝，然后又被踢回 /dashboard，形成循环。
- * 所以按菜单顺序找第一个真正有权限的页面。
+ * 直接复用 {@link buildMenu}，保证「菜单里看得见的」与「兜底能跳到的」
+ * 是同一份数据，不会出现菜单改了而兜底没改的偏差。
  *
  * @param {object|null} auth auth store（null 表示尚未加载，返回登录后的默认页）
  */
 function fallbackPath(auth) {
-  const candidates = [
-    ['/dashboard', 'device:read'],
-    ['/live', 'play:live'],
-    ['/devices', 'device:read'],
-    ['/channels', 'channel:read'],
-    ['/playback', 'play:record'],
-    ['/cloud', 'cloud:read'],
-    ['/alarms', 'alarm:read'],
-    ['/cascade', 'cascade:read'],
-    ['/users', 'user:read'],
-    ['/oplogs', 'oplog:read'],
-    ['/settings', 'system:read']
-  ]
   if (auth) {
-    for (const [path, perm] of candidates) {
-      if (auth.can(perm)) return path
+    const menu = buildMenu(auth)
+    if (menu.length && menu[0].items.length) {
+      return menu[0].items[0].path
     }
   }
   return '/dashboard'
