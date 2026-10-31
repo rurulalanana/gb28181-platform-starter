@@ -109,6 +109,11 @@ public class LiveShareController {
             return ApiResponse.ok(vo);
         }
         vo.setName(displayName(channel));
+        /*
+         * 云台类型要下发：分享页据此决定是否显示控制浮层。
+         * 0（未知）与 3（固定枪机）不能转，显示了只会让人反复点。
+         */
+        vo.setPtzType(channel.getPtzType());
         GbDevice device = deviceService.findDevice(deviceId);
         boolean online = device != null && Boolean.TRUE.equals(device.getOnline());
         vo.setDeviceOnline(online);
@@ -212,6 +217,18 @@ public class LiveShareController {
         if (prev != null && now - prev < PTZ_MIN_INTERVAL_MS) {
             // 静默丢弃而不是报错：按住方向键时前端会持续发送，报错会刷满控制台
             return ApiResponse.ok();
+        }
+        /*
+         * 固定枪机直接拒。
+         *
+         * <p>前端已按 {@code ptzType} 隐藏了控制浮层，但那是<b>展示层</b>的
+         * 约束 —— 这个接口是免登录的，谁都能直接 POST。
+         * 固定枪机没有云台电机，指令发下去要么被设备丢弃、要么占用 SIP 会话，
+         * 没有任何好处。0（未知）不拦：老通道可能没上报过，拦了会误伤。
+         */
+        GbChannel ch = deviceService.findChannel(deviceId, channelId);
+        if (ch != null && ch.getPtzType() != null && ch.getPtzType() == 3) {
+            throw BizException.badRequest("该通道是固定枪机，不支持云台控制");
         }
         PTZ_LAST_AT.put(gate, now);
         // 防内存无界增长：访问过的通道会一直留在表里，定容清理即可

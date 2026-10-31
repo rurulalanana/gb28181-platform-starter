@@ -34,6 +34,15 @@ public class LiveShareVo {
     /** 设备是否在线。离线时页面直接提示，不必白等一次 INVITE 超时。 */
     private Boolean deviceOnline;
 
+    /**
+     * 云台类型：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机。
+     *
+     * <p>取值与 {@code gb_channel.ptz_type} 一致。分享页据此决定是否显示
+     * 云台控制块 —— 固定枪机物理上不能转，把控制浮层摆上去只会让人
+     * 反复点而怀疑平台坏了。
+     */
+    private Integer ptzType;
+
     /** 通道状态（{@code ON} / {@code OFF}）。 */
     private String status;
 

@@ -23,9 +23,14 @@
       </div>
 
       <div v-if="!error" class="share-foot">
+        <!--
+          协议单选：只列本浏览器真能播的。
+          iPhone / iPad Safari 没有 MediaSource，flv.js 起不来 ——
+          还留着 WS-FLV 按钮的话，手机用户点了只会得到一片黑屏。
+        -->
         <el-radio-group v-model="proto" size="small" @change="switchProto">
-          <el-radio-button value="wsflv">WS-FLV</el-radio-button>
-          <el-radio-button value="webrtc">WebRTC</el-radio-button>
+          <el-radio-button v-if="flvOk" value="wsflv">WS-FLV</el-radio-button>
+          <el-radio-button v-if="webrtcOk" value="webrtc">WebRTC</el-radio-button>
         </el-radio-group>
         <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
       </div>
@@ -38,14 +43,25 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
-import { LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
+import { LIVE_DEFAULT_PROTOCOL, supportsFlv, supportsWebrtc, pickSupportedProto } from '@/player/resolvePlayUrls'
 
 const route = useRoute()
 
 const info = ref(null)
 const loading = ref(false)
 const error = ref('')
-const proto = ref(LIVE_DEFAULT_PROTOCOL)
+/**
+ * 默认协议。
+ *
+ * <p>取 {@code pickSupportedProto} 而不直接用 {@code LIVE_DEFAULT_PROTOCOL}：
+ * 默认值是 WebRTC，但万一某环境没有 {@code RTCPeerConnection}
+ * （老内核 / 被策略禁用），就应该落到能播的那条，而不是先黑屏再报错。
+ */
+const proto = ref(pickSupportedProto(LIVE_DEFAULT_PROTOCOL) || LIVE_DEFAULT_PROTOCOL)
+
+/** 本浏览器能否播 FLV / WebRTC（决定单选按钮显不显示）。 */
+const flvOk = supportsFlv()
+const webrtcOk = supportsWebrtc()
 
 const videoContainer = ref(null)
 const player = useLivePlayer(videoContainer)
@@ -88,7 +104,11 @@ async function load() {
       httpFlv: json.data.flv,
       webrtc: json.data.webrtc,
       hls: json.data.hls
-    }, { proto: proto.value })
+    }, {
+      proto: proto.value,
+      /* 本机放不了所选协议时引擎会降级，这里把真实协议同步回来 */
+      onProtoChange: (used) => { proto.value = used }
+    })
   } catch (e) {
     error.value = e.message || '加载失败'
   } finally {

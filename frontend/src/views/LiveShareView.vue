@@ -243,6 +243,16 @@
     </main>
 
     <!--
+      复制结果提示。
+      固定底部居中、pointer-events:none（不挡点击），1.8 秒自动消失。
+      它是本页唯一的操作反馈 —— 「复制」按钮点完什么都不发生的话，
+      用户只会反复点。
+    -->
+    <transition name="toast-fade">
+      <div v-if="toast" class="play-toast">{{ toast }}</div>
+    </transition>
+
+    <!--
       播放协议菜单。
 
       <p>触发按钮是引擎用 DOM 直接插进 video.js 控制栏的（在控制栏里而不是
@@ -265,7 +275,7 @@
     >
       <div class="proto-menu">
         <button
-          v-for="o in LIVE_PROTOCOLS"
+          v-for="o in protoOptions"
           :key="o.value"
           type="button"
           class="proto-menu-item"
@@ -283,7 +293,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLivePlayer } from '@/composables/useLivePlayer'
-import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, LIVE_PROTOCOLS } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, availableProtocols } from '@/player/resolvePlayUrls'
 
 /**
  * 直播分享页（免登录）。
@@ -316,11 +326,26 @@ const playing = computed(() => player.playing.value)
  */
 const proto = ref(LIVE_DEFAULT_PROTOCOL)
 
-/** 当前协议的显示名（控制栏按钮上那一段文字）。 */
+/**
+ * 当前协议的显示名（控制栏按钮上那一段文字）。
+ *
+ * <p>从 {@code protoOptions} 里查而不是写死一个映射表：
+ * 两份名字一旦不同步，就会出「菜单写 WS-FLV、按钮写 FLV」的错位。
+ */
 const protoShort = computed(() => {
-  const hit = LIVE_PROTOCOLS.find((o) => o.value === proto.value)
+  const hit = protoOptions.value.find((o) => o.value === proto.value)
   return hit ? hit.label : proto.value
 })
+
+/**
+ * 可选的协议：<b>只列本浏览器真能播的</b>。
+ *
+ * <p>iPhone / iPad Safari 没有 {@code MediaSource}，flv.js 起不来 ——
+ * 菜单里还摆着 WS-FLV / FLV 的话，用户点了只会得到一片黑屏
+ * （实测iPhone 上就是这个现象）。{@code availableProtocols()} 按能力过滤，
+ * 手机上自然只剩 WebRTC 与 HLS。
+ */
+const protoOptions = computed(() => availableProtocols())
 
 /** 协议菜单是否展开（锚定在控制栏那个按钮上）。 */
 const protoMenuVisible = ref(false)
@@ -512,33 +537,75 @@ function buildQr() {
 
 /* ---------------- 复制 ---------------- */
 
+/**
+ * 复制到剪贴板，并给出提示。
+ *
+ * <h3>为什么要两段兜底，而不是「有 clipboard 就用它」</h3>
+ *
+ * <p>{@code navigator.clipboard} 存在 ≠ 能用。除了「非安全上下文（http+IP）
+ * 下该 API 不存在」这个已知情况，还有两种更隐蔽的失败：
+ * <ul>
+ *   <li><b>权限被拒</b>：浏览器把它列为敏感权限，用户在站点设置里关掉后
+ *       {@code writeText} 直接抛 {@code NotAllowedError}；</li>
+ *   <li><b>文档未获得焦点</b>：iOS Safari 与部分 Chrome 版本要求调用时
+ *       文档处于聚焦状态，从 iframe 或后台标签触发时必然失败。</li>
+ * </ul>
+ * 这两种情况下 API 是<b>存在</b>的，只是调用抛错 —— 早先的写法在
+ * {@code catch} 里直接报「复制失败」，压根没试 {@code execCommand}，
+ * 于是在这些环境里点复制永远失败（用户反馈「复制没有反馈」）。
+ *
+ * <p>现在：先试 clipboard，失败就试 execCommand，两个都失败才报错。
+ *
+ * @param {string} text 要复制的文本
+ */
 async function copy(text) {
   if (!text) return
+  /* 第一选择：异步剪贴板 API（安全上下文 + 有权限时最可靠） */
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text)
-    } else {
-      /*
-       * 非安全上下文（http + 非 localhost）下 navigator.clipboard 不可用 ——
-       * 分享页常被用 IP+http 打开，这是常态而非例外，必须留兜底。
-       */
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
+      notice.value = ''
+      flash('已复制')
+      return
     }
-    notice.value = ''
-    flash('已复制')
+  } catch (e) {
+    // 落到下面的 execCommand 兜底，不在这里报错
+  }
+  /* 第二选择：textarea + execCommand（http 页面、权限被拒时的兜底） */
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    /*
+     * 定位到视口内但不可见：{@code opacity:0} + {@code position:fixed}
+     * 在 iOS 上仍可能因「元素不可见」被拒绝，所以用 1px 尺寸 + 透明边框，
+     * 这是 execCommand('copy') 兼容性最好的写法。
+     */
+    ta.style.cssText =
+      'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0'
+    ta.setAttribute('readonly', '')
+    document.body.appendChild(ta)
+    ta.select()
+    ta.setSelectionRange(0, ta.value.length)
+    const ok = document.execCommand('copy')
+    ta.remove()
+    if (ok) {
+      notice.value = ''
+      flash('已复制')
+    } else {
+      flash('复制失败，请手动选中复制')
+    }
   } catch (e) {
     flash('复制失败，请手动选中复制')
   }
 }
 
-/** 轻量提示：不引 ElMessage（分享页想尽量少带依赖，避免弹层样式受主框架影响）。 */
+/**
+ * 轻量提示：不引 ElMessage（分享页想尽量少带依赖，避免弹层样式受主框架影响）。
+ *
+ * <p><b>必须渲染到模板里才有用</b> —— 这个 ref 之前定义了却没出现在
+ * 模板中，于是 {@code copy()} 里的 {@code flash('已复制')} 只是改了个
+ * 没人看的变量，用户点「复制」完全没有反馈。
+ */
 const toast = ref('')
 let toastTimer = null
 function flash(msg) {
@@ -595,6 +662,18 @@ async function play() {
      */
     controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
     onControlButton,
+    /*
+     * 浏览器放不了所选协议时（手机上选 FLV），引擎会自动降级到能播的那条。
+     * 这里把真实协议同步到菜单/按钮，并告诉用户发生了什么 ——
+     * 否则他只会看到「画面出来了但按钮写着 FLV」，下次还会再选一遍。
+     */
+    onProtoChange: (used, wanted) => {
+      proto.value = used
+      if (wanted && wanted !== used) {
+        const from = protoOptions.value.find((o) => o.value === used)
+        flash(`当前浏览器不支持该协议，已自动切换到 ${from ? from.label : used}`)
+      }
+    },
     onFatal: (msg) => { notice.value = msg || '播放失败' },
     // 不提示「请刷新页面」：这里能换协议，换一条通路往往就好了
     onStall: () => { notice.value = '画面未就绪，可尝试切换播放协议' }
@@ -633,10 +712,33 @@ const PTZ_CELLS = [
   { cmd: 'zoomout', cls: 'ptz-minus', title: '缩小', path: ZOOM_OUT }
 ]
 
-/** 云台面板是否可用：通道信息拿到、设备在线、且是球机才有意义。 */
+/**
+ * 该类型是否支持云台控制。
+ *
+ * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
+ * 与通道管理页的 {@code supportsPtz} 保持同一套判据 ——
+ * 两处不一致会出现「列表里显示不可控、分享页却弹出方向盘」。
+ */
+function supportsPtz(type) {
+  return type === 1 || type === 2 || type === 4
+}
+
+/**
+ * 云台面板是否可用。
+ *
+ * <p>三个条件缺一不可：
+ * <ul>
+ *   <li>拿到了通道信息，且没有「设备离线 / 通道不存在」这类提示；</li>
+ *   <li>设备在线 —— 离线时指令发不出去，方向盘摆着只会让人白点；</li>
+ *   <li><b>通道确实是球机/半球/遥控枪机</b>。这一条之前漏了：判据只看
+ *       「在线 + 无提示」，于是固定枪机的分享页也弹出了方向盘
+ *       （用户反馈「非球机也出来了控制」）。</li>
+ * </ul>
+ */
 const ptzReady = computed(() => {
   const d = info.value
-  return !!d && d.deviceOnline === true && !d.notice
+  if (!d || d.deviceOnline !== true || d.notice) return false
+  return supportsPtz(d.ptzType)
 })
 
 /**
@@ -1531,6 +1633,45 @@ watch(ptzReady, (ok) => {
     width: calc(var(--ptz-cell) * 0.42);
     height: calc(var(--ptz-cell) * 0.42);
   }
+}
+
+/*
+ * 复制 / 降级 提示条。
+ *
+ * 固定底部居中、位于所有内容之上（含弹层不冲突：popover 的 z-index 是
+ * 2000+，而这条提示通常出现在没有弹层的时候）。
+ * pointer-events: none 保证它不挡任何点击 —— 连点两次「复制」不会因为
+ * 提示条正好盖住按钮而失效。
+ */
+.play-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%);
+  z-index: 3000;
+  max-width: min(90vw, 420px);
+  padding: 9px 16px;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: #fff;
+  text-align: center;
+  background: rgba(8, 13, 20, 0.86);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(15, 22, 33, 0.24);
+  pointer-events: none;
+}
+
+/* 淡入淡出：1800ms 后消失，动画只占 180ms，不拖慢「已复制」的即时感 */
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+  /* 入场时从下往上浮一点，出场时轻微下沉 */
+  transform: translateX(-50%) translateY(6px);
 }
 </style>
 

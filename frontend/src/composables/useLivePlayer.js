@@ -54,6 +54,7 @@
 
 import { ref } from 'vue'
 import { LivePlayerEngine, isLivePlayerAvailable } from '@/player/LivePlayerEngine'
+import { isProtoSupported, pickSupportedProto } from '@/player/resolvePlayUrls'
 import { log } from '@/player/FlvDiag'
 
 /**
@@ -210,11 +211,40 @@ export function useLivePlayer(containerRef, hooks = {}) {
      * 那是真正可 seek 的文件点播，进度条是主要控件。
      */
     playOpts = { ...opts, _hideProgress: true }
-    const proto = opts.proto || protocol.value
+    let proto = opts.proto || protocol.value
     protocol.value = proto
     if (!streamId) {
       state.value = '未指定流'
       return
+    }
+
+    /*
+     * 先剔除「这个浏览器根本放不了」的协议。
+     *
+     * <p><b>为什么必须在播放前拦</b>：iPhone / iPad Safari 没有
+     * {@code MediaSource}，flv.js 起不来，而它的失败表现是<b>静默不动</b> ——
+     * 12 秒后看门狗报「该通道的视频编码不支持（多为 H.265）」，
+     * 把「浏览器不支持这个容器」说成了「编码不支持」，排查方向完全跑偏
+     * （用户实测反馈「手机上的 FLV 播不出来」）。
+     *
+     * <p>降级而不是报错：分享链接里可能带着 {@code &proto=flv}
+     * （在 PC 上复制、发到手机上打开），那是完全正常的使用路径，
+     * 直接白屏对它没有帮助。降级后通过 {@code onProtoChange} 把
+     * 真实协议告诉业务层，菜单与按钮文字都能跟着改对。
+     */
+    if (!isProtoSupported(proto)) {
+      const wanted = proto
+      const fallback = pickSupportedProto(proto)
+      if (!fallback) {
+        state.value = '当前浏览器不支持任何可用的播放协议'
+        notifyFatal(state.value)
+        return
+      }
+      log('lp', { stage: 'proto-unsupported', want: wanted, use: fallback })
+      proto = fallback
+      protocol.value = fallback
+      // 把「原本想要的」也传出去，业务层才能提示「已自动切到 WebRTC」
+      notifyProtoChange(fallback, wanted)
     }
 
     if (proto === 'webrtc') {
@@ -277,10 +307,15 @@ export function useLivePlayer(containerRef, hooks = {}) {
     return urlOf(proto, urls)
   }
 
-  /** 通知调用方协议已变（自动兜底时）。 */
-  function notifyProtoChange(p) {
+  /**
+   * 通知调用方协议已变（自动降级时）。
+   *
+   * @param {string} p 实际使用的协议
+   * @param {string} [wanted] 用户原本想要、但本机放不了的协议
+   */
+  function notifyProtoChange(p, wanted) {
     const cb = playOpts.onProtoChange || hooks.onProtoChange
-    if (typeof cb === 'function') cb(p)
+    if (typeof cb === 'function') cb(p, wanted)
   }
 
   /** 通知调用方彻底失败。 */

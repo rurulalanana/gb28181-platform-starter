@@ -215,3 +215,143 @@ export function hasPlayUrl(proto, urls) {
   if (proto === 'hls') return !!urls.hls
   return flv
 }
+
+/* ==================== 浏览器能力检测 ==================== */
+
+/**
+ * 本浏览器能否播放 FLV（ws-flv / http-flv）。
+ *
+ * <h3>为什么必须检测</h3>
+ *
+ * <p>FLV <b>不是浏览器原生容器</b> —— 没有任何浏览器能靠
+ * {@code <video src="x.flv">} 播放它（原生只认 MP4/WebM/OGG，
+ * Safari 额外认 HLS）。所以 FLV 一定要靠 JS 解封装后灌进
+ * {@code MediaSource}（MSE），由浏览器的 MSE 管线解码。
+ *
+ * <h3>iOS 上为什么不行</h3>
+ *
+ * <ul>
+ *   <li><b>iOS 17.1 之前 WebKit 完全没有 {@code MediaSource}</b>，
+ *       这条路根本不存在；</li>
+ *   <li>iOS 17.1 起提供了 {@code ManagedMediaSource}（另一套 API：
+ *       缓冲由系统托管，而不是页面自己 append/清理）；</li>
+ *   <li><b>iOS 上所有浏览器都是 WebKit</b>（苹果强制），
+ *       Chrome / Edge / Firefox 一样没有 MSE —— 换浏览器解决不了。</li>
+ * </ul>
+ *
+ * <h3>为什么我们连 {@code ManagedMediaSource} 也不认</h3>
+ *
+ * <p>注意：打包进来的 flv.js <b>是认它的</b>（{@code getMediaSource()} 里
+ * 优先返回 {@code ManagedMediaSource}，见 {@code liveplayer-lib.min.js}），
+ * 也就是说在 iOS 17.1+ 上 {@code flvjs.isSupported()} 很可能返回 true。
+ * 但「API 存在」不等于「这路流能放」：
+ * <ul>
+ *   <li>ZLM 转出的 FLV 音频是 G.711（{@code audio codec idx 7}）或 AAC，
+ *       MSE 不认 G.711 —— 这正是我们全程 {@code hasaudio=false} 的原因；</li>
+ *   <li>ManagedMediaSource 要求缓冲由系统托管，而 flv.js 是「自己无脑 append
+ *       + 自己清 SourceBuffer」的老模式，两者对不上，实测表现为
+ *       append 被拒或缓冲涨到卡死；</li>
+ *   <li>iOS 对 MSE 还有额外的播放策略限制（必须 muted + playsInline 且可见）。</li>
+ * </ul>
+ * 所以这里<b>刻意保守</b>：只认标准的 {@code MediaSource}，
+ * iOS 上一律判为不支持，让用户走 WebRTC（最佳）或原生 HLS。
+ * 这比「菜单里给一个点了必然失败的 FLV」好得多。
+ *
+ * <p>除了 MediaSource 是否存在，再探一次 {@code isTypeSupported}：
+ * 某些精简内核有 MediaSource 对象但拒绝所有 mime，那种情况同样放不了。
+ *
+ * @returns {boolean} 可用返回 true
+ */
+export function supportsFlv() {
+  if (typeof window === 'undefined') return false
+  const MS = window.MediaSource || window.WebKitMediaSource
+  if (!MS || typeof MS.isTypeSupported !== 'function') return false
+  try {
+    /*
+     * 用 H.264 的 baseline profile 试探 —— ZLM 默认转出的就是它。
+     * HEVC（hvc1）= 部分安卓/桌面能过，但手机端普遍不行，
+     * 拿它当判据会把「能放 H.264」的设备误判成能放 H.265。
+     */
+    return MS.isTypeSupported('video/mp4; codecs="avc1.42E01E"')
+  } catch (e) {
+    // 探针本身报错：保守当不支持，FLV 走不通还有 WebRTC 兜着
+    return false
+  }
+}
+
+/**
+ * 本浏览器能否播放 HLS。
+ *
+ * <p>两条通路，任一可用即可：
+ * <ul>
+ *   <li>原生 HLS（Safari / iOS）：{@code video.canPlayType('application/vnd.apple.mpegurl')}
+ *       返回 {@code maybe}/{@code probably}。liveplayer 的 Hls source handler
+ *       检测到原生支持时会主动让路，交给 {@code <video>} 自己解；</li>
+ *   <li>hls.js（其余浏览器）：它同样依赖 MSE，判据与 {@link supportsFlv} 一致。</li>
+ * </ul>
+ */
+export function supportsHls() {
+  if (typeof window === 'undefined') return false
+  try {
+    const v = document.createElement('video')
+    const mime = 'application/vnd.apple.mpegurl'
+    if (v.canPlayType(mime) === 'maybe' || v.canPlayType(mime) === 'probably') return true
+  } catch (e) {
+    // 落到下面的 MSE 判断
+  }
+  return supportsFlv()
+}
+
+/**
+ * 本浏览器能否播放 WebRTC（LivePlayer 内置的 {@code Webrtc} tech）。
+ *
+ * <p>判据就是 {@code RTCPeerConnection} 是否存在 —— 与 tech 自己的
+ * {@code isSupported} 完全一致（见 {@code liveplayer-lib.min.js}）。
+ */
+export function supportsWebrtc() {
+  return typeof window !== 'undefined' && typeof window.RTCPeerConnection === 'function'
+}
+
+/**
+ * 当前浏览器<b>实际能播</b>的协议列表。
+ *
+ * <p>用途：协议菜单只列这些，避免给用户一个点了必然失败的选项。
+ * 顺序沿用 {@link LIVE_PROTOCOLS}（WebRTC 优先）。
+ *
+ * <p>典型差异：桌面 Chrome 四项全有；iPhone Safari 只有 WebRTC + HLS。
+ */
+export function availableProtocols() {
+  return LIVE_PROTOCOLS.filter((o) => {
+    if (o.value === 'webrtc') return supportsWebrtc()
+    if (o.value === 'hls') return supportsHls()
+    return supportsFlv()
+  })
+}
+
+/**
+ * 某个协议在当前浏览器是否可用。
+ *
+ * @param {string} proto 协议名
+ */
+export function isProtoSupported(proto) {
+  if (proto === 'webrtc') return supportsWebrtc()
+  if (proto === 'hls') return supportsHls()
+  return supportsFlv()
+}
+
+/**
+ * 从候选协议里挑一个当前浏览器能播的。
+ *
+ * <p>用于「用户选了一个本机放不了的协议」时的降级：
+ * 优先 WebRTC（延迟最低、H.265 也能放），其次按菜单顺序。
+ *
+ * @param {string} [preferred] 首选协议（能播就用它）
+ * @returns {string|null} 可用协议名；一个都没有时返回 {@code null}
+ */
+export function pickSupportedProto(preferred) {
+  if (preferred && isProtoSupported(preferred)) return preferred
+  const list = availableProtocols()
+  if (!list.length) return null
+  const webrtc = list.find((o) => o.value === 'webrtc')
+  return webrtc ? webrtc.value : list[0].value
+}

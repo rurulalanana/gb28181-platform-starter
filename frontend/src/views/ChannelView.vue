@@ -340,7 +340,7 @@
             >
               <div class="proto-menu">
                 <button
-                  v-for="o in LIVE_PROTOCOLS"
+                  v-for="o in protoOptions"
                   :key="o.value"
                   type="button"
                   class="proto-menu-item"
@@ -410,7 +410,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
@@ -488,14 +488,21 @@ const hasPtz = computed(() => !!previewTarget.value && supportsPtz(previewTarget
 /**
  * 当前协议的显示名（控制栏按钮上那一段文字）。
  *
- * <p>直接取 {@code LIVE_PROTOCOLS} 的 label，不再本地另存一份映射：
+ * <p>从 {@code protoOptions} 里查而不是本地再存一份映射：
  * 两份名字一旦不同步，就会出现「下拉里写 WS-FLV、按钮上写 FLV」的错位。
- * {@code LIVE_PROTOCOLS} 里的名字本来就按「短到能塞进按钮」设计。
  */
 const protoShort = computed(() => {
-  const hit = LIVE_PROTOCOLS.find((o) => o.value === proto.value)
+  const hit = protoOptions.value.find((o) => o.value === proto.value)
   return hit ? hit.label : proto.value
 })
+
+/**
+ * 可选的协议：只列本浏览器真能播的。
+ *
+ * <p>iPhone / iPad Safari 没有 {@code MediaSource}，flv.js 起不来 ——
+ * 菜单里还摆着 WS-FLV / FLV 的话，用户点了只会得到一片黑屏。
+ */
+const protoOptions = computed(() => availableProtocols())
 
 const renameDialog = ref(false)
 const renameTarget = ref(null)
@@ -724,6 +731,18 @@ async function startPlay() {
      */
     controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
     onControlButton: onPlayerControlButton,
+    /*
+     * 浏览器放不了所选协议时（手机上选 FLV），引擎会自动降级到能播的那条。
+     * 同步回 proto 并提示一句 —— 不提示的话用户只看到「按钮写着 FLV
+     * 但画面是 WebRTC」，下次还会再选一遍。
+     */
+    onProtoChange: (used, wanted) => {
+      proto.value = used
+      if (wanted && wanted !== used) {
+        const hit = protoOptions.value.find((o) => o.value === used)
+        ElMessage.warning(`当前浏览器不支持该协议，已自动切换到「${hit ? hit.label : used}」`)
+      }
+    },
     // 通了但始终没视频轨时，重建整路流（见 rebuidStalled 的说明）
     onStall: () => rebuildStalled()
   })
