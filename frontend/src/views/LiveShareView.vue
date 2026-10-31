@@ -347,15 +347,45 @@ const pageUrl = computed(() => {
 })
 
 /**
+ * iframe 嵌入用的地址。
+ *
+ * <p><b>必须强制带上 {@code aspect=fullscreen}</b>：分享页默认形态是
+ * 「标题栏 + 画面 + 一整块分享卡片」，那是给人用浏览器直接打开的；
+ * 而 iframe 是固定尺寸的小窗口（通常 640×360），
+ * 分享卡片本身就有 400 多像素高 —— 不加这个参数，别人嵌进去看到的
+ * 是「顶部标题栏 + 一条画面」，下面全被截掉，等于不能用。
+ *
+ * <p>用 {@code URL} 对象改参数而不是字符串拼 {@code &aspect=fullscreen}：
+ * 当前地址可能已经带了这个参数（在嵌入模式里再点复制），拼字符串会出现
+ * 两个 {@code aspect=}，取哪个由各浏览器自行决定。{@code searchParams.set}
+ * 是覆盖而不是追加，天然幂等。
+ */
+const embedUrl = computed(() => {
+  if (!pageUrl.value) return ''
+  try {
+    const u = new URL(pageUrl.value)
+    u.searchParams.set('aspect', 'fullscreen')
+    return u.toString()
+  } catch (e) {
+    // 极端情况下 URL 解析失败：退回原地址，至少不会比现在更差
+    return pageUrl.value
+  }
+})
+
+/**
  * iframe 嵌入代码。
  *
  * <p>{@code allow="autoplay; fullscreen"} 是必需的：浏览器默认禁止 iframe 内
  * 自动播放与全屏，不带这两项时嵌到别人页面里点全屏没反应。
  * 宽高取 16:9 的 640×360，与 CMS 一致。
+ *
+ * <p>{@code title} 也给上：缺它时某些无障碍检查会报错，
+ * 而且多标签页环境下浏览器需要它来区分框内容。
  */
 const iframeCode = computed(() => {
-  if (!pageUrl.value) return ''
-  return `<iframe src="${pageUrl.value}" width="640" height="360" allowfullscreen `
+  if (!embedUrl.value) return ''
+  return `<iframe src="${embedUrl.value}" width="640" height="360" `
+    + `title="视频直播" allowfullscreen `
     + `allow="autoplay; fullscreen; microphone;" style="border:0"></iframe>`
 })
 

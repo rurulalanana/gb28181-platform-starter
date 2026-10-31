@@ -224,10 +224,11 @@ const url = computed(() => {
   return `${window.location.origin}/play?${q.toString()}`
 })
 
-/** 生成的嵌入代码（与分享页里「iframe」那一行同样的写法）。 */
+/** 生成的嵌入代码（与分享页里「iframe」那一行同样的写法，含 title）。 */
 const frameCode = computed(() => {
   if (!url.value) return ''
-  return `<iframe src="${url.value}" width="${w.value}" height="${h.value}" allowfullscreen `
+  return `<iframe src="${url.value}" width="${w.value}" height="${h.value}" `
+    + `title="视频直播" allowfullscreen `
     + `allow="autoplay; fullscreen; microphone;" style="border:0"></iframe>`
 })
 
