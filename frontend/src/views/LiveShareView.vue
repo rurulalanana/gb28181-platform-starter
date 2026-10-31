@@ -241,6 +241,41 @@
 
       <footer v-if="!embedMode" class="play-foot">GB/T 28181—2022 视频监控平台</footer>
     </main>
+
+    <!--
+      播放协议菜单。
+
+      <p>触发按钮是引擎用 DOM 直接插进 video.js 控制栏的（在控制栏里而不是
+      页面某个角落 —— 协议是「这路画面用什么方式看」，与画面同域），
+      Vue 拿不到它的组件实例，所以用 el-popover 的 virtual-triggering
+      把它当锚点（{@code protoAnchorEl} 由 onControlButton 回传）。
+
+      <p>放在 play-page 末尾而不是卡片里：它是 teleport 到 body 的浮层，
+      位置无关；而放在这里，嵌入模式（没有卡片）下也能弹出来 ——
+      嵌入方同样可能需要换协议（例如 H.265 通道在 WebRTC 下才播得动）。
+    -->
+    <el-popover
+      v-model:visible="protoMenuVisible"
+      :virtual-ref="protoAnchorEl"
+      virtual-triggering
+      trigger="click"
+      placement="top-end"
+      :width="150"
+      popper-class="share-proto-menu"
+    >
+      <div class="proto-menu">
+        <button
+          v-for="o in LIVE_PROTOCOLS"
+          :key="o.value"
+          type="button"
+          class="proto-menu-item"
+          :class="{ 'is-current': o.value === proto }"
+          @click="switchProtoTo(o.value)"
+        >
+          {{ o.label }}
+        </button>
+      </div>
+    </el-popover>
   </div>
 </template>
 
@@ -248,7 +283,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLivePlayer } from '@/composables/useLivePlayer'
-import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, LIVE_PROTOCOLS } from '@/player/resolvePlayUrls'
 
 /**
  * 直播分享页（免登录）。
@@ -269,6 +304,68 @@ const info = ref(null)
 const videoContainer = ref(null)
 const player = useLivePlayer(videoContainer)
 const playing = computed(() => player.playing.value)
+
+/* ---------------- 播放协议 ---------------- */
+
+/**
+ * 当前播放协议。
+ *
+ * <p>分享页必须提供切换入口：外部人员通过这个页面看画面，
+ * 遇到 H.265 通道（FLV 播不了）或 UDP 被拦（WebRTC 连不上）时，
+ * 除了换协议没有任何别的办法 —— 他们连平台后台都进不去。
+ */
+const proto = ref(LIVE_DEFAULT_PROTOCOL)
+
+/** 当前协议的显示名（控制栏按钮上那一段文字）。 */
+const protoShort = computed(() => {
+  const hit = LIVE_PROTOCOLS.find((o) => o.value === proto.value)
+  return hit ? hit.label : proto.value
+})
+
+/** 协议菜单是否展开（锚定在控制栏那个按钮上）。 */
+const protoMenuVisible = ref(false)
+/** 控制栏按钮元素（popover 虚拟锚点）。 */
+const protoAnchorEl = ref(null)
+
+/**
+ * 控制栏按钮点击。
+ *
+ * <p>只负责把锚点交给 popover，<b>是否展开由 el-popover 自己管</b>：
+ * {@code virtual-triggering} 会把 click 监听挂到锚点元素上自行 toggle。
+ * 这里若也写 {@code visible = true}，第二次点击会变成「它 toggle 成 false、
+ * 我又设回 true」，菜单就关不掉了。
+ *
+ * <p>例外是「第一次拿到锚点」那次点击 —— 监听要等 popover 重新渲染才挂上，
+ * 那一次它收不到，所以手动开一次。
+ */
+function onControlButton(id, el) {
+  if (id !== 'proto') return
+  if (protoAnchorEl.value === el) return
+  protoAnchorEl.value = el
+  protoMenuVisible.value = true
+}
+
+/** 把当前协议文案同步到控制栏按钮。 */
+function syncProtoLabel() {
+  player.setControlButtonText('proto', protoShort.value)
+}
+
+/** 协议文案变化时同步（自动兜底时也会走到）。 */
+watch(protoShort, syncProtoLabel)
+
+/**
+ * 选择新协议并重连。
+ *
+ * <p>选中当前项时直接关菜单，避免白白断流重连一次。
+ *
+ * @param {string} next 目标协议
+ */
+async function switchProtoTo(next) {
+  protoMenuVisible.value = false
+  if (!next || next === proto.value) return
+  proto.value = next
+  await play()
+}
 
 const serial = computed(() => String(route.query.serial || '').trim())
 const code = computed(() => String(route.query.code || '').trim())
@@ -491,10 +588,18 @@ async function play() {
   }
   notice.value = ''
   await player.play(`${data.deviceId}/${data.channelId}`, urls, {
-    proto: LIVE_DEFAULT_PROTOCOL,
+    proto: proto.value,
+    /*
+     * 控制栏里的「播放协议」按钮。分享页尤其需要它：
+     * 外部人员进不了后台，换协议是他们唯一能自救的手段。
+     */
+    controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
+    onControlButton,
     onFatal: (msg) => { notice.value = msg || '播放失败' },
-    onStall: () => { notice.value = '画面未就绪，请刷新页面重试' }
+    // 不提示「请刷新页面」：这里能换协议，换一条通路往往就好了
+    onStall: () => { notice.value = '画面未就绪，可尝试切换播放协议' }
   })
+  syncProtoLabel()
 }
 
 /* ---------------- 云台 ---------------- */
@@ -1426,5 +1531,49 @@ watch(ptzReady, (ok) => {
     width: calc(var(--ptz-cell) * 0.42);
     height: calc(var(--ptz-cell) * 0.42);
   }
+}
+</style>
+
+<!--
+  协议菜单的样式必须放在非 scoped 块里。
+
+  el-popover 的 popper 是 teleport 到 <body> 的，元素上没有本组件的
+  data-v 标记 —— scoped 里的选择器压根匹配不到（写了也不生效）。
+  带 .share-proto-menu 前缀（见模板的 popper-class）限定作用域，
+  不影响平台上其它弹层。
+-->
+<style>
+.share-proto-menu .proto-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 抵消 popover 自带内边距，让每一行都铺满、点击区域更大 */
+  margin: -4px -8px;
+}
+
+.share-proto-menu .proto-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+}
+
+.share-proto-menu .proto-menu-item:hover {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+
+/* 当前项：加粗 + 品牌色，一眼看出现在用的是哪一档 */
+.share-proto-menu .proto-menu-item.is-current {
+  color: var(--el-color-primary);
+  font-weight: 600;
 }
 </style>
