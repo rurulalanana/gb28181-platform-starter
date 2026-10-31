@@ -371,6 +371,14 @@ export function useLivePlayer(containerRef, hooks = {}) {
          * {@code playFile}（云端录像 MP4）不经过那里，进度条保留。
          */
         hideProgress: opts._hideProgress === true,
+        /*
+         * 控制栏自定义按钮（例如「播放协议」）。
+         *
+         * <p>从 {@code opts} 透传而不是写死：不同视图要的按钮不一样，
+         * 电视墙就不需要协议切换（那是全局选项）。
+         */
+        controlButtons: opts.controlButtons || null,
+        onControlButton: opts.onControlButton,
         onDebug: (stage, extra) => log('lp', { stage, ...(extra || {}) }),
         onReady: () => {
           if (disposed) return finish(true)
@@ -667,18 +675,38 @@ export function useLivePlayer(containerRef, hooks = {}) {
   /**
    * 切换协议（播放中直接重连）。
    *
+   * <p><b>必须带上上次 {@code play()} 的选项</b>：切换协议实际是
+   * 「停掉再重新 play 一次」，只传 {@code proto} 会把其余设置全部丢掉 ——
+   * 例如控制栏自定义按钮就消失了（实测切一次协议「播放协议」按钮不见了），
+   * 暂停/继续、卡顿重建等一系列回调也会一起失效。
+   *
    * @param {string} proto 新协议
    * @param {object} urls 播放地址集合
    */
   async function switchProtocol(proto, urls) {
     const sid = currentStream.value
     if (!sid) return
-    await play(sid, urls, { proto })
+    await play(sid, urls, { ...playOpts, proto })
   }
 
   /** 退出 CSS 全屏兜底（业务侧关闭弹窗时调用）。 */
   function exitCssFullscreen() {
     // LivePlayer 用原生全屏，无需额外处理；保留接口兼容
+  }
+
+  /**
+   * 更新控制栏按钮文字。
+   *
+   * <p>用于「按钮上显示当前状态」的场景（如播放协议）：切换协议后
+   * 引擎自身不知道叫什么名字好，得由业务层把新文案传进去。
+   *
+   * @param {string} id 按钮 id（{@code play()} 的 {@code controlButtons} 里定义的）
+   * @param {string} text 新文字
+   */
+  function setControlButtonText(id, text) {
+    if (engine && typeof engine.setControlButtonText === 'function') {
+      engine.setControlButtonText(id, text)
+    }
   }
 
   /** 停止并释放全部资源。 */
@@ -727,6 +755,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     playFile,
     stop,
     switchProtocol,
+    setControlButtonText,
     exitCssFullscreen
   }
 }

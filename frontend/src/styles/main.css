@@ -983,6 +983,52 @@ body {
   inset: 0;
 }
 
+/*
+ * 控制栏里的自定义文字按钮（LivePlayerEngine 的 controlButtons）。
+ *
+ * <h3>为什么要单独写样式</h3>
+ * video.js 的 `.vjs-button` 是按「图标按钮」设计的：固定 4em 宽、
+ * 用 `:before` 画字体图标。我们的按钮只有一段文字、没有图标，
+ * 直接用默认样式会有三个问题：
+ *   1. 宽度写死 4em —— "HTTP-FLV" 这种长文本会被挤成两行或溢出；
+ *   2. 高度按图标行高算，文字标题不居中；
+ *   3. `:before` 是空的，但仍占位，导致文字偏右。
+ *
+ * <p>所以：宽度 auto（按文字自适应）+ 左右内边距、去掉 `:before`、
+ * 用 flex 居中。字号 12px 比控制栏其它图标小一号 —— 它是文字，
+ * 与 14px 的图标并排时视觉重量才接近。
+ */
+.vjs-control-bar .lp-ctrl-btn {
+  width: auto;
+  min-width: 0;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  /* 与相邻图标按钮同色系（video.js 用 currentColor 继承 .vjs-control 的白色） */
+  color: inherit;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.vjs-control-bar .lp-ctrl-btn:hover {
+  opacity: 1;
+}
+
+/* 去掉图标按钮的伪元素占位 */
+.vjs-control-bar .lp-ctrl-btn:before {
+  content: none;
+}
+
+.vjs-control-bar .lp-ctrl-btn .lp-ctrl-text {
+  /* 文字按钮不需要额外位移，居中即可 */
+  display: inline-block;
+  line-height: 1;
+}
+
 /* ==================== 通用工具类 ==================== */
 
 .text-muted { color: var(--text-secondary); }

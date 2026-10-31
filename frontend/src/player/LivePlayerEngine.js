@@ -303,6 +303,9 @@ export class LivePlayerEngine {
    * @param {boolean} [opts.webrtc] 是否走组件内置的 Webrtc tech
    * @param {boolean} [opts.hideProgress] 隐藏进度条与时间显示（直播/设备回放必传，见 CSS 注释）
    * @param {boolean} [opts.debug] 打开组件自身的调试日志（Webrtc tech 的日志只能这么开）
+   * @param {Array<{id:string,title:string,text:string}>} [opts.controlButtons]
+   *        要插到控制栏的按钮（见 {@link LivePlayerEngine#_ensureControlButtons}）
+   * @param {(id:string, el:HTMLElement)=>void} [opts.onControlButton] 控制栏按钮点击
    * @param {(stage:string, extra?:object)=>void} [opts.onDebug] 诊断回调
    */
   constructor({
@@ -314,6 +317,8 @@ export class LivePlayerEngine {
     controls = true,
     hideProgress = false,
     debug = false,
+    controlButtons = null,
+    onControlButton,
     onError,
     onReady,
     onStats,
@@ -328,6 +333,11 @@ export class LivePlayerEngine {
     this.controls = controls
     this.hideProgress = hideProgress
     this.debug = debug
+    /** 要插到控制栏的按钮定义。 */
+    this.controlButtons = controlButtons || []
+    this.onControlButton = onControlButton || (() => {})
+    /** id → 已插入的 button 元素。 */
+    this._controlEls = {}
     this.onError = onError || (() => {})
     this.onReady = onReady || (() => {})
     this.onStats = onStats || (() => {})
@@ -489,7 +499,126 @@ export class LivePlayerEngine {
     }
     this._bindVideoEvents(0)
     this._startReadyWatchdog()
+    if (this.controlButtons.length) {
+      this._ensureControlButtons(0)
+      this._startControlBarObserver()
+    }
     return true
+  }
+
+  /**
+   * 盯住控制栏的 DOM 变动，按钮被重建掉就重插。
+   *
+   * <p><b>为什么不用定时轮询</b>：控制栏只在「组件重建播放器」时才会换掉，
+   * 那是低频事件；而轮询得一直跑（重建可能发生在起播几十秒之后的重连里）。
+   * MutationObserver 只在真发生变动时触发，代价接近 0。
+   *
+   * <p>自身插入也会触发回调，但 {@link LivePlayerEngine#_ensureControlButtons}
+   * 里「已经在这个 bar 里就跳过」的判断让它自然幂等，不会死循环。
+   */
+  _startControlBarObserver() {
+    if (typeof MutationObserver === 'undefined' || this._ctrlObserver || !this.el) return
+    this._ctrlObserver = new MutationObserver(() => {
+      if (this.destroyed) return
+      this._ensureControlButtons(0)
+    })
+    this._ctrlObserver.observe(this.el, { childList: true, subtree: true })
+  }
+
+  /**
+   * 把自定义按钮插进 video.js 控制栏。
+   *
+   * <h3>为什么不用组件的 {@code customButtons} prop</h3>
+   *
+   * <p>liveplayer 确实提供了 {@code customButtons="标题:图标类"}，但它有两个
+   * 硬限制：
+   * <ul>
+   *   <li>按钮内容只能是<b>图标 class</b>（{@code <i class="xxx">}）或纯文本，
+   *       要动态改文字得去改内联 HTML，很脏；</li>
+   *   <li>点击只能回传 {@code title} 字符串，而 {@code title} 又兼作按钮标识 ——
+   *       想让它显示成「播放协议」就没法稳定识别是哪个按钮。</li>
+   * </ul>
+   * 直接往 {@code .vjs-control-bar} 插一个自己建的按钮更干净：
+   * 文字随时能改、点击回调能拿到元素（可以拿它当锚点弹菜单）。
+   *
+   * <h3>为什么要轮询</h3>
+   *
+   * <p>控制栏是 video.js 在 {@code ready} 之后才建的，比组件挂载晚；
+   * 而组件在某些通路（实测 Webrtc tech）还会<b>整个重建</b>播放器，
+   * 那时控制栏也会换一个新的 DOM —— 所以插完还要能被重新插回来
+   * （见 {@link LivePlayerEngine#_ensureControlButtons} 的幂等判断）。
+   *
+   * @param {number} tries 已重试次数
+   */
+  _ensureControlButtons(tries) {
+    if (this.destroyed || !this.controlButtons.length) return
+    const bar = this.el && this.el.querySelector('.vjs-control-bar')
+    if (!bar) {
+      if (tries < 40) setTimeout(() => this._ensureControlButtons(tries + 1), 250)
+      return
+    }
+    for (const def of this.controlButtons) {
+      /*
+       * 已经插过且还在这个 bar 里就跳过。
+       *
+       * <p>控制栏被重建后旧元素已经不在文档里，{@code bar.contains} 为假，
+       * 于是会自动重插 —— 不需要额外的「重建」事件。
+       */
+      const existing = this._controlEls[def.id]
+      if (existing && bar.contains(existing)) continue
+
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'vjs-button lp-ctrl-btn'
+      btn.title = def.title || def.id
+      btn.setAttribute('aria-label', def.title || def.id)
+      btn.dataset.lpBtn = def.id
+      const span = document.createElement('span')
+      span.className = 'lp-ctrl-text'
+      span.textContent = def.text || ''
+      btn.appendChild(span)
+      btn.addEventListener('click', (ev) => {
+        /*
+         * 阻止冒泡：控制栏容器上挂有 video.js 的「用户活动」监听，
+         * 不拦的话点完会把控制栏当作待隐藏状态，某些布局下会直接收起。
+         */
+        ev.preventDefault()
+        ev.stopPropagation()
+        try {
+          this.onControlButton(def.id, btn)
+        } catch (e) {
+          // 忽略业务回调自身异常，不影响播放
+        }
+      })
+      /*
+       * 插在「全屏」之前：协议切换与拉伸/截图/全屏同属显示类开关，
+       * 放一起比放最左（播放/音量区）更合语义。
+       */
+      const anchor = bar.querySelector('.vjs-fullscreen-control')
+      if (anchor) bar.insertBefore(btn, anchor)
+      else bar.appendChild(btn)
+      this._controlEls[def.id] = btn
+      this._dbg('control-button-added', { id: def.id, text: def.text })
+    }
+  }
+
+  /**
+   * 更新控制栏按钮文字（协议切换后调用）。
+   *
+   * @param {string} id 按钮 id
+   * @param {string} text 新文字
+   */
+  setControlButtonText(id, text) {
+    const btn = this._controlEls[id]
+    if (!btn) return
+    const span = btn.querySelector('.lp-ctrl-text')
+    if (span) span.textContent = text
+    else btn.textContent = text
+  }
+
+  /** 取控制栏按钮元素（当作弹层锚点用）。 */
+  controlButtonEl(id) {
+    return this._controlEls[id] || null
   }
 
   /**
@@ -822,6 +951,15 @@ export class LivePlayerEngine {
   destroy() {
     this.destroyed = true
     this._stopReadyWatchdog()
+    if (this._ctrlObserver) {
+      try {
+        this._ctrlObserver.disconnect()
+      } catch (e) {
+        // 忽略
+      }
+      this._ctrlObserver = null
+    }
+    this._controlEls = {}
     if (this.vnode) {
       try {
         // render(null, el) 触发 unmounted，组件内部会 destroy videojs 实例

@@ -289,10 +289,11 @@
       width="min(1520px, 96vw)"
       top="5vh"
       class="preview-dialog"
+      :class="{ 'is-video-only': !hasPtz }"
       @close="closePreview"
       @closed="onPreviewClosed"
     >
-      <div class="preview-wrap">
+      <div class="preview-wrap" :class="{ 'is-video-only': !hasPtz }">
         <!--
           视频栏：整块黑底，视频 16:9 居中。
           行高由右侧云台面板决定，视频比它矮时多出来的部分是播放器的黑边，
@@ -318,50 +319,55 @@
               <span class="video-state-dot" />
               <span class="video-state-text">{{ state }}</span>
             </div>
+
+            <!--
+              播放协议切换：挪进播放器控制栏（见 startPlay 里的 controlButtons）。
+
+              <p>这里只留一个「虚拟触发」的弹层：按钮是引擎用 DOM 建的，
+              Vue 拿不到它的组件实例，所以用 el-popover 的 virtual-triggering
+              把它当锚点（{@code protoAnchorEl} 由 onPlayerControlButton 回传）。
+              placement 选 top：控制栏在底部，菜单往上弹才不会被容器裁掉
+              （.video-box 是 overflow:hidden）。
+            -->
+            <el-popover
+              v-model:visible="protoMenuVisible"
+              :virtual-ref="protoAnchorEl"
+              virtual-triggering
+              trigger="click"
+              placement="top-end"
+              :width="150"
+              popper-class="preview-proto-menu"
+            >
+              <div class="proto-menu">
+                <button
+                  v-for="o in LIVE_PROTOCOLS"
+                  :key="o.value"
+                  type="button"
+                  class="proto-menu-item"
+                  :class="{ 'is-current': o.value === proto }"
+                  @click="switchProtoTo(o.value)"
+                >
+                  {{ o.label }}
+                </button>
+              </div>
+            </el-popover>
           </div>
         </div>
-        <div class="preview-side">
+        <div v-if="hasPtz" class="preview-side">
           <!--
             云台面板只在通道被标为可云台（球机 / 半球 / 遥控枪机）时提供。
-            类型未知或固定枪机时不显示 —— 面板里的方向键对固定枪机无效，
-            摆在那里只会让人反复点而怀疑平台坏了。
+            类型未知或固定枪机时整栏都不渲染 —— 面板里的方向键对固定枪机无效，
+            摆在那里只会让人反复点而怀疑平台坏了；
+            而只放一个 el-empty 占着 340px 宽、609px 高的白块更糟（大片空白）。
           -->
           <PtzPanel
-            v-if="previewTarget && supportsPtz(previewTarget.ptzType)"
+            v-if="previewTarget"
             :serial="previewTarget.deviceId"
             :code="previewTarget.id"
             :disabled="!playing"
           />
-          <el-empty
-            v-else-if="previewTarget"
-            description="该通道未标记云台类型，无法云台控制"
-            :image-size="60"
-          />
         </div>
       </div>
-      <template #footer>
-        <!--
-          播放协议选择。
-
-          <p>LivePlayer 没有「往控制栏插自定义按钮」的扩展点，所以协议切换
-          放在这里（与实时预览页一致）。切换后立即重连当前流。
-        -->
-        <el-select
-          v-model="proto"
-          size="small"
-          style="width: 168px; margin-right: 12px"
-          title="播放协议"
-          @change="switchProto"
-        >
-          <el-option
-            v-for="o in LIVE_PROTOCOLS"
-            :key="o.value"
-            :label="o.label"
-            :value="o.value"
-          />
-        </el-select>
-        <el-button @click="closePreview">关闭</el-button>
-      </template>
     </el-dialog>
 
     <!-- 重命名对话框 -->
@@ -470,6 +476,26 @@ watch(
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)
+
+/**
+ * 当前通道是否支持云台（决定弹窗是两栏还是单栏）。
+ *
+ * <p>不支持时<b>整栏不渲染</b>：只放一个 el-empty 占着 340×609 的白块，
+ * 比没有还难看（用户反馈的「空白」主要就是它）。
+ */
+const hasPtz = computed(() => !!previewTarget.value && supportsPtz(previewTarget.value.ptzType))
+
+/**
+ * 协议短名（只用于画面右上角那个胶囊）。
+ *
+ * <p>不放到 {@code resolvePlayUrls} 里：那是共享的协议定义，
+ * 里面刻意只用完整名（下拉要看清）；而胶囊只有 24px 高，
+ * “WebSocket-FLV” 这种长名会把角标撑得很宽 —— 它纯属本页的展示细节。
+ */
+const PROTO_PILL = { webrtc: 'WebRTC', wsflv: 'FLV', httpflv: 'HTTP-FLV', hls: 'HLS' }
+
+/** 当前协议的短名。 */
+const protoShort = computed(() => PROTO_PILL[proto.value] || proto.value)
 
 const renameDialog = ref(false)
 const renameTarget = ref(null)
@@ -689,10 +715,68 @@ async function startPlay() {
   }
   await player.play(streamId, urls, {
     proto: proto.value,
+    /*
+     * 控制栏里的「播放协议」按钮。
+     *
+     * <p>以前它在弹窗页脚（与「关闭」并排），后来摆到画面右上角，
+     * 但浮层会盖住画面、又容易和弹窗 header 争层级（实测点不到）；
+     * 控制栏本来就是「改这路画面怎么放」的地方，放这里最顺。
+     */
+    controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
+    onControlButton: onPlayerControlButton,
     // 通了但始终没视频轨时，重建整路流（见 rebuidStalled 的说明）
     onStall: () => rebuildStalled()
   })
+  syncProtoLabel()
 }
+
+/* ---------------- 控制栏按钮 ---------------- */
+
+/**
+ * 协议菜单是否展开（锚定在控制栏那个按钮上）。
+ *
+ * <p>用 {@code el-popover} 的虚拟触发：按钮是引擎直接用 DOM 建的
+ * （不在 Vue 模板里），拿不到组件实例，只能把它当锚点元素传给 popover。
+ */
+const protoMenuVisible = ref(false)
+/** 控制栏按钮元素（popover 锚点）。 */
+const protoAnchorEl = ref(null)
+
+/**
+ * 控制栏按钮点击。
+ *
+ * <p>只负责把锚点交给 popover，<b>是否展开由 el-popover 自己管</b>：
+ * {@code virtual-triggering} 会把 click 监听挂到锚点元素上自行 toggle。
+ * 若这里也写 {@code visible = true}，第二次点击会变成「它 toggle 成 false、
+ * 我又设回 true」，菜单就关不掉了。
+ *
+ * <p>唯一的例外是「第一次拿到锚点」那次点击 —— 监听要等 popover 重新渲染
+ * 才挂上，这一次它收不到，所以手动打开一次。
+ *
+ * @param {string} id 按钮 id
+ * @param {HTMLElement} el 按钮元素（当作 popover 锚点）
+ */
+function onPlayerControlButton(id, el) {
+  if (id !== 'proto') return
+  if (protoAnchorEl.value === el) return
+  protoAnchorEl.value = el
+  protoMenuVisible.value = true
+}
+
+/**
+ * 把当前协议文案同步到控制栏按钮。
+ *
+ * <p><b>为什么不能只靠 watch</b>：切换协议实际上是「重新 play 一次」——
+ * 新引擎的按钮文案取自 {@code playOpts}，而那份 opts 是<b>上一次</b> play
+ * 时存下的（文案已经旧了）。watch 触发时引擎往往还没建好，写入落空。
+ * 所以每次 play / switch 结束后再补一刀。
+ */
+function syncProtoLabel() {
+  player.setControlButtonText('proto', protoShort.value)
+}
+
+/** 协议文案变化时同步到控制栏按钮上（自动兜底时也会走到）。 */
+watch(protoShort, syncProtoLabel)
 
 /**
  * 切换播放方式（ws-flv ↔ WebRTC）。
@@ -725,9 +809,28 @@ async function switchProto(next) {
   }
   if (!urls || !hasPlayUrl(next || proto.value, urls)) {
     await startPlay()
+    syncProtoLabel()
     return
   }
   await player.switchProtocol(next || proto.value, urls)
+  syncProtoLabel()
+}
+
+/**
+ * 画面右上角的下拉选项回调。
+ *
+ * <p>先写回 {@code proto} 再调 {@link switchProto}：{@code switchProto}
+ * 在「未播放」时只记住选择，在「已播放」时会用它作为目标协议 ——
+ * 两条路径都读 {@code proto}，所以赋值必须在调它之前。
+ * 选中当前项时直接关掉菜单，避免白白断流重连一次。
+ *
+ * @param {string} next 目标协议
+ */
+function switchProtoTo(next) {
+  protoMenuVisible.value = false
+  if (!next || next === proto.value) return
+  proto.value = next
+  switchProto(next)
 }
 
 /**
@@ -1154,9 +1257,8 @@ onUnmounted(() => player.stop())
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 24px;
   /*
-   * 行高由两栏内容高度的较大值决定 —— 这里是<b>右栏</b>（约 641px）。
-   * 视频按 16:9 只能到 474px，所以左栏会比视频高；由下面的
-   * .preview-stage 用黑底居中处理，不再是白空白。
+   * 行高由两栏内容高度的较大值决定 —— 这里是<b>右栏</b>（云台面板）。
+   * 视频比它矮时就居中，四周留的是弹窗背景（不是黑框）。
    */
   align-items: stretch;
   /*
@@ -1170,7 +1272,18 @@ onUnmounted(() => player.stop())
    * 正常视口下它算出来总是大于栏宽对应值，上限就不生效，视频铺满一栏；
    * 只有真正矮的视口才会被夹住。
    */
-  --video-max-h: calc(100vh - 260px);
+  --video-max-h: calc(100vh - 210px);
+}
+
+/*
+ * 单栏模式（通道不支持云台）：去掉右栏，视频吃满整个弹窗。
+ *
+ * <p>不渲染右栏后，行高就只由视频决定 —— 弹窗高度自动收缩，
+ * 不会再出现「左边一块黑、右边一片白」的对比。
+ */
+.preview-wrap.is-video-only {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
 }
 
 /*
@@ -1413,6 +1526,58 @@ onUnmounted(() => player.stop())
 /* 弹窗标题：比默认 18px 收一点，与紧凑布局更协调 */
 .preview-dialog .el-dialog__title {
   font-size: 15px;
+  font-weight: 600;
+}
+
+/*
+ * 单栏（无云台）时把弹窗宽度也收窄，否则左右会多出两大块弹窗背景。
+ *
+ * <p>公式与 {@code .video-box} 的 max-width 一致：视频最高
+ * {@code 100vh - 210px}，16:9 下的宽度就是它 × 16/9；再加 76px
+ * （弹窗 body 左右内边距，实测 74~78）正好装下、不多留白。
+ * 视口再宽也不超过 96vw；窄屏时视频改用宽度 100% 适配，同样填满。
+ */
+.preview-dialog.is-video-only {
+  width: min(calc((100vh - 210px) * 16 / 9 + 76px), 96vw) !important;
+}
+
+/*
+ * 协议菜单（el-popover 的内容）。
+ *
+ * <p>必须写在非 scoped 块里：popover 的 popper 是 teleport 到 body 的，
+ * 元素上没有本组件的 data-v 标记，scoped 选择器压根匹配不到。
+ * 用 {@code popper-class} 限定作用域（见模板），不影响其它弹层。
+ */
+.preview-proto-menu .proto-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: -4px -8px;
+}
+
+.preview-proto-menu .proto-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+}
+
+.preview-proto-menu .proto-menu-item:hover {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+
+/* 当前项：加粗 + 品牌色，一眼看出现在用的是哪一档 */
+.preview-proto-menu .proto-menu-item.is-current {
+  color: var(--el-color-primary);
   font-weight: 600;
 }
 </style>
