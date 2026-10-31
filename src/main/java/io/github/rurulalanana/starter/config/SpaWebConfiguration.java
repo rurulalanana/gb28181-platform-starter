@@ -209,7 +209,9 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         // 一级路由（前端菜单路径）
         String[] routes = {
                 "dashboard", "live", "control", "devices", "channels", "playback",
-                "cloud", "alarms", "cascade", "users", "oplogs", "settings"
+                "cloud", "alarms", "cascade", "users", "oplogs", "settings",
+                // 免登录的对外页面：直播分享页（对齐 CMS 的 play.html）与 iframe 嵌入测试页
+                "play", "iframe-test"
         };
         for (String route : routes) {
             registry.addViewController("/" + route).setViewName("forward:/index.html");

@@ -1,10 +1,14 @@
 <template>
-  <div class="play-page">
+  <div class="play-page" :class="{ 'is-embed': embedMode }">
     <!--
       顶部标题栏：对齐 CMS play.html 的 .navbar —— 高 50px、通栏、
       标题居中、白色加粗。CMS 用 #556677，这里换成我们的品牌主色 --brand-600。
+
+      <p>嵌入模式（{@code aspect=fullscreen} 或 被 iframe 嵌入）时整条隐藏：
+      宿主页面已经把「这是哪个摄像头」写在它自己的标题上了，
+      这里再画一条顶栏只是白白占高度。
     -->
-    <header class="play-header">
+    <header v-if="!embedMode" class="play-header">
       <h1 class="play-title">{{ title }}</h1>
     </header>
 
@@ -12,8 +16,10 @@
       <!--
         播放区：CMS 是 16:9 的居中黑块。这里同样按 16:9，但用 max-width 限制
         最大宽度 —— 超宽屏上铺满会让画面过大、首屏看不到下方的分享面板。
+
+        <p>嵌入模式下把宽度上限与间距全部取消，画面吃满整个视口。
       -->
-      <div class="play-stage">
+      <div class="play-stage" :class="{ 'is-stretch': stretchMode }">
         <div ref="videoContainer" class="play-video" />
         <div v-if="!playing" class="play-placeholder">
           <template v-if="loading">加载中…</template>
@@ -46,7 +52,7 @@
           {@code Teleport} 的 {@code disabled} 为真时就地渲染，
           刚好用来做这种「同一个组件两处落子」，不用把模板写两遍。
         -->
-        <Teleport :to="ptzMobileHost" :disabled="!isMobile">
+        <Teleport :to="ptzMobileHost" :disabled="!isMobile || embedMode">
           <div
             v-show="ptzReady"
             ref="ptzBlock"
@@ -100,8 +106,16 @@
         还矮 —— 浮在画面上会盖掉近半个画面，浮到卡片旁边又会把分享内容
         挤成 240px 宽（输入框只看得见半截链接）。所以窄屏改成
         <b>Tab 切换</b>：一次只展示一个面板，两个都拿到满宽。
+
+        <p><b>嵌入模式整块不渲染</b>：宿主页面只会把 iframe 当画面用，
+        分享链接 / 二维码 / 嵌入代码对它毫无意义；而那块卡片至少占 400px 高，
+        在 640×360 的 iframe 里直接超出一整屏，画面被挤得只剩顶部一条。
+
+        <p><b>云台块反而保留</b>：它是浮在画面上的（默认只露一个半透明圆点，
+        鼠标移入才展开），不占布局高度，而「能转云台」正是嵌入方最想要的能力
+        之一。若宿主想自己做一套，同名接口 {@code /api/v1/share/ptz} 也可直接用。
       -->
-      <div class="play-lower">
+      <div v-if="!embedMode" class="play-lower">
         <section class="share-card">
           <!--
             Tab 条。宽屏时只有「分享」一项 —— 保持改造前那个标签页的观感
@@ -225,7 +239,7 @@
         </section>
       </div>
 
-      <footer class="play-foot">GB/T 28181—2022 视频监控平台</footer>
+      <footer v-if="!embedMode" class="play-foot">GB/T 28181—2022 视频监控平台</footer>
     </main>
   </div>
 </template>
@@ -258,6 +272,59 @@ const playing = computed(() => player.playing.value)
 
 const serial = computed(() => String(route.query.serial || '').trim())
 const code = computed(() => String(route.query.code || '').trim())
+
+/* ---------------- CMS 兼容参数 ---------------- */
+
+/**
+ * 是否被 iframe 嵌入。
+ *
+ * <p><b>为什么用 {@code frameElement} 而不是 {@code window.top !== window.self}</b>：
+ * 两者语义相同，但访问 {@code window.top} 在<b>跨域</b>嵌入时会抛
+ * {@code SecurityError}（同源策略），必须包 try/catch；
+ * {@code window.frameElement} 跨域时返回 {@code null} 而不抛错 —— 但那样就
+ * 分不清「嵌入在不同源」与「根本没嵌入」。
+ * 所以两者都用：{@code frameElement} 能读到就直接判定，抛错/为 null 时再看
+ * {@code top !== self}（跨域下这个比较是允许的，只是不能读 top 的属性）。
+ */
+const inIframe = computed(() => {
+  if (typeof window === 'undefined') return false
+  try {
+    if (window.frameElement) return true
+    return window.top !== window.self
+  } catch (e) {
+    // 跨域访问 top 被拦 —— 说明确实在 iframe 里
+    return true
+  }
+})
+
+/**
+ * 嵌入模式：只留播放画面，标题栏与分享面板全部去掉。
+ *
+ * <p>两种触发方式：
+ * <ul>
+ *   <li>被 iframe 嵌入 —— 宿主页面自己管标题与控件，本页画蛇添足只会挤压画面；</li>
+ *   <li>显式传 {@code aspect=fullscreen} —— 对齐 CMS 的
+ *       {@code play.html?...&aspect=fullscreen}。用于「直接新窗口打开当播放器」，
+ *       此时没人会去点分享面板。</li>
+ * </ul>
+ */
+const embedMode = computed(() => {
+  if (inIframe.value) return true
+  const aspect = String(route.query.aspect || '').trim().toLowerCase()
+  return aspect === 'fullscreen' || aspect === 'full'
+})
+
+/**
+ * 是否拉伸画面填满容器。
+ *
+ * <p>对齐 CMS 的 {@code stretch=yes}：监控现场常见「球机画面是 16:9、
+ * 墙面电视墙格子却是方的」，等比显示会留黑边，值班室要求铺满。
+ * 拉伸会让画面变形，所以只是<b>可选</b>，默认仍是等比（contain）。
+ */
+const stretchMode = computed(() => {
+  const v = String(route.query.stretch || '').trim().toLowerCase()
+  return v === 'yes' || v === '1' || v === 'true'
+})
 
 /** 标题：优先通道名，没有时退回编码（对齐 CMS 的 .channel-title）。 */
 const title = computed(() => {
@@ -702,6 +769,52 @@ watch(ptzReady, (ok) => {
   background: var(--bg-app);
   color: var(--text-primary);
   font-size: var(--fs-md);
+}
+
+/*
+ * 嵌入模式（iframe 或 aspect=fullscreen）：只留画面。
+ *
+ * <p>三件事：
+ * <ul>
+ *   <li>去掉内容区四周的内边距与栏间距 —— 那里每 1px 都是画面的损失；</li>
+ *   <li>视口铺满用 {@code 100dvh} 且不允许滚动，避免 iframe 里出现
+ *       一条纵向滚动条（640×360 的 iframe 里那条滚动条会吃掉 15px 宽）；</li>
+ *   <li>底色改黑 —— 若视口比 16:9 更「胖」，多出来的那一截也会是黑的，
+ *       与画面边框融为一体，而不是突兀的一条浅灰。</li>
+ * </ul>
+ */
+.play-page.is-embed {
+  background: #000;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.play-page.is-embed .play-content {
+  padding: 0;
+  gap: 0;
+  /* 单行单列：让 .play-stage 直接吃满剩余空间 */
+  display: block;
+}
+
+/* 嵌入模式下播放区不再锁 16:9，改为铺满可用区域（画面本身由 object-fit 控制） */
+.play-page.is-embed .play-stage {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+/*
+ * 拉伸模式（CMS 的 {@code stretch=yes}）：让画面填满容器。
+ *
+ * <p>用 {@code !important} 压过 {@code .lp-fill video} 的 {@code object-fit:contain}
+ * —— 那条是引擎注入的全局样式，权重不高但顺序在后，不加重会被盖掉。
+ * 只在面板上生效，不影响主平台（那边的画面必须等比）。
+ */
+.play-stage.is-stretch :deep(video) {
+  object-fit: fill !important;
 }
 
 /* ---- 顶部标题栏：对齐 CMS 的 .navbar（50px 通栏，标题居中白色加粗） ---- */

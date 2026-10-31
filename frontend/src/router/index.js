@@ -34,6 +34,19 @@ const routes = [
     meta: { public: true, title: '直播分享' }
   },
   {
+    /*
+     * iframe 嵌入测试页：免登录。
+     *
+     * <p>免登录是刻意的：这一页要在「别人的机器、别人的浏览器」上打开，
+     * 用来判断「嵌到我站里能不能播」。要登录就等于多一道门槛，
+     * 而它本身不含任何敏感数据 —— 通道编码由使用者自己填。
+     */
+    path: '/iframe-test',
+    name: 'iframeTest',
+    component: () => import('@/views/IframeTestView.vue'),
+    meta: { public: true, title: 'iframe 嵌入测试' }
+  },
+  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/dashboard',
