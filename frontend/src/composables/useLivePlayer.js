@@ -261,7 +261,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
       return
     }
 
-    const ok = await playLivePlayer(urlOf(proto, urls), playOpts)
+    const ok = await playLivePlayer(urlOf(proto, urls), playOpts, proto)
     if (!ok) reportFatal()
   }
 
@@ -342,7 +342,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
    * @param {object} [opts] 透传参数
    * @returns {Promise<boolean>} 是否成功起播
    */
-  async function playLivePlayer(url, opts = {}) {
+  async function playLivePlayer(url, opts = {}, proto = '') {
     if (!url) {
       state.value = '缺少播放地址'
       return false
@@ -358,8 +358,19 @@ export function useLivePlayer(containerRef, hooks = {}) {
     const isWebrtc = opts._webrtc === true
     /** 是否点播（点播时组件显示进度条）。 */
     const isVod = opts._vod === true
+    /**
+     * 是否走原生 HLS（不经 video.js）。
+     *
+     * <p>不经 video.js 是<b>必需的</b>：它会把这个 m3u8 交给一个残缺的
+     * contrib-hls source handler，后者把 src 改成 {@code blob:} 去走 MSE
+     * —— iOS 上没有 MSE，于是明明能播的 HLS 也会失败。
+     * 详见 {@code LivePlayerEngine#_startNativeHls}。
+     */
+    const nativeHls = proto === 'hls'
 
-    state.value = isWebrtc ? '协商中…' : (isVod ? '加载中…' : '连接中…')
+    state.value = isWebrtc
+      ? '协商中…'
+      : (nativeHls ? '加载中…' : (isVod ? '加载中…' : '连接中…'))
     playing.value = false
     fatalMsg = ''
 
@@ -376,6 +387,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
       engine = new LivePlayerEngine({
         url,
         el,
+        nativeHls,
         /*
          * 一律静音起播。
          *
@@ -451,7 +463,9 @@ export function useLivePlayer(containerRef, hooks = {}) {
         if (engine && engine._readyFired) return
         const msg = isWebrtc
           ? 'WebRTC 协商超时，请确认 UDP 48000 未被防火墙拦截'
-          : '该通道的视频编码 LivePlayer 不支持（多为 H.265），请切换协议为 WebRTC'
+          : (nativeHls
+            ? 'HLS 加载超时，请确认媒体端口 8081 可从手机直连'
+            : '该通道的视频编码 LivePlayer 不支持（多为 H.265），请切换协议为 WebRTC')
         log('err', {
           where: isWebrtc ? 'webrtc-timeout' : 'liveplayer-timeout',
           ct: engine ? engine.currentTime() : null,
@@ -667,7 +681,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
       state.value = '缺少 WebRTC 地址'
       return false
     }
-    return playLivePlayer(url, { ...playOpts, _webrtc: true, proto: 'webrtc' })
+    return playLivePlayer(url, { ...playOpts, _webrtc: true, proto: 'webrtc' }, 'webrtc')
   }
 
   /**

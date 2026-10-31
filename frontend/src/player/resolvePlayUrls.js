@@ -264,6 +264,18 @@ export function hasPlayUrl(proto, urls) {
  */
 export function supportsFlv() {
   if (typeof window === 'undefined') return false
+  /*
+   * Apple WebKit 一律不可用。
+   *
+   * <p><b>不能只看 MediaSource 存不存在</b>：iOS 17.1+ 的 WKWebView
+   * （微信/QQ 内置浏览器都是它）会挂上 {@code ManagedMediaSource}，
+   * 某些版本甚至透出 {@code MediaSource}，此时下面的探测会通过、菜单里
+   * 就会出现 FLV。但 flv.js 那套「自己 append + 自己清 SourceBuffer」的
+   * 缓冲策略与托管缓冲对不上，真点下去必然黑屏。
+   *
+   * <p>实测环境：iPhone + 微信内置浏览器，FLV 选项可点、点后无画面。
+   */
+  if (isAppleWebkit()) return false
   const MS = window.MediaSource || window.WebKitMediaSource
   if (!MS || typeof MS.isTypeSupported !== 'function') return false
   try {
@@ -291,15 +303,61 @@ export function supportsFlv() {
  * </ul>
  */
 export function supportsHls() {
-  if (typeof window === 'undefined') return false
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
+  /*
+   * HLS 只走「原生」，而且只给 Apple WebKit。
+   *
+   * <h3>为什么 Chromium 不给 HLS</h3>
+   *
+   * <p>打包进来的 {@code liveplayer-lib.min.js} 里 HLS 支持是残缺的：
+   * {@code videojs.getTech('Vhs')} 为 false（VHS 没打进来），而注册的
+   * contrib-hls source handler 会把 {@code application/x-mpegURL} 抢走、
+   * 把 src 改成 {@code blob:} 去走 MSE —— 那条路是死的。
+   * 实测（干净桌面 Chrome/Electron 环境）切到 HLS：
+   * {@code readyState} 恒为 0、报 {@code code=4
+   * PipelineStatus::DECODER_ERROR}。
+   *
+   * <p>更深一层，ZLM 的 HLS 分片是 H.264 + <b>G.711</b> 音频，
+   * Chromium 的 MSE/TS 管线拿不到 G.711 解码器，整条 pipeline 直接崩 ——
+   * 就算换了 hls.js 也一样。
+   *
+   * <p>而 Safari <b>原生</b>就能解 G.711-in-HLS，所以 Apple 上这条是通的。
+   *
+   * <h3>为何必须搭配原生播放（见 LivePlayerEngine#nativeHls）</h3>
+   *
+   * <p>光靠这个函数返回 true 不够：只要经过 video.js，source handler
+   * 还是会把它抢去 MSE（iOS 没有 MSE → 必挂）。所以
+   * {@code useLivePlayer} 走 {@code hls} 时会传 {@code nativeHls: true}，
+   * 直接用 {@code <video src=m3u8>}，完全绕开 video.js。
+   */
+  if (!isAppleWebkit()) return false
   try {
     const v = document.createElement('video')
-    const mime = 'application/vnd.apple.mpegurl'
-    if (v.canPlayType(mime) === 'maybe' || v.canPlayType(mime) === 'probably') return true
+    const r = v.canPlayType('application/vnd.apple.mpegurl')
+    return r === 'maybe' || r === 'probably'
   } catch (e) {
-    // 落到下面的 MSE 判断
+    return false
   }
-  return supportsFlv()
+}
+
+/**
+ * 当前浏览器是否是 Apple 的 WebKit 内核。
+ *
+ * <p>iOS/iPadOS 上必须按<b>平台</b>判，不能按 UA 里的浏览器名：
+ * 苹果强制所有 iOS 浏览器（含 Chrome for iOS、微信/QQ 内置浏览器）
+ * 都用 WebKit，它们<b>同样没有可用 MSE、同样有原生 HLS</b>。
+ *
+ * <p>iPadOS 13+ 默认发桌面 UA（{@code Macintosh}），靠
+ * {@code maxTouchPoints > 1} 兜住。
+ */
+export function isAppleWebkit() {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  if (/iPad|iPhone|iPod/.test(ua)) return true
+  if (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1) return true
+  // macOS 上的 Safari：vendor 是 Apple，且不是 Chromium 换皮
+  const vendor = navigator.vendor || ''
+  return vendor === 'Apple Computer, Inc.' && !/Chrome|Chromium|Edg|OPR|Electron/.test(ua)
 }
 
 /**
@@ -310,6 +368,58 @@ export function supportsHls() {
  */
 export function supportsWebrtc() {
   return typeof window !== 'undefined' && typeof window.RTCPeerConnection === 'function'
+}
+
+/**
+ * 是否是手机端（决定要不要给用户「播放协议」这个选项）。
+ *
+ * <h3>为什么手机端干脆不给切换入口</h3>
+ *
+ * <p>不是能力问题，是<b>取舍</b>：手机上可选的协议本来就剩不下几个，
+ * 而每个都有明确的坑 ——
+ * <ul>
+ *   <li>FLV（ws/http）：Apple 全系没有可用 MSE，安卓某些定制浏览器也不行；</li>
+ *   <li>HLS：延迟 3 个切片（≈6s+），且 ZLM 的 HLS 带 G.711 音频，
+ *       非 Safari 解不了；</li>
+ *   <li>WebRTC：手机端唯一既低延迟又有声音、还支持 H.265 的通路。</li>
+ * </ul>
+ * 把三个都摆出来，用户只会点到一个必然失败的选项，然后来问「为什么播不了」。
+ * 与其在手机上调判断逻辑，不如<b>不给这个选项</b>：默认就是 WebRTC，
+ * 它出不来时直接如实报错（比「切了个协议还是不行」清楚得多）。
+ *
+ * <p>桌面端保留完整切换入口 —— 那里四个协议真的都能用，
+ * 排查时也需要逐条对照。
+ *
+ * <h3>判据</h3>
+ *
+ * <p>「Apple 移动端」或「窄视口」任一成立即算：
+ * <ul>
+ *   <li>UE 里带 iPad/iPhone/iPod，或 iPadOS 桌面 UA + 多点触控；</li>
+ *   <li>视口窄于 {@code 820px} —— 覆盖安卓手机（竖屏一般 360~430）。</li>
+ * </ul>
+ * 桌面浏览器把窗口拖到很窄也会命中，那时少一个按钮无伤大雅，
+ * 拉宽即恢复（{@code isMobile} 是响应式的，见视图里的 matchMedia 监听）。
+ */
+export function isMobileClient() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  // Apple 全系移动设备（横竖屏都算）
+  if (/iPad|iPhone|iPod/.test(ua)) return true
+  if (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1) return true
+  // 安卓 / 鸿蒙手机：UA 里有 Mobile（平板通常没有，但下面的 coarse 判据能兜住）
+  if (/Android|HarmonyOS|Mobile/i.test(ua)) return true
+  try {
+    /*
+     * 兜底两条，任一成立即算：
+     * - 窄视口：桌面浏览器拖窄、或某些精简 UA；
+     * - 粗指针：所有触屏设备。命中触屏笔记本时会少一个按钮，
+     *   但那台机器上少个协议切换无伤大雅，而漏判手机代价大得多。
+     */
+    return window.matchMedia('(max-width: 820px)').matches
+      || window.matchMedia('(pointer: coarse)').matches
+  } catch (e) {
+    return false
+  }
 }
 
 /**

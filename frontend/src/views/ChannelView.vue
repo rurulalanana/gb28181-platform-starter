@@ -410,7 +410,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
@@ -721,15 +721,24 @@ async function startPlay() {
     return
   }
   await player.play(streamId, urls, {
-    proto: proto.value,
     /*
-     * 控制栏里的「播放协议」按钮。
+     * 手机端固定 WebRTC，不提供切换。
+     *
+     * <p>手机上能用的只剩 WebRTC（FLV 没有可用 MSE，HLS 延迟 6s+ 且
+     * 非 Safari 解不了 G.711），给三个选项只会让用户点到必然失败的那个。
+     * 详见 {@code isMobileClient} 的注释。
+     */
+    proto: isMobileClient() ? LIVE_DEFAULT_PROTOCOL : proto.value,
+    /*
+     * 控制栏里的「播放协议」按钮：<b>仅桌面端提供</b>。
      *
      * <p>以前它在弹窗页脚（与「关闭」并排），后来摆到画面右上角，
      * 但浮层会盖住画面、又容易和弹窗 header 争层级（实测点不到）；
      * 控制栏本来就是「改这路画面怎么放」的地方，放这里最顺。
      */
-    controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
+    controlButtons: isMobileClient()
+      ? null
+      : [{ id: 'proto', title: '播放协议', text: protoShort.value }],
     onControlButton: onPlayerControlButton,
     /*
      * 浏览器放不了所选协议时（手机上选 FLV），引擎会自动降级到能播的那条。

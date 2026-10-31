@@ -293,7 +293,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLivePlayer } from '@/composables/useLivePlayer'
-import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, availableProtocols } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileClient } from '@/player/resolvePlayUrls'
 
 /**
  * 直播分享页（免登录）。
@@ -654,18 +654,33 @@ async function play() {
     return
   }
   notice.value = ''
+  /*
+   * 每次播放都重新算：手机旋转/桌面改窗口宽度后应跟着变。
+   */
+  const phone = isMobileClient()
   await player.play(`${data.deviceId}/${data.channelId}`, urls, {
-    proto: proto.value,
     /*
-     * 控制栏里的「播放协议」按钮。分享页尤其需要它：
-     * 外部人员进不了后台，换协议是他们唯一能自救的手段。
+     * 手机端固定 WebRTC，不提供切换。
+     *
+     * <p>手机上能用的只剩下 WebRTC（FLV 没有可用 MSE，HLS 延迟 6s+ 且
+     * 非 Safari 解不了 G.711），给三个选项只会让用户点到必然失败的那个。
+     * 详见 {@code isMobileClient} 的注释。
      */
-    controlButtons: [{ id: 'proto', title: '播放协议', text: protoShort.value }],
+    proto: phone ? LIVE_DEFAULT_PROTOCOL : proto.value,
+    /*
+     * 控制栏里的「播放协议」按钮：<b>仅桌面端提供</b>。
+     *
+     * <p>手机上不给这个入口 —— 那里的可选项本身就不靠谱（见上），
+     * 按钮只会变成「点了就黑屏」的陷阱。
+     */
+    controlButtons: phone
+      ? null
+      : [{ id: 'proto', title: '播放协议', text: protoShort.value }],
     onControlButton,
     /*
-     * 浏览器放不了所选协议时（手机上选 FLV），引擎会自动降级到能播的那条。
-     * 这里把真实协议同步到菜单/按钮，并告诉用户发生了什么 ——
-     * 否则他只会看到「画面出来了但按钮写着 FLV」，下次还会再选一遍。
+     * 浏览器放不了所选协议时，引擎会自动降级。
+     * 手机上不会发生（只有 WebRTC），但桌面端带 &proto=hls 这类
+     * 会被分享的链接进来时仍可能走到这里。
      */
     onProtoChange: (used, wanted) => {
       proto.value = used
@@ -675,8 +690,14 @@ async function play() {
       }
     },
     onFatal: (msg) => { notice.value = msg || '播放失败' },
-    // 不提示「请刷新页面」：这里能换协议，换一条通路往往就好了
-    onStall: () => { notice.value = '画面未就绪，可尝试切换播放协议' }
+    /*
+     * 说明文字按端区分：手机上不能换协议，让它去换只会白试。
+     */
+    onStall: () => {
+      notice.value = phone
+        ? '画面未就绪，请检查手机网络后刷新重试'
+        : '画面未就绪，可尝试切换播放协议'
+    }
   })
   syncProtoLabel()
 }

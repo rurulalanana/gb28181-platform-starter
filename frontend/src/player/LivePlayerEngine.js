@@ -302,6 +302,7 @@ export class LivePlayerEngine {
    * @param {boolean} [opts.vod] 是否点播
    * @param {boolean} [opts.webrtc] 是否走组件内置的 Webrtc tech
    * @param {boolean} [opts.hideProgress] 隐藏进度条与时间显示（直播/设备回放必传，见 CSS 注释）
+   * @param {boolean} [opts.nativeHls] 原生 HLS：直接用 {@code <video src=m3u8>}，不经 video.js
    * @param {boolean} [opts.debug] 打开组件自身的调试日志（Webrtc tech 的日志只能这么开）
    * @param {Array<{id:string,title:string,text:string}>} [opts.controlButtons]
    *        要插到控制栏的按钮（见 {@link LivePlayerEngine#_ensureControlButtons}）
@@ -316,6 +317,7 @@ export class LivePlayerEngine {
     webrtc = false,
     controls = true,
     hideProgress = false,
+    nativeHls = false,
     debug = false,
     controlButtons = null,
     onControlButton,
@@ -332,6 +334,7 @@ export class LivePlayerEngine {
     this.webrtc = webrtc
     this.controls = controls
     this.hideProgress = hideProgress
+    this.nativeHls = nativeHls
     this.debug = debug
     /** 要插到控制栏的按钮定义。 */
     this.controlButtons = controlButtons || []
@@ -370,6 +373,11 @@ export class LivePlayerEngine {
    */
   async start() {
     if (this.destroyed) return false
+    /*
+     * 原生 HLS 走独立分支：不加载 LivePlayer 组件、也不需要 video.js。
+     * 原因见 {@link _startNativeHls}。
+     */
+    if (this.nativeHls) return this._startNativeHls()
     let Component
     try {
       Component = await ensureLivePlayerComponent()
@@ -619,6 +627,87 @@ export class LivePlayerEngine {
   /** 取控制栏按钮元素（当作弹层锚点用）。 */
   controlButtonEl(id) {
     return this._controlEls[id] || null
+  }
+
+  /**
+   * 原生 HLS：用 {@code <video src=m3u8>} 直接播，完全绕开 video.js。
+   *
+   * <h3>为什么必须绕开</h3>
+   *
+   * <p>Safari / iOS <b>原生</b>就能播 HLS。但只要经过 video.js，它收到
+   * {@code type: 'application/x-mpegURL'} 就会先问注册的 source handler
+   * （{@code liveplayer-lib.min.js} 里打进来一个残缺的 contrib-hls），
+   * handler 抢走之后把 src 改成 {@code blob:} 去走 <b>MSE</b> ——
+   * 而 iOS 上根本没有 {@code MediaSource}，于是明明能播的地址被判死刑。
+   *
+   * <p>实测对照（桌面 Chromium，同一个 handler 同样会抢）：
+   * <pre>
+   *   裸 videojs() + m3u8 → tech=Html5、src=blob:、readyState=0、
+   *                         报 code=4 MEDIA_ERR_SRC_NOT_SUPPORTED
+   * </pre>
+   * 证明失败点在 handler 抢走这件事上，与 m3u8 本身无关
+   * （curl 拉 m3u8 与 ts 分片都是 200）。
+   *
+   * <h3>代价</h3>
+   *
+   * <p>用浏览器原生控制栏：音量、全屏、画中画都是系统组件（在 iOS 上
+   * 正是用户熟悉的交互）。没有 video.js 的截图按钮 —— HLS 本来就是兜底
+   * 通路（延迟 3 个切片），不值得为它复刻一套控制栏。
+   *
+   * @returns {boolean} 是否已挂载（起播与否由 onReady 通知）
+   */
+  _startNativeHls() {
+    if (!this.el) {
+      this._fail('播放器容器未就绪')
+      return false
+    }
+    try {
+      const v = document.createElement('video')
+      /*
+       * playsInline 必须显式三个属性都写：iOS 上少了它，
+       * 视频会自动跳进系统全屏播放器，页面里的播放器容器就空了。
+       */
+      v.playsInline = true
+      v.setAttribute('playsinline', '')
+      v.setAttribute('webkit-playsinline', '')
+      v.muted = this.muted
+      v.autoplay = true
+      v.controls = this.controls
+      v.preload = 'auto'
+      v.style.cssText =
+        'width:100%;height:100%;object-fit:contain;background:#000;display:block'
+      v.src = this.url
+      this.el.appendChild(v)
+      this.videoEl = v
+      this._dbg('native-hls-mounted', { url: String(this.url).slice(0, 80) })
+
+      v.addEventListener('loadedmetadata', () => {
+        this._dbg('native-hls-metadata', { w: v.videoWidth, h: v.videoHeight })
+        this.onStats({
+          codec: '',
+          width: v.videoWidth,
+          height: v.videoHeight,
+          hasAudio: !this.muted
+        })
+      })
+      v.addEventListener('playing', () => this._fireReady())
+      v.addEventListener('timeupdate', () => {
+        if (v.currentTime > 0.2) this._fireReady()
+      })
+      v.addEventListener('error', () => {
+        const err = v.error
+        this._onErrorEvent({
+          code: err && err.code,
+          message: (err && err.message) || 'HLS 播放失败'
+        })
+      })
+      const p = v.play()
+      if (p && typeof p.catch === 'function') p.catch(() => {})
+      return true
+    } catch (e) {
+      this._fail('原生 HLS 挂载失败：' + (e && e.message))
+      return false
+    }
   }
 
   /**
