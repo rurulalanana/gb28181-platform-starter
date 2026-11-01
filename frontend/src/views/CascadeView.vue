@@ -3,6 +3,7 @@
 
     <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
+      <KeywordFilter v-model="keyword" placeholder="搜索名称 / 平台编码 / 地址" width="280px" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -14,68 +15,69 @@
 
     <el-card shadow="never">
 
-      <el-table ref="tableRef" v-loading="loading" :data="list" stripe table-layout="fixed">
-        <el-table-column label="名称" width="132">
+      <el-table ref="tableRef" v-loading="loading" :data="pagedList" stripe table-layout="fixed">
+        <el-table-column label="名称" width="112" show-overflow-tooltip>
           <template #default="{ row }">{{ row.name || '—' }}</template>
         </el-table-column>
-        <el-table-column label="平台编码" min-width="190">
+        <el-table-column label="平台编码" min-width="150" show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="对端地址" width="168">
+        <el-table-column label="对端地址" width="140" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono">{{ row.host ? row.host + ':' + row.port : '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="本地地址" width="168">
+        <el-table-column label="本地地址" width="140" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="mono">{{ row.localHost ? row.localHost + ':' + row.localPort : '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="启用" width="80" align="center">
+        <el-table-column label="启用" width="64" align="center">
           <template #default="{ row }">
             <el-switch
               :model-value="!!row.enable"
               size="small"
               :disabled="!canWrite"
+              :aria-label="`启用级联：${row.name || row.id}`"
               @change="(v) => toggleEnable(row, v)"
             />
           </template>
         </el-table-column>
-        <el-table-column label="在线" width="80" align="center">
+        <el-table-column label="在线" width="64" align="center">
           <template #default="{ row }">
             <span class="badge" :class="row.online ? 'is-online' : 'is-offline'">
               {{ row.online ? '在线' : '离线' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="共享全部通道" width="120" align="center">
+        <el-table-column label="共享全部" width="96" align="center">
           <template #default="{ row }">
-            <el-icon :color="row.shareAllChannel ? '#67c23a' : '#c0c4cc'" :size="18">
-              <CircleCheckFilled v-if="row.shareAllChannel" />
-              <CircleCloseFilled v-else />
-            </el-icon>
+            <!-- 与「在线」列同一种文字徽标：整行都是文字时，一枚 18px 实心彩色圆点过于抢眼 -->
+            <span class="badge" :class="row.shareAllChannel ? 'is-online' : 'is-offline'">
+              {{ row.shareAllChannel ? '是' : '否' }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="186" align="center" fixed="right">
+        <el-table-column label="操作" width="150" align="center">
           <template #default="{ row }">
             <el-tooltip content="选择共享通道">
-              <el-button link type="primary" :disabled="!canWrite" @click="openChannels(row)">
-                <el-icon><Connection /></el-icon>
+              <el-button link type="primary" :disabled="!canShare" aria-label="选择共享通道" @click="openChannels(row)">
+                <el-icon aria-hidden="true"><Connection /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="推送目录到上级">
-              <el-button link type="primary" :disabled="!canWrite" @click="pushCatalog(row)">
-                <el-icon><Refresh /></el-icon>
+              <el-button link type="primary" :disabled="!canPush" aria-label="推送目录到上级" @click="pushCatalog(row)">
+                <el-icon aria-hidden="true"><Refresh /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="编辑">
-              <el-button link type="primary" :disabled="!canWrite" @click="openEdit(row)">
-                <el-icon><Edit /></el-icon>
+              <el-button link type="primary" :disabled="!canWrite" aria-label="编辑级联" @click="openEdit(row)">
+                <el-icon aria-hidden="true"><Edit /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="删除">
-              <el-button link type="danger" :disabled="!canWrite" @click="removeOne(row)">
-                <el-icon><Delete /></el-icon>
+              <el-button link type="danger" :disabled="!canDelete" aria-label="删除级联" @click="removeOne(row)">
+                <el-icon aria-hidden="true"><Delete /></el-icon>
               </el-button>
             </el-tooltip>
           </template>
@@ -186,14 +188,14 @@
         <div class="form-section">
           <div class="form-section-title">行为开关</div>
           <el-form-item label="启用">
-            <el-switch v-model="form.Enable" />
+            <el-switch v-model="form.Enable" aria-label="启用" />
           </el-form-item>
           <el-form-item label="共享全部通道">
-            <el-switch v-model="form.ShareAllChannel" />
+            <el-switch v-model="form.ShareAllChannel" aria-label="共享全部通道" />
             <span class="form-item-hint">开启后本级所有通道都会同步给上级</span>
           </el-form-item>
           <el-form-item label="允许控制">
-            <el-switch v-model="form.AllowControl" />
+            <el-switch v-model="form.AllowControl" aria-label="允许控制" />
             <span class="form-item-hint">允许上级对本级通道下发云台等控制指令</span>
           </el-form-item>
         </div>
@@ -364,7 +366,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { Connection, Picture } from '@element-plus/icons-vue'
@@ -373,11 +375,18 @@ import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
+import KeywordFilter from '@/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 
 /** 改级联配置会影响对端平台的目录，用独立的 cascade:write。 */
 const canWrite = computed(() => auth.can('cascade:write'))
+/** 选择共享通道（按钮级）。 */
+const canShare = computed(() => auth.can('cascade:share'))
+/** 推送目录（按钮级）。 */
+const canPush = computed(() => auth.can('cascade:push'))
+/** 删除级联（按钮级）。 */
+const canDelete = computed(() => auth.can('cascade:delete'))
 
 const list = ref([])
 
@@ -408,26 +417,52 @@ const emptyForm = () => ({
 
 const form = reactive(emptyForm())
 
-const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
+/** 聚合搜索关键词（名称 / 平台编码 / 对端地址 / 本地地址）。 */
+const keyword = ref('')
+
+const { pager, offset, onPageChange, onSizeChange } = usePagination({
   pageSize: 10,
-  load: () => load()
+  // 翻页只切本地切片
+  load: () => {}
 })
 
 async function load() {
   loading.value = true
   try {
-    const data = await cascadeApi.list({ start: offset.value, limit: pager.size })
+    // limit=0：一次取全量，搜索才是全库聚合
+    const data = await cascadeApi.list({ start: 0, limit: 0 })
     // 后端 CascadeListVo 的字段名拼成了 casecadeList / casecadeCount（少了 s 后多打 a）。
     // 这里两种拼写都读，避免后端日后修正拼写时前端静默变成空列表。
     const rows = data?.casecadeList || data?.cascadeList || []
     list.value = rows
-    setTotal(data?.casecadeCount ?? data?.cascadeCount ?? rows.length)
+    pager.page = 1
   } catch (e) {
     ElMessage.error(e.message || '加载级联失败')
   } finally {
     loading.value = false
   }
 }
+
+/** 关键词命中名称 / 平台编码 / 对端地址 / 本地地址。 */
+const filteredList = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  if (!q) return list.value
+  return list.value.filter((r) =>
+    [r.name, r.serial, r.host, r.port, r.localHost, r.localPort]
+      .filter((v) => v !== undefined && v !== null && v !== '')
+      .some((v) => String(v).toLowerCase().includes(q))
+  )
+})
+
+/** 当前页切片。 */
+const pagedList = computed(() =>
+  filteredList.value.slice(offset.value, offset.value + pager.size)
+)
+
+watch([filteredList, () => pager.size], () => {
+  pager.total = filteredList.value.length
+  if (offset.value >= filteredList.value.length) pager.page = 1
+})
 
 function openEdit(row) {
   Object.assign(form, emptyForm())

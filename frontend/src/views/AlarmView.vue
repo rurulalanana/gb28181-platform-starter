@@ -10,18 +10,7 @@
         <el-option label="三级（一般）" value="3" />
         <el-option label="四级（提示）" value="4" />
       </el-select>
-      <el-input
-        v-model="query.serial"
-        placeholder="设备编码"
-        clearable
-        style="width: 200px"
-        @keyup.enter="search"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <el-button type="primary" @click="search">
-        <el-icon><Search /></el-icon> 查询
-      </el-button>
+      <KeywordFilter v-model="keyword" placeholder="搜索设备/通道编码 / 方式 / 描述" width="300px" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -31,33 +20,33 @@
       </el-button>
     </div>
 
-      <el-table ref="tableRef" v-loading="loading" :data="alarms" stripe table-layout="fixed">
-        <el-table-column prop="alarmTime" label="时间" width="172" sortable>
+      <el-table ref="tableRef" v-loading="loading" :data="pagedAlarms" stripe table-layout="fixed">
+        <el-table-column prop="alarmTime" label="时间" width="160" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="alarmPriority" label="级别" width="100" align="center" sortable>
+        <el-table-column prop="alarmPriority" label="级别" width="84" align="center" sortable>
           <template #default="{ row }">
             <el-tag :type="priorityColor(row.alarmPriority)" size="small" effect="light">
               {{ row.alarmPriorityName || priorityText(row.alarmPriority) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="设备" width="196">
+        <el-table-column label="设备" width="160">
           <template #default="{ row }"><span class="mono">{{ row.deviceId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="通道" width="196">
+        <el-table-column label="通道" width="160">
           <template #default="{ row }"><span class="mono">{{ row.channelId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="报警方式" width="116">
+        <el-table-column label="报警方式" width="104">
           <template #default="{ row }">{{ row.alarmMethodName || '—' }}</template>
         </el-table-column>
-        <el-table-column label="描述" min-width="180" show-overflow-tooltip>
+        <el-table-column label="描述" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">{{ row.alarmDescription || '—' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="80" align="center" fixed="right">
+        <el-table-column label="操作" width="72" align="center">
           <template #default="{ row }">
-            <el-button v-if="canWrite" link type="danger" @click="removeOne(row)">
-              <el-icon><Delete /></el-icon>
+            <el-button v-if="canWrite" link type="danger" aria-label="删除报警" @click="removeOne(row)">
+              <el-icon aria-hidden="true"><Delete /></el-icon>
             </el-button>
             <span v-else class="text-muted">—</span>
           </template>
@@ -78,12 +67,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { alarmApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
+import KeywordFilter from '@/components/KeywordFilter.vue'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import TablePager from '@/components/TablePager.vue'
 
@@ -113,20 +103,22 @@ function priorityColor(p) {
   return PRIORITY_COLOR[p] || 'info'
 }
 
-const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagination({
+/** 聚合搜索关键词（设备/通道编码、报警方式、描述）。 */
+const keyword = ref('')
+
+const { pager, offset, onPageChange, onSizeChange } = usePagination({
   pageSize: 10,
-  load: () => load()
+  // 翻页只切本地切片
+  load: () => {}
 })
 
 async function load() {
   loading.value = true
   try {
-    const params = { start: offset.value, limit: pager.size }
-    if (query.priority) params.priority = query.priority
-    if (query.serial) params.serial = query.serial
-    const data = await alarmApi.list(params)
+    // limit=0：一次取全量，搜索/筛选才是全库聚合
+    const data = await alarmApi.list({ start: 0, limit: 0 })
     alarms.value = data?.alarmList || []
-    setTotal(data?.alarmCount ?? alarms.value.length)
+    pager.page = 1
   } catch (e) {
     ElMessage.error(e.message || '加载报警失败')
   } finally {
@@ -134,11 +126,26 @@ async function load() {
   }
 }
 
-/** 条件变化后回到第一页再查，否则会停在越界页上看到空列表。 */
-function search() {
-  reset()
-  load()
-}
+/** 级别 + 关键词过滤（本地）。 */
+const filteredAlarms = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  return alarms.value.filter((a) => {
+    if (query.priority && String(a.alarmPriority) !== String(query.priority)) return false
+    if (!q) return true
+    return [a.deviceId, a.channelId, a.alarmMethodName, a.alarmDescription, a.alarmPriority]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(q))
+  })
+})
+
+const pagedAlarms = computed(() =>
+  filteredAlarms.value.slice(offset.value, offset.value + pager.size)
+)
+
+watch([filteredAlarms, () => pager.size], () => {
+  pager.total = filteredAlarms.value.length
+  if (offset.value >= filteredAlarms.value.length) pager.page = 1
+})
 
 async function removeOne(row) {
   try {

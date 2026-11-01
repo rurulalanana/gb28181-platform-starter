@@ -15,8 +15,8 @@
     popper-class="help-tip-popper"
     effect="dark"
   >
-    <el-icon class="help-tip" tabindex="0">
-      <QuestionFilled />
+    <el-icon class="help-tip" tabindex="0" :aria-label="text || '说明'">
+      <QuestionFilled aria-hidden="true" />
     </el-icon>
   </el-tooltip>
 </template>
@@ -52,6 +52,5 @@ defineProps({
 .help-tip:hover,
 .help-tip:focus-visible {
   color: var(--brand-500);
-  outline: none;
 }
 </style>

@@ -8,9 +8,10 @@
         class="ptz-btn"
         :style="{ gridArea: d.area }"
         :disabled="inactive"
+        :aria-label="d.label"
         @pointerdown="beginMove(d.cmd, $event)"
       >
-        <el-icon :size="18"><component :is="d.icon" /></el-icon>
+        <el-icon :size="18" aria-hidden="true"><component :is="d.icon" /></el-icon>
       </el-button>
 
       <!--
@@ -28,9 +29,10 @@
         :type="talking ? 'danger' : 'default'"
         :disabled="inactive"
         :title="talking ? '停止喊话' : '开始喊话'"
+        :aria-label="talking ? '停止喊话' : '开始喊话'"
         @click="toggleTalk"
       >
-        <el-icon :size="18"><Microphone /></el-icon>
+        <el-icon :size="18" aria-hidden="true"><Microphone /></el-icon>
       </el-button>
     </div>
 
@@ -59,17 +61,19 @@
           size="small"
           :disabled="inactive"
           title="放大（变倍+）"
+          aria-label="放大（变倍+）"
           @pointerdown="beginMove('zoomin', $event)"
         >
-          <el-icon><Plus /></el-icon>
+          <el-icon aria-hidden="true"><Plus /></el-icon>
         </el-button>
         <el-button
           size="small"
           :disabled="inactive"
           title="缩小（变倍−）"
+          aria-label="缩小（变倍−）"
           @pointerdown="beginMove('zoomout', $event)"
         >
-          <el-icon><Minus /></el-icon>
+          <el-icon aria-hidden="true"><Minus /></el-icon>
         </el-button>
       </el-button-group>
     </div>
@@ -525,14 +529,14 @@ const moving = ref(false)
 
 /** 八方向 + 变倍按钮布局。 */
 const DIRECTIONS = [
-  { cmd: 'upleft', icon: 'TopLeft', area: 'ul' },
-  { cmd: 'up', icon: 'Top', area: 'u' },
-  { cmd: 'upright', icon: 'TopRight', area: 'ur' },
-  { cmd: 'left', icon: 'Back', area: 'l' },
-  { cmd: 'right', icon: 'Right', area: 'r' },
-  { cmd: 'downleft', icon: 'BottomLeft', area: 'dl' },
-  { cmd: 'down', icon: 'Bottom', area: 'd' },
-  { cmd: 'downright', icon: 'BottomRight', area: 'dr' }
+  { cmd: 'upleft', icon: 'TopLeft', area: 'ul', label: '左上' },
+  { cmd: 'up', icon: 'Top', area: 'u', label: '上' },
+  { cmd: 'upright', icon: 'TopRight', area: 'ur', label: '右上' },
+  { cmd: 'left', icon: 'Back', area: 'l', label: '左' },
+  { cmd: 'right', icon: 'Right', area: 'r', label: '右' },
+  { cmd: 'downleft', icon: 'BottomLeft', area: 'dl', label: '左下' },
+  { cmd: 'down', icon: 'Bottom', area: 'd', label: '下' },
+  { cmd: 'downright', icon: 'BottomRight', area: 'dr', label: '右下' }
 ]
 
 /** 云台动作键名 → 接口路径。 */

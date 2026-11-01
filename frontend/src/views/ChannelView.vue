@@ -35,7 +35,7 @@
         子节点数 / 厂家 / 云台类型 / 位置 / 更新时间 / 创建时间 / 操作
       -->
       <el-table ref="tableRef" v-loading="loading" :data="channels" stripe table-layout="fixed">
-        <el-table-column prop="channel" label="通道号" min-width="64" align="center" sortable>
+        <el-table-column prop="channel" label="通道号" min-width="96" align="center" sortable>
           <template #default="{ row }">
             <span class="text-muted">{{ row.channel ?? '—' }}</span>
           </template>
@@ -69,10 +69,10 @@
             />
             <span
               v-else
-              class="name-text is-editable"
-              :class="{ 'is-empty': !(row.customName || row.name) }"
-              title="点击修改名称"
-              @click="startNameEdit(row)"
+              class="name-text"
+              :class="{ 'is-editable': canUpdate, 'is-empty': !(row.customName || row.name) }"
+              :title="canUpdate ? '点击修改名称' : ''"
+              @click="canUpdate && startNameEdit(row)"
             >{{ row.customName || row.name || '—' }}</span>
           </template>
         </el-table-column>
@@ -93,7 +93,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="按需直播" min-width="88" align="center">
+        <el-table-column label="按需直播" min-width="104" align="center">
           <template #header>
             <el-tooltip
               content="按需直播：无人观看时自动停流以节省设备带宽。与「云端录像」互斥——开启它会自动关闭云端录像。"
@@ -106,7 +106,8 @@
             <el-switch
               v-model="row.ondemand"
               :loading="ondemandPending.has(row.id)"
-              :disabled="!canWrite || ondemandPending.has(row.id)"
+              :disabled="!canOndemand || ondemandPending.has(row.id)"
+              :aria-label="`按需直播：${row.customName || row.name || row.id}`"
               inline-prompt
               active-text="开"
               inactive-text="关"
@@ -115,7 +116,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="云端录像" min-width="88" align="center">
+        <el-table-column label="云端录像" min-width="104" align="center">
           <template #header>
             <el-tooltip
               content="云端录像：平台持续把这段流录成 MP4，要求流一直在线。与「按需直播」互斥——开启它会自动关闭按需直播。开启后为全天录制，会忽略录像计划的时段限制。"
@@ -128,7 +129,8 @@
             <el-switch
               v-model="row.cloudRecord"
               :loading="recordPending.has(row.id)"
-              :disabled="!canWrite || recordPending.has(row.id)"
+              :disabled="!canRecord || recordPending.has(row.id)"
+              :aria-label="`云端录像：${row.customName || row.name || row.id}`"
               inline-prompt
               active-text="开"
               inactive-text="关"
@@ -137,7 +139,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="子节点数" min-width="68" align="center">
+        <el-table-column label="子节点数" min-width="92" align="center">
           <template #default="{ row }">
             <span class="text-muted">{{ row.subCount ?? 0 }}</span>
           </template>
@@ -160,7 +162,7 @@
               解决：命令值带上通道编码，由 handlePtzCommand 拆开去对应行上应用。
             -->
             <el-dropdown
-              v-if="canWrite"
+              v-if="canUpdate"
               trigger="click"
               :disabled="ptzPending.has(row.id)"
               @command="handlePtzCommand"
@@ -190,9 +192,9 @@
           <template #default="{ row }">
             <span
               class="position-text"
-              :class="{ 'is-editable': canWrite }"
-              :title="canWrite ? '点击修改经纬度' : ''"
-              @click="canWrite && openPosition(row)"
+              :class="{ 'is-editable': canPosition }"
+              :title="canPosition ? '点击修改经纬度' : ''"
+              @click="canPosition && openPosition(row)"
             >{{ positionText(row) }}</span>
           </template>
         </el-table-column>
@@ -430,8 +432,20 @@ const route = useRoute()
 
 const auth = useAuthStore()
 
-/** 能否编辑通道（改名称/编号、云录与按需开关、云台类型、位置）。 */
+/** 能否编辑通道（模块级，等价于下面全部按钮）。 */
 const canWrite = computed(() => auth.can('channel:write'))
+/** 改名称/编号/云台类型（按钮级）。 */
+const canUpdate = computed(() => auth.can('channel:update'))
+/** 改经纬度（按钮级）。 */
+const canPosition = computed(() => auth.can('channel:position'))
+/** 按需直播开关（按钮级）。 */
+const canOndemand = computed(() => auth.can('channel:ondemand'))
+/** 云端录像开关（按钮级）。 */
+const canRecord = computed(() => auth.can('channel:record'))
+/** 音频开关（按钮级）。 */
+const canAudio = computed(() => auth.can('channel:audio'))
+/** 共享给下级（按钮级）。 */
+const canShare = computed(() => auth.can('channel:share'))
 
 const channels = ref([])
 const loading = ref(false)

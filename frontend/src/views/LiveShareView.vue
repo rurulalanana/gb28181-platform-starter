@@ -167,8 +167,8 @@
           <div class="share-row">
             <div class="share-label">分享链接</div>
             <div class="share-field">
-              <input class="share-input" :value="pageUrl" readonly @focus="$event.target.select()" />
-              <button class="share-copy" title="复制链接" @click="copy(pageUrl)">
+              <input class="share-input" :value="pageUrl" readonly aria-label="分享链接" @focus="$event.target.select()" />
+              <button class="share-copy" title="复制链接" aria-label="复制链接" @click="copy(pageUrl)">
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path
                     fill="currentColor"
@@ -183,8 +183,8 @@
           <div class="share-row">
             <div class="share-label">iframe</div>
             <div class="share-field">
-              <input class="share-input" :value="iframeCode" readonly @focus="$event.target.select()" />
-              <button class="share-copy" title="复制嵌入代码" @click="copy(iframeCode)">
+              <input class="share-input" :value="iframeCode" readonly aria-label="iframe 嵌入代码" @focus="$event.target.select()" />
+              <button class="share-copy" title="复制嵌入代码" aria-label="复制嵌入代码" @click="copy(iframeCode)">
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path
                     fill="currentColor"
@@ -1441,6 +1441,7 @@ watch(ptzReady, (ok) => {
 .share-input:focus {
   border-color: var(--brand-400);
   background: var(--bg-surface);
+  box-shadow: 0 0 0 2px var(--brand-100);
 }
 
 /* 复制按钮：与输入框拼成一个控件，所以只有右侧圆角 */

@@ -83,8 +83,8 @@
             <el-icon
               :size="18"
               :color="row.important ? '#e6a23c' : '#c0c4cc'"
-              :class="canWrite ? 'star' : ''"
-              @click="canWrite && toggleImportant(row)"
+              :class="canMark ? 'star' : ''"
+              @click="canMark && toggleImportant(row)"
             >
               <StarFilled v-if="row.important" />
               <Star v-else />
@@ -204,6 +204,8 @@ const auth = useAuthStore()
 
 /** 重要标记：可撤销，cloud:write 即可。 */
 const canWrite = computed(() => auth.can('cloud:write'))
+/** 重要标记（按钮级）。 */
+const canMark = computed(() => auth.can('cloud:mark'))
 /** 删除录像：不可恢复，cloud:delete。 */
 const canDelete = computed(() => auth.can('cloud:delete'))
 

@@ -7,8 +7,14 @@
       <div class="login-body">
         <el-form :model="form" @submit.prevent="onSubmit" size="large" class="login-form">
           <el-form-item>
-            <el-input v-model="form.username" placeholder="用户名" clearable autocomplete="username">
-              <template #suffix><el-icon><User /></el-icon></template>
+            <el-input
+              v-model="form.username"
+              placeholder="用户名"
+              aria-label="用户名"
+              clearable
+              autocomplete="username"
+            >
+              <template #suffix><el-icon aria-hidden="true"><User /></el-icon></template>
             </el-input>
           </el-form-item>
 
@@ -17,11 +23,12 @@
               v-model="form.password"
               type="password"
               placeholder="密码"
+              aria-label="密码"
               show-password
               autocomplete="current-password"
               @keyup.enter="onSubmit"
             >
-              <template #suffix><el-icon><Lock /></el-icon></template>
+              <template #suffix><el-icon aria-hidden="true"><Lock /></el-icon></template>
             </el-input>
           </el-form-item>
 
@@ -35,14 +42,14 @@
           />
 
           <el-button type="primary" class="submit" :loading="loading" @click="onSubmit">
-            {{ loading ? '登录中…' : '登 录' }}
+            {{ loading ? '登录中…' : '登录' }}
           </el-button>
         </el-form>
       </div>
 
       <!-- 底部信息条 -->
       <div class="login-foot">
-        <span>默认账号 <code>admin / admin123</code>，首次部署后请及时修改</span>
+        <span>首次部署后请及时修改默认密码</span>
       </div>
     </div>
   </div>

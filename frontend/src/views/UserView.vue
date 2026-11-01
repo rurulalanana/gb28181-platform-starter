@@ -3,6 +3,7 @@
 
     <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
+      <KeywordFilter v-model="keyword" placeholder="搜索用户名 / 昵称 / 角色" width="280px" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -13,14 +14,14 @@
     </div>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="users" stripe table-layout="fixed">
-        <el-table-column prop="username" label="用户名" min-width="140" sortable>
+      <el-table v-loading="loading" :data="pagedUsers" stripe table-layout="fixed">
+        <el-table-column prop="username" label="用户名" min-width="120" sortable>
           <template #default="{ row }"><span class="mono">{{ row.username }}</span></template>
         </el-table-column>
-        <el-table-column label="昵称" width="132">
+        <el-table-column label="昵称" width="120">
           <template #default="{ row }">{{ row.nickname || '—' }}</template>
         </el-table-column>
-        <el-table-column label="角色" width="150" align="center">
+        <el-table-column label="角色" width="120" align="center">
           <template #default="{ row }">
             <div class="role-tags">
               <el-tag
@@ -36,42 +37,47 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
+        <el-table-column label="状态" width="82" align="center">
           <template #default="{ row }">
             <el-tag :type="row.enable ? 'success' : 'info'" size="small" effect="light">
               {{ row.enable ? '启用' : '停用' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="lastLoginTime" label="最后登录" width="176" sortable>
+        <el-table-column prop="lastLoginTime" label="最后登录" width="158" sortable>
           <template #default="{ row }">
             <span class="text-muted">{{ row.lastLoginAt || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="创建时间" width="176">
+        <el-table-column label="创建时间" width="164">
           <template #default="{ row }">
             <span class="text-muted">{{ row.createdAt || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" align="center" fixed="right">
+        <el-table-column label="操作" width="152" align="center" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
               <el-tooltip content="编辑">
-                <el-button :disabled="!canWrite" @click="openEdit(row)"><el-icon><Edit /></el-icon></el-button>
+                <el-button :disabled="!canWrite" aria-label="编辑用户" @click="openEdit(row)"><el-icon aria-hidden="true"><Edit /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip content="重置密码">
-                <el-button :disabled="!canWrite" @click="openReset(row)"><el-icon><Key /></el-icon></el-button>
+                <el-button :disabled="!canReset" aria-label="重置密码" @click="openReset(row)"><el-icon aria-hidden="true"><Key /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip :content="row.enable ? '停用' : '启用'">
-                <el-button :disabled="!canWrite" @click="toggleEnable(row)"><el-icon><SwitchButton /></el-icon></el-button>
+                <el-button
+                  :disabled="!canWrite"
+                  :aria-label="row.enable ? '停用用户' : '启用用户'"
+                  @click="toggleEnable(row)"
+                ><el-icon aria-hidden="true"><SwitchButton /></el-icon></el-button>
               </el-tooltip>
               <el-tooltip content="删除">
                 <el-button
                   class="is-danger"
-                  :disabled="!canWrite || row.username === 'admin'"
+                  :disabled="!canDelete || row.username === 'admin'"
+                  aria-label="删除用户"
                   @click="removeOne(row)"
                 >
-                  <el-icon><Delete /></el-icon>
+                  <el-icon aria-hidden="true"><Delete /></el-icon>
                 </el-button>
               </el-tooltip>
             </div>
@@ -135,13 +141,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { roleApi, userApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import TablePager from '@/components/TablePager.vue'
+import KeywordFilter from '@/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 
@@ -151,6 +158,10 @@ const loading = ref(false)
 const saving = ref(false)
 
 const canWrite = computed(() => auth.can('user:write'))
+/** 重置他人密码（按钮级）。 */
+const canReset = computed(() => auth.can('user:reset'))
+/** 删除用户（按钮级）。 */
+const canDelete = computed(() => auth.can('user:delete'))
 
 /** 可选角色（停用的不出现在下拉里，因为选了也不会生效）。 */
 const roleOptions = computed(() => roles.value.filter((r) => r.enable !== false))
@@ -186,9 +197,13 @@ const resetDialog = ref(false)
 const resetTarget = ref(null)
 const newPassword = ref('')
 
-const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
+/** 聚合搜索关键词（用户名 / 昵称 / 角色名，本地过滤，数据量小）。 */
+const keyword = ref('')
+
+const { pager, offset, onPageChange, onSizeChange } = usePagination({
   pageSize: 10,
-  load: () => load()
+  // 翻页只切本地切片，不再请求后端
+  load: () => {}
 })
 
 async function loadRoles() {
@@ -204,15 +219,37 @@ async function loadRoles() {
 async function load() {
   loading.value = true
   try {
-    const data = await userApi.list({ start: offset.value, limit: pager.size })
+    // limit=0：一次取全量，搜索才是「全库聚合」而不是「只搜当前页」
+    const data = await userApi.list({ start: 0, limit: 0 })
     users.value = data?.userList || []
-    setTotal(data?.userCount ?? users.value.length)
+    pager.page = 1
   } catch (e) {
     ElMessage.error(e.message || '加载用户失败（需 user:read 权限）')
   } finally {
     loading.value = false
   }
 }
+
+/** 关键词命中用户名 / 昵称 / 任一角色名。 */
+const filteredUsers = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  if (!q) return users.value
+  return users.value.filter((u) =>
+    [u.username, u.nickname, ...splitRoles(u.role).map(roleName)]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(q))
+  )
+})
+
+/** 当前页切片。 */
+const pagedUsers = computed(() =>
+  filteredUsers.value.slice(offset.value, offset.value + pager.size)
+)
+
+watch([filteredUsers, () => pager.size], () => {
+  pager.total = filteredUsers.value.length
+  if (offset.value >= filteredUsers.value.length) pager.page = 1
+})
 
 function openEdit(row) {
   Object.assign(form, {

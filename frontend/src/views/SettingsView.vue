@@ -102,6 +102,8 @@
                   size="small"
                   class="copy-btn"
                   :icon="CopyDocument"
+                  :aria-label="`复制${row.label}`"
+                  title="复制"
                   @click="copy(row.value)"
                 />
               </span>
@@ -157,7 +159,7 @@
               type="danger"
               plain
               :icon="RefreshRight"
-              :disabled="!canWrite"
+              :disabled="!canRestart"
               :loading="restarting"
               @click="restartServer"
             >
@@ -248,6 +250,7 @@
                   :model-value="isOn(row)"
                   class="cfg-switch"
                   :loading="cfgSaving === row.key"
+                  :aria-label="cfgLabel(row.key)"
                   active-text="开启"
                   inactive-text="关闭"
                   inline-prompt
@@ -275,7 +278,7 @@
                 <el-button
                   type="primary"
                   size="small"
-                  :disabled="!canWrite || !isDirty(row) || isInvalid(row)"
+                  :disabled="!canConfig || !isDirty(row) || isInvalid(row)"
                   :loading="cfgSaving === row.key"
                   @click="saveConfig(row)"
                 >
@@ -283,7 +286,7 @@
                 </el-button>
                 <el-button
                   size="small"
-                  :disabled="!canWrite || !row.overridden"
+                  :disabled="!canConfig || !row.overridden"
                   @click="resetConfig(row)"
                 >
                   恢复默认
@@ -308,7 +311,7 @@
           </div>
           <div class="acl-head-actions">
             <el-button text :icon="Refresh" :loading="aclLoading" @click="loadAcl">刷新</el-button>
-            <el-button type="primary" :icon="Plus" :disabled="!canWrite" @click="openAclDialog">添加规则</el-button>
+            <el-button type="primary" :icon="Plus" :disabled="!canAcl" @click="openAclDialog">添加规则</el-button>
           </div>
         </header>
 
@@ -409,7 +412,7 @@
             </el-table-column>
             <el-table-column label="操作" width="80" align="right">
               <template #default="{ row }">
-                <el-button link type="danger" size="small" :disabled="!canWrite" @click="removeAcl(row)">删除</el-button>
+                <el-button link type="danger" size="small" :disabled="!canAcl" @click="removeAcl(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -584,7 +587,7 @@
               <el-button
                 type="primary"
                 :loading="tlsInstalling"
-                :disabled="!canWrite || !tlsForm.cert.trim() || !tlsForm.key.trim()"
+                :disabled="!canTls || !tlsForm.cert.trim() || !tlsForm.key.trim()"
                 @click="installCert"
               >
                 校验并启用
@@ -596,7 +599,7 @@
               <el-button
                 v-if="tlsStatus.hasCertificate"
                 :loading="tlsRegenerating"
-                :disabled="!canWrite"
+                :disabled="!canTls"
                 @click="regenerateTls"
               >
                 按当前端口重新生成
@@ -604,7 +607,7 @@
               <el-button
                 v-if="tlsStatus.configured"
                 :loading="tlsDisabling"
-                :disabled="!canWrite"
+                :disabled="!canTls"
                 @click="disableTls"
               >
                 停用 HTTPS
@@ -903,6 +906,14 @@ const router = useRouter()
  * 这两个权限点刻意分开：排障时经常需要「让人看得见状态但动不了」。
  */
 const canWrite = computed(() => auth.can('system:write'))
+/** 改运行时配置（按钮级）。 */
+const canConfig = computed(() => auth.can('system:config'))
+/** 维护黑白名单（按钮级）。 */
+const canAcl = computed(() => auth.can('system:acl'))
+/** 维护 TLS 证书（按钮级）。 */
+const canTls = computed(() => auth.can('system:tls'))
+/** 重启服务（按钮级）。 */
+const canRestart = computed(() => auth.can('system:restart'))
 
 /* ==================== 分区导航 ==================== */
 
@@ -2030,7 +2041,8 @@ onMounted(() => {
   transition: opacity 0.15s;
 }
 
-.info-row:hover .copy-btn {
+.info-row:hover .copy-btn,
+.copy-btn:focus-visible {
   opacity: 1;
 }
 

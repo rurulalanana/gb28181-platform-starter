@@ -23,7 +23,7 @@
         <el-button size="small" @click="goBack">
           <el-icon><ArrowLeft /></el-icon> 返回
         </el-button>
-        <el-button size="small" :disabled="!canWrite || !playingRecord" @click="shareCurrent">
+        <el-button size="small" :disabled="!canShare || !playingRecord" @click="shareCurrent">
           <el-icon><Share /></el-icon> 分享页
         </el-button>
         <el-button size="small" :disabled="!canDownloadRecord(playingRecord)" @click="downloadCurrent">
@@ -194,6 +194,8 @@ const canDelete = computed(() => auth.can('cloud:delete'))
  * 属于「管理」而不是「观看」，因此不给只看不放的账号。
  */
 const canWrite = computed(() => auth.can('cloud:write'))
+/** 分享（按钮级）。 */
+const canShare = computed(() => auth.can('cloud:share'))
 
 /** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))

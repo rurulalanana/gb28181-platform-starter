@@ -12,16 +12,17 @@
 
 :root {
   /* ---------- 强调色（链接/图表/焦点） ---------- */
-  --brand-50: #eef3fd;
-  --brand-100: #dde7fb;
-  --brand-200: #bccff6;
-  --brand-300: #8fb0ee;
-  --brand-400: #5d8be3;
-  --brand-500: #2c62d6;
-  --brand-600: #1f4cb0;
-  --brand-700: #1a3d8c;
-  --brand-800: #17336f;
-  --brand-900: #152b58;
+  /* 对齐 RuoYi / Element Plus 默认蓝（#409EFF）与其深浅梯度 */
+  --brand-50: #ecf5ff;
+  --brand-100: #d9ecff;
+  --brand-200: #c6e2ff;
+  --brand-300: #a0cfff;
+  --brand-400: #79bbff;
+  --brand-500: #409eff;
+  --brand-600: #337ecc;
+  --brand-700: #2b6cb0;
+  --brand-800: #235a8f;
+  --brand-900: #1d4b78;
 
   /* ---------- 状态色（只表示状态，不参与排版） ---------- */
   --online-500: #17914f;
@@ -38,8 +39,14 @@
   --ink-800: #1b2531;
   --ink-700: #2b3745;
   --ink-600: #45525f;
-  --ink-500: #667483;
-  --ink-400: #8c99a7;
+  /*
+   * 400/500 两档按 WCAG AA 收紧过：
+   * 原来 400 (#8c99a7) 在白底只有 2.9:1、在 ink-50 底上 2.6:1，
+   * 而它正是 `--text-tertiary`，全站 40 处 12px 说明文字都在用。
+   * 现在 400 = 5.05:1（白）/ 4.59:1（ink-50），500 = 6.9:1，灰阶顺序不变。
+   */
+  --ink-500: #4f5b68;
+  --ink-400: #64707d;
   --ink-300: #b9c2cd;
   --ink-200: #d8dee6;
   --ink-100: #e7ebf0;
@@ -47,12 +54,12 @@
   --white: #ffffff;
 
   /* ---------- 语义别名（业务代码用这些） ---------- */
-  --bg-app: #f1f3f7;
+  --bg-app: #f5f7fa;
   --bg-surface: var(--white);
   --bg-sunken: #f7f8fb;
-  --bg-sidebar: #121a26;
-  --bg-sidebar-hover: rgba(255, 255, 255, 0.06);
-  --bg-sidebar-active: rgba(93, 139, 227, 0.16);
+  --bg-sidebar: #1f2d3d;
+  --bg-sidebar-hover: rgba(255, 255, 255, 0.08);
+  --bg-sidebar-active: rgba(64, 158, 255, 0.22);
   --accent: var(--brand-500);
   --accent-ink: var(--brand-600);
 
@@ -61,8 +68,8 @@
   --text-tertiary: var(--ink-400);
   --text-inverse: #ffffff;
 
-  --line: #e3e8ef;          /* 常规发丝线 */
-  --line-soft: #eef1f6;     /* 更浅的次级分隔 */
+  --line: #e5e7eb;          /* 常规发丝线（RuoYi 同色） */
+  --line-soft: #f0f2f5;     /* 更浅的次级分隔 */
   --border-color: var(--line);
   --border-strong: var(--ink-300);
 
@@ -93,19 +100,21 @@
   --fs-lg: 16px;
   --fs-xl: 18px;
 
-  /* ---------- 圆角（控制台偏方正，不用大圆角） ---------- */
-  --r-sm: 3px;
-  --r-md: 5px;
-  --r-lg: 7px;
-  --r-xl: 10px;
+  /* ---------- 圆角：对齐 RuoYi 的 14px 基准，对外壳/卡片用大圆角 ---------- */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-panel: 14px;
   --r-full: 999px;
 
   /* ---------- 阴影：只留给浮层（弹窗/下拉），平面元素一律发丝线 ---------- */
   --sh-xs: none;
-  --sh-sm: 0 1px 2px rgba(14, 22, 33, 0.06);
-  --sh-md: 0 6px 16px rgba(14, 22, 33, 0.1);
-  --sh-lg: 0 16px 40px rgba(14, 22, 33, 0.16);
-  --sh-focus: 0 0 0 3px rgba(44, 98, 214, 0.16);
+  --sh-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-md: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --sh-lg: 0 14px 36px rgba(15, 23, 42, 0.1);
+  --sh-panel: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-focus: 0 0 0 3px rgba(64, 158, 255, 0.18);
 
   /* ---------- 尺寸与节奏 ---------- */
   --sidebar-w: 216px;
@@ -147,7 +156,8 @@
   --el-fill-color-light: var(--ink-50);
   --el-fill-color-lighter: var(--bg-sunken);
 
-  --el-border-radius-base: var(--r-md);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
   --el-font-size-base: 14px;
   --el-box-shadow-light: var(--sh-md);
   --el-box-shadow: var(--sh-md);
@@ -199,6 +209,21 @@ body {
 :focus-visible {
   outline: 2px solid var(--brand-400);
   outline-offset: 1px;
+}
+
+/*
+ * 尊重系统「减少动态效果」设置。
+ * 全站过渡/动画统一降级，避免前庭敏感用户在页面切换、侧栏收缩时不适。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* 细滚动条：默认滚动条会把控制台版面割得很碎 */
@@ -330,11 +355,18 @@ body {
 /* ==================== 面板（替代 Element 卡片外观） ==================== */
 
 .el-card {
-  border-radius: var(--r-lg);
+  /* RuoYi 面板：14px 圆角 + 1px 描边 + hover 轻微抬升 */
+  border-radius: var(--r-panel);
   border: 1px solid var(--line);
-  box-shadow: none;
+  box-shadow: var(--sh-panel);
   background: var(--bg-surface);
   overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.el-card:hover {
+  box-shadow: var(--sh-md);
+  border-color: rgba(64, 158, 255, 0.2);
 }
 
 /* 参考站的 box：标题居中加粗、无分隔线（用于概览等图表/读数区） */
@@ -692,7 +724,9 @@ body {
   早先表头只有 11.5px、行高 36px，一屏只能放下十几行且看着局促；
   10 行 × 44px 正好铺满一屏的工作区，信息密度与可读性平衡最好。
 */
-.el-table {
+/* 双类选择器：Element 自带的 .el-table 变量声明权重相同且后加载，
+   单类写法会被它覆盖成默认白底，这里必须提高一级。 */
+.el-table.el-table {
   font-size: var(--fs-md);
   --el-table-border-color: var(--line-soft);
   /*
@@ -700,15 +734,16 @@ body {
     （.is-scrolling-none th.el-table-fixed-column--left 等），
     设成透明时横向滚动就能透过标题看到下层内容。
   */
-  --el-table-header-bg-color: var(--bg-surface);
-  --el-table-header-text-color: var(--ink-600);
-  --el-table-row-hover-bg-color: #f6f8fc;
+  --el-table-header-bg-color: #f8fafc;
+  --el-table-header-text-color: #475569;
+  --el-table-row-hover-bg-color: #f5f7fa;
+  --el-table-border-color: #ebeef5;
   --el-table-text-color: var(--ink-800);
 }
 
-/* 表头：小号灰字 + 一条底线，去掉整块灰底 */
+/* 表头：浅灰底 + 一条底线（对齐 RuoYi 的 #f8fafc） */
 .el-table th.el-table__cell {
-  background: transparent !important;
+  background: var(--el-table-header-bg-color) !important;
   height: 44px;
   padding: 0;
   font-weight: 600;
@@ -773,7 +808,7 @@ body {
 .el-table.el-table__header-wrapper tr th.el-table-fixed-column--left,
 .el-table.el-table__header-wrapper tr th.el-table-fixed-column--right {
   z-index: 4;
-  background-color: var(--bg-surface) !important;
+  background-color: var(--el-table-header-bg-color) !important;
 }
 
 /* 斑马纹行里的固定列要跟着变深，否则固定列会浮在条纹上。
@@ -858,11 +893,12 @@ body {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  padding: 0 0 var(--sp-3);
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
+  /* RuoYi 的操作条：独立白色圆角面板，与下面内容面板同宽同圆角 */
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--sh-panel);
   margin-bottom: var(--sp-3);
 }
 
@@ -1316,7 +1352,8 @@ body {
   --el-segmented-item-selected-bg-color: var(--white);
   --el-segmented-item-selected-color: var(--accent-ink);
   --el-segmented-bg-color: var(--ink-50);
-  --el-border-radius-base: var(--r-md);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
 }
 
 .el-dropdown-menu__item {
@@ -1348,50 +1385,6 @@ body {
   font-style: normal;
   font-weight: 400;
   color: var(--text-tertiary);
-}
-
-/* 内容区页签条：白底页签 + 关闭按钮，下面是内容 */
-.content-tabs {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 var(--sp-3);
-  background: var(--bg-sunken);
-  border-bottom: 1px solid var(--line);
-}
-
-.ctab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 6px 0 9px;
-  background: var(--white);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  font-size: var(--fs-sm);
-  color: var(--ink-700);
-}
-
-.ctab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--ink-400);
-  cursor: pointer;
-}
-
-.ctab-close:hover {
-  background: var(--ink-100);
-  color: var(--ink-600);
 }
 
 /* 页脚：居中灰字（参考站同款位置） */

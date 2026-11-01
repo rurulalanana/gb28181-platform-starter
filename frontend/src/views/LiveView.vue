@@ -157,9 +157,11 @@
             </div>
 
             <!-- 空闲态且已选通道时整块可点 -->
-            <div
+            <button
               v-if="!tile.playing && tile.channelKey"
+              type="button"
               class="tile-click"
+              aria-label="播放该通道"
               @click="playTile(tile)"
             />
 
@@ -168,9 +170,10 @@
               v-if="tile.playing || tile.channelKey"
               class="tile-clear"
               title="清除该画面"
+              aria-label="清除该画面"
               @click.stop="clearTile(tile)"
             >
-              <el-icon :size="13"><Close /></el-icon>
+              <el-icon :size="13" aria-hidden="true"><Close /></el-icon>
             </button>
           </div>
         </div>
@@ -869,6 +872,9 @@ onUnmounted(() => {
 .tile-click {
   position: absolute;
   inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   cursor: pointer;
 }
 

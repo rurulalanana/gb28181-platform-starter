@@ -157,14 +157,14 @@
             <div class="row-actions">
               <el-button link type="primary" @click="viewChannels(row)">查看通道</el-button>
               <el-button
-                v-if="row.online && canWrite"
+                v-if="row.online && canSync"
                 link
                 class="act-collect"
                 :loading="busy === row.id"
                 @click="collect(row)"
               >更新通道</el-button>
               <el-button v-if="canWrite" link class="act-edit" @click="openEdit(row)">编辑</el-button>
-              <el-button v-if="!row.online && canWrite" link type="danger" @click="remove(row)">删除</el-button>
+              <el-button v-if="!row.online && canDelete" link type="danger" @click="remove(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -273,6 +273,10 @@ const router = useRouter()
  * 界面显隐只是不让用户白点一次，真正的拦截在后端 {@code device:write}。
  */
 const canWrite = computed(() => auth.can('device:write'))
+/** 采集/同步设备目录与参数（按钮级）。 */
+const canSync = computed(() => auth.can('device:sync'))
+/** 删除设备（按钮级）。 */
+const canDelete = computed(() => auth.can('device:delete'))
 
 const devices = ref([])
 

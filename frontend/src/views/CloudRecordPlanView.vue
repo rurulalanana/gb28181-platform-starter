@@ -36,6 +36,7 @@
             <el-switch
               :model-value="row.enable"
               size="small"
+              :aria-label="`启用计划：${row.name}`"
               @change="(v) => toggleEnable(row, v)"
             />
           </template>
@@ -256,7 +257,7 @@ const router = useRouter()
 const auth = useAuthStore()
 
 /** 录像计划属于「管理云端录像」，cloud:write。 */
-const canWrite = computed(() => auth.can('cloud:write'))
+const canWrite = computed(() => auth.can('cloud:plan'))
 
 const rows = ref([])
 const loading = ref(false)

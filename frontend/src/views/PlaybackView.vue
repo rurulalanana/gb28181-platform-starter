@@ -289,7 +289,7 @@ const auth = useAuthStore()
  * 下载会让服务器拉流并写盘，不只是「看」。没权限时干脆不画按钮，
  * 而不是让人点了才收到 403。
  */
-const canDownload = computed(() => auth.can('cloud:write'))
+const canDownload = computed(() => auth.can('cloud:download'))
 
 /**
  * 返回上一页。
