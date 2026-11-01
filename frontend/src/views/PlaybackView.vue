@@ -932,6 +932,7 @@ async function play(row, opts = {}) {
   }
   pendingSeek = null
   clearSeeking()
+  clearSeekFallback()
   // 新会话设备从 1 倍速起推，本地记录的「已下发倍速」也要同步归位
   deviceRate = 1
   speedMode.value = 'device'
@@ -946,16 +947,22 @@ async function play(row, opts = {}) {
     return
   }
   /*
-   * 回放只走 WebSocket-FLV。
+   * 协议选择：优先 WebRTC，再退回 WebSocket-FLV。
    *
-   * <p><b>为什么回放不提供 WebRTC</b>（虽然直播预览提供）：回放是「伪点播」——
-   * 进度条/拖动/倍速靠 {@code media.currentTime} + 设备信令实现。而 WebRTC 通路
-   * 拿到的是 <b>MediaStream</b>，实测其 {@code currentTime} 不推进（恒定值），
-   * 进度条会卡死；且设备停推时 RTC 连接会直接断开（实测 ~20 秒）。
-   * 与其给一个看着能选、选了就报错的选项，不如不提供。
+   * <p><b>为什么不再是「回放只走 WS-FLV」</b>：那套 video.js 9 + videojs-flvjs
+   * 组合里，flv 源处理器注册不全（{@code Html5.canPlayType()} 调到缺方法的
+   * 处理器直接抛异常），{@code <source type="video/x-flv">} 被判成
+   * 「不支持的类型」—— 播放器只显示一句「无法找到此视频兼容的源」，
+   * 再被起播看门狗判成「流有问题」反复重拉，表现为「一直转圈 / 反复重新播流」。
+   * 实时预览默认走 WebRTC（{@code LIVE_DEFAULT_PROTOCOL}）一直是好的，
+   * 回放没有理由死守 FLV。
+   *
+   * <p>WebRTC 通路还有一个额外好处：媒体时间轴由 ZLM 连续重打时间戳，
+   * 设备 npt 跳转不会像 FLV 那样在 MSE 里留下「缓冲空洞」。
    */
+  const playbackProto = urls.webrtc ? 'webrtc' : 'wsflv'
   await player.play(playbackKey.value, urls, {
-    proto: 'wsflv',
+    proto: playbackProto,
     /*
      * <b>不传 {@code _vod}：设备回放就是直播形式。</b>
      *
@@ -1020,8 +1027,9 @@ async function play(row, opts = {}) {
        */
       onJump: (delta) => {
         positionOffset.value = (positionOffset.value || 0) - delta
-        // 媒体时间轴已经跳到新位置，说明设备执行完了
+        // 媒体时间轴已经跳到新位置，说明设备执行完了，不用再走兜底
         clearSeeking()
+        clearSeekFallback()
       }
     }
   })
@@ -1090,12 +1098,46 @@ function seekTo(sec) {
 const seeking = ref(false)
 let seekingTimer = null
 
+/** npt 定位的兜底定时器（超时未跳就退回「停会话 + 重新 INVITE」）。 */
+let seekFallbackTimer = null
+
 function clearSeeking() {
   if (seekingTimer) {
     clearTimeout(seekingTimer)
     seekingTimer = null
   }
   seeking.value = false
+}
+
+function clearSeekFallback() {
+  if (seekFallbackTimer) {
+    clearTimeout(seekFallbackTimer)
+    seekFallbackTimer = null
+  }
+}
+
+/**
+ * 定位兜底：npt 是「请设备跳」，设备也可以不理。
+ *
+ * <p>WVP 的录像时间轴干脆不用 npt —— 拖动就是「停会话 + 按新起点重新 INVITE」
+ * （见 {@code web/src/views/device/channel/record.vue} 的 {@code mouseupTimeline}
+ * → {@code playRecord}）。那套一定生效，但要 2~3 秒黑屏。
+ *
+ * <p>这里两者结合：先走 npt（毫秒级、不断流）；6 秒内媒体时间轴还没跳变，
+ * 说明设备没执行（或播放器跨不过时间戳断层），就自动退回 WVP 的做法。
+ */
+function armSeekFallback(offset) {
+  clearSeekFallback()
+  const base = player.position.value || 0
+  seekFallbackTimer = setTimeout(() => {
+    seekFallbackTimer = null
+    if (!current.value) return
+    const moved = Math.abs((player.position.value || 0) - base)
+    // 时间轴已经跳了（或本来就是同一位置），说明 npt 生效
+    if (moved > 3) return
+    clearSeeking()
+    restartAt(offset)
+  }, 6000)
 }
 
 /** 真正发出定位指令，并把本地进度条挪到目标位置。 */
@@ -1125,8 +1167,10 @@ async function flushSeek(offset) {
     clearSeeking()
     seeking.value = true
     seekingTimer = setTimeout(clearSeeking, 3000)
+    armSeekFallback(offset)
   } catch (e) {
     clearSeeking()
+    clearSeekFallback()
     ElMessage.warning(e.message || '定位失败：该设备可能不支持 npt 跳转')
   }
 }
@@ -1687,6 +1731,7 @@ onUnmounted(() => {
   }
   pendingSeek = null
   clearSeeking()
+  clearSeekFallback()
   /*
    * 离开页面必须释放设备侧的会话。
    *

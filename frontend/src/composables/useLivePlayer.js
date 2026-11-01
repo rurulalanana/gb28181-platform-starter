@@ -531,23 +531,42 @@ export function useLivePlayer(containerRef, hooks = {}) {
     if (!engine) return
     /** 用于识别媒体时间轴的突变（设备 npt 跳转后 PTS 会整段前移）。 */
     let lastPos = null
-    unsubs.push(
-      engine.on('timeupdate', () => {
-        if (disposed) return
-        const cur = engine.currentTime()
-        const prev = lastPos
-        lastPos = cur
-        /*
-         * 时间轴突变：设备跳转后新数据的 PTS 从另一处开始，媒体时间轴会
-         * 「瞬移」。此时进度显示必须跟着重新对齐，否则段内位置会被算两次
-         * （一次是本地乐观挪动，一次是媒体时间自己跳）。
-         */
-        if (prev !== null && Number.isFinite(cur) && Math.abs(cur - prev) > 3) {
-          if (opts.vod && typeof opts.vod.onJump === 'function') opts.vod.onJump(cur - prev)
-        }
-        position.value = cur
-      })
-    )
+    const syncPosition = () => {
+      if (disposed) return
+      /*
+       * 优先读<b>原生 media</b> 的 currentTime。
+       *
+       * <p>WebRTC 通路的 tech 不是 Html5，{@code player.currentTime()} 恒返回 0 ——
+       * 而 {@code <video>} 自己（绑的是 MediaStream）时间是在走的。
+       * 只认 tech 的话，进度显示永远停在起播值。
+       */
+      const media = engine.videoEl
+      const cur = media && Number.isFinite(media.currentTime)
+        ? media.currentTime
+        : engine.currentTime()
+      const prev = lastPos
+      lastPos = cur
+      /*
+       * 时间轴突变：设备跳转后新数据的 PTS 从另一处开始，媒体时间轴会
+       * 「瞬移」。此时进度显示必须跟着重新对齐，否则段内位置会被算两次
+       * （一次是本地乐观挪动，一次是媒体时间自己跳）。
+       */
+      if (prev !== null && Number.isFinite(cur) && Math.abs(cur - prev) > 3) {
+        if (opts.vod && typeof opts.vod.onJump === 'function') opts.vod.onJump(cur - prev)
+      }
+      position.value = cur
+    }
+    unsubs.push(engine.on('timeupdate', syncPosition))
+    /*
+     * 轮询兜底：<b>WebRTC 通路不派发 {@code timeupdate}</b>。
+     *
+     * <p>实测回放走 WebRTC 时 {@code media.currentTime} 一直在走
+     * （45.5 → 49.6），但 video.js 的 {@code timeupdate} 一次都不来 ——
+     * 于是播放器的位置永远停在起播值，页面时间轴的游标一动不动。
+     * 500ms 采样一次代价可以忽略，却让进度显示在所有协议下都成立。
+     */
+    const posTimer = setInterval(syncPosition, 500)
+    unsubs.push(() => clearInterval(posTimer))
     unsubs.push(
       engine.on('ended', () => {
         if (disposed) return
