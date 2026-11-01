@@ -2,196 +2,582 @@ package io.github.rurulalanana.starter.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.common.Permissions;
+import io.github.rurulalanana.starter.dto.MenuSaveRequest;
+import io.github.rurulalanana.starter.dto.MenuSyncRequest;
 import io.github.rurulalanana.starter.entity.GbMenu;
 import io.github.rurulalanana.starter.mapper.GbMenuMapper;
 import io.github.rurulalanana.starter.vo.MenuConfigVo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
- * 菜单外观配置（只存覆盖值，默认值在前端代码里）。
+ * 菜单结构（目录 / 菜单 / 按钮三层，对应表 {@code gb_menu}）。
  *
- * <h3>为什么后端不认识「菜单」</h3>
+ * <h3>数据来源</h3>
  *
- * <p>后端只把 {@code menuKey → {类型/标题/图标/父目录/顺序/隐藏}} 当作一组
- * <b>不透明的键值</b>存下来，它不需要知道有哪些菜单、每个菜单要什么权限 ——
- * 那是前端 {@code appRoutes} 的事。
- *
- * <p>这样做的好处：
  * <ul>
- *   <li>加菜单不用改后端，也不会出现「后端菜单表落库了、前端没这个页面」；</li>
- *   <li>代码回滚时库里多出来的 key 会被前端直接忽略，不会点出 404；</li>
- *   <li>后端<b>不会</b>因为权限模型变化而成为绕过 RBAC 的漏洞 ——
- *       权限判断永远走代码里的 {@code meta.perm}。</li>
+ *   <li><b>目录与菜单行</b>由前端 {@code router/routes.js} 在种子版本变化时经
+ *       {@link #sync} 补写 —— 组件是构建产物（{@code views/Xxx.vue}），
+ *       清单只有前端知道，后端内置一份必然漂移；</li>
+ *   <li><b>按钮行</b>由 {@link #seedButtons} 按 {@link Permissions} 清单补写，
+ *       权限标识是后端常量，前端无从得知。</li>
  * </ul>
  *
- * <h3>目录与菜单项同一张表</h3>
+ * <p>两边都用 {@code gb_menu_seed} 记版本：<b>只有版本变了才补写</b>。
+ * 这是「运维删掉的菜单不会每次重启又冒出来」的关键 ——
+ * 若改成无条件补写，删除功能就等于装饰。
  *
- * <p>参照若依 {@code sys_menu}：目录是 {@code gb_menu} 里 {@code menu_type='D'} 的一行。
- * 早先拆成两张表是多余的 —— 分组改名只需 UPDATE 一行，
- * 而且不会出现「改了分组表、菜单项还指向旧编码」的不一致。
+ * <h3>权限边界</h3>
  *
- * <h3>为什么要删行而不是存空串</h3>
- *
- * <p>{@code null} 表示「用默认值」。若把用户清空的标题存成 {@code ""}，
- * 前端 {@code ov.title || default} 仍然会回落到默认值，
- * 但库里会留下一堆看着像配置、实际无效的空行，排查时徒增困惑。
- * 统一约定：<b>没有覆盖就删掉那一行</b>。
+ * <p>本表决定「显示什么」，但<b>不决定「谁有权看」之外的东西</b>：
+ * 路由守卫与后端 {@code WritePermissionInterceptor} 仍然按菜单行上的
+ * {@code perms} 做事，接口是否放行永远由后端 Redis/DB 里的角色权限决定。
+ * 也就是说，把菜单停用只是「藏起来」，不能当成授权手段。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class MenuService {
 
-    /** 主键：字母开头，允许字母数字与中划线。 */
-    private static final Pattern KEY_PATTERN = Pattern.compile("^[a-z][a-z0-9-]{0,63}$");
+    /** 主键：小写字母开头，允许字母/数字/中划线；按钮行直接用权限标识（含冒号）。 */
+    private static final Pattern KEY_PATTERN = Pattern.compile("^[a-z][a-z0-9:-]{0,63}$");
+
+    /** 权限标识：至少一段 {@code 资源:动作}。 */
+    private static final Pattern PERMS_PATTERN = Pattern.compile("^[a-z][a-z0-9-]*(:[a-z0-9-]+)+$");
+
+    /** 组件路径：{@code views/Xxx.vue}，前端由 {@code import.meta.glob} 解析。 */
+    private static final Pattern COMPONENT_PATTERN = Pattern.compile("^views/[A-Za-z0-9_-]+\\.vue$");
+
+    /** 种子版本记录的两把钥匙。 */
+    private static final String SEED_STRUCTURE = "structure";
+    private static final String SEED_BUTTONS = "buttons";
+
+    /**
+     * 权限标识 → 菜单键的精确映射（覆盖「模块同名菜单管不到」的少数情况）。
+     *
+     * <p>默认规则依次是：{@code 模块名 == 菜单键} → {@code 模块名 + s}（device → devices）
+     * → {@link #MODULE_MENU} 显式覆盖 → 「菜单行 perms 的模块前缀」。
+     */
+    private static final Map<String, String> CODE_MENU = Map.of(
+            // 设备录像挂在 playback 页，实时点播在 live 页 —— 两者同属 play 模块
+            "play:record", "playback"
+    );
+
+    /**
+     * 模块 → 菜单键的显式覆盖（优先于「按 perms 前缀猜」）。
+     *
+     * <p>按前缀猜会命中「排序更靠前」的同前缀菜单，容易挂错页面，
+     * 语义明确的几个直接写死。
+     */
+    private static final Map<String, String> MODULE_MENU = Map.of(
+            // 系统类权限属于「系统设置」，而不是排序更靠前的「菜单管理」
+            "system", "settings",
+            "play", "live"
+    );
 
     private static final int MAX_TITLE = 64;
     private static final int MAX_ICON = 64;
+    private static final int MAX_PATH = 160;
+    private static final int MAX_COMPONENT = 160;
+    private static final int MAX_PERMS = 128;
 
     private final GbMenuMapper menuMapper;
 
-    /** 当前全部覆盖（没配过时返回空列表，不是 null）。 */
+    /** 全部节点（目录/菜单/按钮混排，前端按 {@code parentKey} 自行成树）。 */
     public MenuConfigVo config() {
         MenuConfigVo vo = new MenuConfigVo();
         List<MenuConfigVo.ItemVo> items = new ArrayList<>();
-        for (GbMenu m : menuMapper.selectList(
-                Wrappers.<GbMenu>lambdaQuery().orderByAsc(GbMenu::getMenuType))) {
-            MenuConfigVo.ItemVo item = new MenuConfigVo.ItemVo();
-            item.setMenuKey(m.getMenuKey());
-            item.setParentKey(m.getParentKey());
-            item.setMenuType(m.getMenuType());
-            item.setTitle(m.getTitle());
-            item.setIcon(m.getIcon());
-            item.setSortOrder(m.getSortOrder());
-            item.setHidden(m.getHidden());
-            items.add(item);
+        // D 在前、B 在后：前端建树时父节点一定先于子节点出现，不用做多轮扫描
+        for (GbMenu m : menuMapper.selectList(Wrappers.<GbMenu>lambdaQuery()
+                .orderByAsc(GbMenu::getMenuType)
+                .orderByAsc(GbMenu::getSortOrder)
+                .orderByAsc(GbMenu::getMenuKey))) {
+            items.add(toVo(m));
         }
         vo.setItems(items);
         return vo;
     }
 
     /**
-     * 保存一行覆盖。
+     * 补齐缺失的目录/菜单行（版本一致时是空操作）。
      *
-     * <p>类型不同，校验不同：
-     * <ul>
-     *   <li>{@code D} 目录：{@code title} <b>必填</b>——分组名就是它在侧栏上的文字，
-     *       留空会让侧栏出现一条没有标题的分组；{@code parentKey} 忽略（目录是顶层）。</li>
-     *   <li>{@code M} 菜单项：所有字段可选，{@code parentKey} 可用来把菜单项挪到别的分组。</li>
-     * </ul>
+     * <p>已有行<b>只补空列</b>，绝不覆盖：运维改过的名称、图标、排序、
+     * 甚至挪过的分组都要保留；老版本库里的行缺 {@code path/component/perms}
+     * 这几列，正好由这次补写完成升级。
+     *
+     * @return 新插入的行数
      */
     @Transactional
-    public void save(String menuKey, String parentKey, String menuType,
-                     String title, String icon, Integer sortOrder, Boolean hidden) {
-        String key = requireKey(menuKey);
-        String type = normalizeType(menuType);
-        String t = clean(title, MAX_TITLE, "名称");
-        String i = clean(icon, MAX_ICON, "图标名");
+    public synchronized int sync(MenuSyncRequest req) {
+        String version = clean(req.getVersion(), 128, "种子版本");
+        if (version == null) {
+            throw BizException.badRequest("种子版本不能为空");
+        }
+        List<MenuConfigVo.ItemVo> items = req.getItems();
+        if (items == null || items.isEmpty()) {
+            throw BizException.badRequest("种子内容不能为空");
+        }
 
-        if (GbMenu.TYPE_DIRECTORY.equals(type)) {
-            if (t == null) {
-                throw BizException.badRequest("分组名称不能为空");
+        int inserted = 0;
+        if (!version.equals(menuMapper.selectSeedVersion(SEED_STRUCTURE))) {
+            for (MenuConfigVo.ItemVo it : items) {
+                String key = requireKey(it.getMenuKey());
+                String type = normalizeType(it.getMenuType());
+                if (GbMenu.TYPE_BUTTON.equals(type)) {
+                    // 按钮由 seedButtons 负责，前端提交的一律忽略，避免两边打架
+                    continue;
+                }
+                GbMenu row = menuMapper.selectById(key);
+                if (row == null) {
+                    menuMapper.insert(newRow(key, type, it));
+                    inserted++;
+                    continue;
+                }
+                if (backfill(row, type, it)) {
+                    menuMapper.updateById(row);
+                }
             }
-            // 目录是顶层节点，顺带清掉可能残留的 parentKey
-            saveRow(key, null, type, t, i, sortOrder, null);
-            return;
+            menuMapper.upsertSeedVersion(SEED_STRUCTURE, version);
+            log.info("菜单结构已同步到版本 {}：新增 {} 行", version, inserted);
         }
-        String parent = (parentKey == null || parentKey.isBlank()) ? null : requireKey(parentKey);
-        saveRow(key, parent, type, t, i, sortOrder, hidden);
-    }
 
-    /** 写入一行；全字段为空则删行（回到纯默认状态）。 */
-    private void saveRow(String key, String parentKey, String type,
-                         String title, String icon, Integer sortOrder, Boolean hidden) {
-        GbMenu existing = menuMapper.selectById(key);
-        boolean created = existing == null;
-        GbMenu row = created ? new GbMenu() : existing;
-        row.setMenuKey(key);
-        row.setMenuType(type);
-        row.setParentKey(parentKey);
-        row.setTitle(title);
-        row.setIcon(icon);
-        row.setSortOrder(sortOrder);
-        row.setHidden(hidden);
-        row.setUpdateTime(LocalDateTime.now());
-
-        boolean empty = row.getTitle() == null && row.getIcon() == null
-                && row.getParentKey() == null && row.getSortOrder() == null
-                && row.getHidden() == null;
-        if (empty) {
-            if (!created && menuMapper.deleteById(key) > 0) {
-                log.info("菜单覆盖已清空（回到默认）: key={}", key);
-            }
-            return;
-        }
-        if (created) {
-            menuMapper.insert(row);
-        } else {
-            menuMapper.updateById(row);
-        }
-        log.info("菜单覆盖已保存: key={}, type={}, parent={}, title={}, icon={}, sort={}, hidden={}",
-                key, type, row.getParentKey(), title, icon, sortOrder, hidden);
-    }
-
-    /** 恢复默认（删掉覆盖行）。目录与菜单项同走这里。 */
-    @Transactional
-    public void reset(String menuKey) {
-        String key = requireKey(menuKey);
-        menuMapper.deleteById(key);
-        log.info("菜单覆盖已恢复默认: key={}", key);
+        // 结构同步时顺便补一次按钮（幂等）：通常启动时已经补过，
+        // 这里兜住「运行期新增权限点、又不想重启」的场景。
+        seedButtons();
+        return inserted;
     }
 
     /**
-     * 清空全部菜单覆盖。
+     * 启动时补齐按钮行。
      *
-     * <p>不做「只清一部分」的模糊操作：菜单外观是全局的，
-     * 想恢复个别项用 {@link #reset}，一键清空就该清干净。
+     * <p>按钮是<b>后端权限清单的投影</b>，不能依赖前端来触发同步：
+     * 前端只在「菜单结构版本变化」时才 POST {@code /menu/sync}，
+     * 而新增一个权限点时菜单结构并没有变，按钮就永远不会出现。
      *
-     * <p><b>为什么要带 {@code isNotNull} 条件</b>：项目开了
-     * {@code BlockAttackInnerInterceptor}，无条件全表 delete 会被直接拦下并抛
-     * {@code MybatisPlusException}（表现为 500）。加一个对主键的恒真判断，
-     * 语义不变但能通过拦截器的「必须带 where」检查。
+     * <p>监听 {@code ApplicationReadyEvent} 而不是 {@code @PostConstruct}：
+     * 表结构由 {@code SchemaInitializer} 的 ApplicationRunner 建，
+     * 那个时点之后表才一定存在。
      */
+    @EventListener(ApplicationReadyEvent.class)
     @Transactional
-    public int resetAll() {
-        int n = menuMapper.delete(Wrappers.<GbMenu>lambdaQuery().isNotNull(GbMenu::getMenuKey));
-        log.info("已清空全部菜单覆盖：{} 行", n);
-        return n;
+    public void seedButtonsOnStartup() {
+        try {
+            seedButtons();
+        } catch (Exception e) {
+            // 种不出来不该拦住启动：菜单页会显示缺行，但平台其余功能正常
+            log.warn("启动时同步菜单按钮失败（不影响启动）：{}", e.getMessage());
+        }
     }
 
-    /** 校验主键（路由 name / 分组编码）。 */
-    private String requireKey(String raw) {
-        if (raw == null || raw.isBlank()) {
-            throw BizException.badRequest("menu_key 不能为空");
+    /**
+     * 新增或修改一个节点。
+     *
+     * @return 节点主键（新增时由服务端生成）
+     */
+    @Transactional
+    public String save(MenuSaveRequest req) {
+        String type = normalizeType(req.getMenuType());
+        String title = requireTitle(req.getTitle());
+        String icon = clean(req.getIcon(), MAX_ICON, "图标名");
+        String parentKey = clean(req.getParentKey(), 64, "上级编码");
+        Integer status = req.getStatus() == null ? GbMenu.STATUS_ENABLED : req.getStatus();
+        if (status != GbMenu.STATUS_ENABLED && status != GbMenu.STATUS_DISABLED) {
+            throw BizException.badRequest("菜单状态只能是 0（正常）或 1（停用）");
         }
-        String key = raw.trim().toLowerCase();
-        if (!KEY_PATTERN.matcher(key).matches()) {
-            throw BizException.badRequest("标识只能是小写字母开头、字母/数字/中划线，最长 64 位：" + raw);
+        boolean hidden = Boolean.TRUE.equals(req.getHidden());
+
+        String key;
+        if (req.getMenuKey() == null || req.getMenuKey().isBlank()) {
+            key = generateKey(type);
+        } else {
+            key = requireKey(req.getMenuKey());
+        }
+        // 目录是顶层节点，不许挂在别人下面
+        if (GbMenu.TYPE_DIRECTORY.equals(type)) {
+            parentKey = null;
+        } else {
+            if (parentKey == null) {
+                throw BizException.badRequest("请选择上级节点");
+            }
+            GbMenu parent = menuMapper.selectById(parentKey);
+            if (parent == null) {
+                throw BizException.badRequest("上级节点不存在：" + parentKey);
+            }
+            requireParentType(type, parent);
+        }
+
+        GbMenu row = menuMapper.selectById(key);
+        boolean created = row == null;
+        if (created) {
+            row = new GbMenu();
+            row.setMenuKey(key);
+        }
+        row.setMenuType(type);
+        row.setParentKey(parentKey);
+        row.setTitle(title);
+        row.setIcon(GbMenu.TYPE_BUTTON.equals(type) ? null : icon);
+        row.setSortOrder(req.getSortOrder() == null ? nextSortOrder(parentKey) : req.getSortOrder());
+        row.setHidden(hidden);
+        row.setStatus(status);
+
+        if (GbMenu.TYPE_MENU.equals(type)) {
+            row.setPath(requirePath(req.getPath()));
+            row.setComponent(requireComponent(req.getComponent()));
+            row.setPerms(cleanPerms(req.getPerms()));
+        } else if (GbMenu.TYPE_BUTTON.equals(type)) {
+            row.setPath(null);
+            row.setComponent(null);
+            row.setPerms(requirePerms(req.getPerms()));
+        } else {
+            row.setPath(null);
+            row.setComponent(null);
+            row.setPerms(null);
+        }
+        row.setUpdateTime(LocalDateTime.now());
+
+        if (created) {
+            menuMapper.insert(row);
+            log.info("菜单节点已新增: key={}, type={}, parent={}, title={}", key, type, parentKey, title);
+        } else {
+            menuMapper.updateById(row);
+            log.info("菜单节点已修改: key={}, type={}, parent={}, title={}", key, type, parentKey, title);
         }
         return key;
     }
 
-    /** 类型只有 D / M，缺省按菜单项处理（调用方最常改的是菜单项）。 */
+    /**
+     * 删除一个节点。
+     *
+     * @param cascade 是否连同全部下级一起删除（目录连带菜单、菜单连带按钮）
+     * @return 实际删除的行数
+     */
+    @Transactional
+    public int delete(String menuKey, boolean cascade) {
+        String key = requireKey(menuKey);
+        List<String> keys = cascade ? collectSubtree(key) : List.of(key);
+        int n = 0;
+        for (String k : keys) {
+            n += menuMapper.deleteById(k);
+        }
+        log.info("菜单节点已删除: key={}, cascade={}, 行数={}", key, cascade, n);
+        return n;
+    }
+
+    /** 收集自身 + 全部后代的主键（按层展开，避免递归深度受数据影响）。 */
+    private List<String> collectSubtree(String root) {
+        Map<String, List<String>> children = new HashMap<>();
+        for (GbMenu m : menuMapper.selectList(Wrappers.<GbMenu>lambdaQuery()
+                .select(GbMenu::getMenuKey, GbMenu::getParentKey))) {
+            if (m.getParentKey() != null) {
+                children.computeIfAbsent(m.getParentKey(), k -> new ArrayList<>()).add(m.getMenuKey());
+            }
+        }
+        List<String> out = new ArrayList<>();
+        List<String> frontier = new ArrayList<>(List.of(root));
+        while (!frontier.isEmpty()) {
+            List<String> next = new ArrayList<>();
+            for (String k : frontier) {
+                if (out.contains(k)) {
+                    continue;
+                }
+                out.add(k);
+                next.addAll(children.getOrDefault(k, List.of()));
+            }
+            frontier = next;
+        }
+        return out;
+    }
+
+    /**
+     * 按 {@link Permissions} 清单补齐按钮行。
+     *
+     * <p>权限标识是后端常量，前端无从得知，所以按钮只能在后端种。
+     * 版本号取「条目数 + 全部编码的哈希」：增删权限点或改名都会触发一次补写，
+     * 但平时重启不会把运维删掉的按钮种回来。
+     */
+    @Transactional
+    public int seedButtons() {
+        List<Permissions.Def> defs = Permissions.all();
+        // 版本号带一个常量：改了编号规则（例如从全局序号改成同级序号）时改它，强制重种
+        String version = "3-" + defs.size() + "-" + Integer.toHexString(
+                defs.stream().map(Permissions.Def::code).collect(Collectors.joining(",")).hashCode());
+        if (version.equals(menuMapper.selectSeedVersion(SEED_BUTTONS))) {
+            return 0;
+        }
+
+        // 三条查找路径，从最贴合到最宽松：
+        // 1) 按菜单键（模块名本身 / 模块名加 s）  2) 按菜单行 perms 的模块前缀  3) 兜底映射
+        Map<String, String> byKey = new LinkedHashMap<>();
+        Map<String, String> byPerms = new LinkedHashMap<>();
+        for (GbMenu m : menuMapper.selectList(Wrappers.<GbMenu>lambdaQuery()
+                .eq(GbMenu::getMenuType, GbMenu.TYPE_MENU)
+                .orderByAsc(GbMenu::getSortOrder))) {
+            byKey.putIfAbsent(m.getMenuKey(), m.getMenuKey());
+            if (m.getPerms() != null) {
+                byPerms.putIfAbsent(moduleOf(m.getPerms()), m.getMenuKey());
+            }
+        }
+
+        int inserted = 0;
+        // 同级序号：每个菜单下的按钮各自从 1 开始，界面上看起来才像若依
+        Map<String, Integer> sortByParent = new LinkedHashMap<>();
+        for (Permissions.Def def : defs) {
+            String code = def.code();
+            String module = moduleOf(code);
+            String parent = CODE_MENU.get(code);
+            if (parent == null) {
+                parent = byKey.get(module);
+            }
+            if (parent == null) {
+                parent = byKey.get(module + "s");
+            }
+            if (parent == null) {
+                parent = MODULE_MENU.get(module);
+            }
+            if (parent == null) {
+                parent = byPerms.get(module);
+            }
+            // 先占号再判断是否已存在：已有行也要占位，否则新补的按钮会与它们撞号
+            int sort = sortByParent.merge(parent == null ? "" : parent, 1, Integer::sum);
+            if (menuMapper.selectById(def.code()) != null) {
+                continue;
+            }
+            GbMenu row = new GbMenu();
+            // 按钮主键直接用权限标识：它是天然唯一的稳定键，也让「授权」与「菜单」对得上号
+            row.setMenuKey(def.code());
+            row.setParentKey(parent);
+            row.setMenuType(GbMenu.TYPE_BUTTON);
+            row.setTitle(def.name());
+            row.setSortOrder(sort);
+            row.setPerms(def.code());
+            row.setHidden(false);
+            row.setStatus(GbMenu.STATUS_ENABLED);
+            row.setUpdateTime(LocalDateTime.now());
+            menuMapper.insert(row);
+            inserted++;
+        }
+        menuMapper.upsertSeedVersion(SEED_BUTTONS, version);
+        log.info("菜单按钮已同步到版本 {}：新增 {} 行", version, inserted);
+        return inserted;
+    }
+
+    // ==================== 内部工具 ====================
+
+    private MenuConfigVo.ItemVo toVo(GbMenu m) {
+        MenuConfigVo.ItemVo item = new MenuConfigVo.ItemVo();
+        item.setMenuKey(m.getMenuKey());
+        item.setParentKey(m.getParentKey());
+        item.setMenuType(m.getMenuType());
+        item.setTitle(m.getTitle());
+        item.setIcon(m.getIcon());
+        item.setSortOrder(m.getSortOrder());
+        item.setHidden(m.getHidden());
+        item.setPath(m.getPath());
+        item.setComponent(m.getComponent());
+        item.setPerms(m.getPerms());
+        item.setStatus(m.getStatus() == null ? GbMenu.STATUS_ENABLED : m.getStatus());
+        return item;
+    }
+
+    private GbMenu newRow(String key, String type, MenuConfigVo.ItemVo it) {
+        GbMenu row = new GbMenu();
+        row.setMenuKey(key);
+        row.setMenuType(type);
+        row.setParentKey(clean(it.getParentKey(), 64, "上级编码"));
+        row.setTitle(clean(it.getTitle(), MAX_TITLE, "名称"));
+        row.setIcon(clean(it.getIcon(), MAX_ICON, "图标名"));
+        row.setSortOrder(it.getSortOrder());
+        row.setPath(clean(it.getPath(), MAX_PATH, "路由地址"));
+        row.setComponent(clean(it.getComponent(), MAX_COMPONENT, "组件路径"));
+        row.setPerms(clean(it.getPerms(), MAX_PERMS, "权限标识"));
+        row.setHidden(Boolean.TRUE.equals(it.getHidden()));
+        row.setStatus(GbMenu.STATUS_ENABLED);
+        row.setUpdateTime(LocalDateTime.now());
+        return row;
+    }
+
+    /**
+     * 用种子补齐已存在行的空列。
+     *
+     * <p>只填 {@code null}：老版本库里存的是运维改过的名称/图标/排序，
+     * 被种子覆盖一次就等于把他们的配置全抹了。
+     *
+     * @return 是否需要写回
+     */
+    private boolean backfill(GbMenu row, String type, MenuConfigVo.ItemVo it) {
+        boolean dirty = false;
+        if (row.getMenuType() == null) {
+            row.setMenuType(type);
+            dirty = true;
+        }
+        if (row.getTitle() == null && it.getTitle() != null) {
+            row.setTitle(it.getTitle());
+            dirty = true;
+        }
+        if (row.getIcon() == null && it.getIcon() != null) {
+            row.setIcon(it.getIcon());
+            dirty = true;
+        }
+        if (row.getSortOrder() == null && it.getSortOrder() != null) {
+            row.setSortOrder(it.getSortOrder());
+            dirty = true;
+        }
+        if (row.getParentKey() == null && it.getParentKey() != null) {
+            row.setParentKey(it.getParentKey());
+            dirty = true;
+        }
+        if (row.getPath() == null && it.getPath() != null) {
+            row.setPath(it.getPath());
+            dirty = true;
+        }
+        if (row.getComponent() == null && it.getComponent() != null) {
+            row.setComponent(it.getComponent());
+            dirty = true;
+        }
+        if (row.getPerms() == null && it.getPerms() != null) {
+            row.setPerms(it.getPerms());
+            dirty = true;
+        }
+        if (row.getStatus() == null) {
+            row.setStatus(GbMenu.STATUS_ENABLED);
+            dirty = true;
+        }
+        if (dirty) {
+            row.setUpdateTime(LocalDateTime.now());
+        }
+        return dirty;
+    }
+
+    private void requireParentType(String childType, GbMenu parent) {
+        String parentType = parent.getMenuType();
+        boolean ok = GbMenu.TYPE_BUTTON.equals(childType)
+                // 按钮只能挂菜单；但要容忍历史数据里按钮挂在目录下
+                ? GbMenu.TYPE_MENU.equals(parentType) || GbMenu.TYPE_DIRECTORY.equals(parentType)
+                : GbMenu.TYPE_DIRECTORY.equals(parentType);
+        if (!ok) {
+            throw BizException.badRequest(GbMenu.TYPE_BUTTON.equals(childType)
+                    ? "按钮的上级只能是菜单"
+                    : "菜单的上级只能是目录");
+        }
+    }
+
+    private String generateKey(String type) {
+        String prefix = GbMenu.TYPE_DIRECTORY.equals(type) ? "d"
+                : GbMenu.TYPE_BUTTON.equals(type) ? "b" : "m";
+        return prefix + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+    }
+
+    /** 同级排序：没填就排到末尾，省得每次新增都手填。 */
+    private int nextSortOrder(String parentKey) {
+        List<GbMenu> siblings = menuMapper.selectList(Wrappers.<GbMenu>lambdaQuery()
+                .select(GbMenu::getSortOrder)
+                .eq(parentKey != null, GbMenu::getParentKey, parentKey)
+                .isNull(parentKey == null, GbMenu::getParentKey));
+        return siblings.stream()
+                .map(GbMenu::getSortOrder)
+                .filter(Objects::nonNull)
+                .max(Integer::compareTo)
+                .orElse(0) + 1;
+    }
+
+    private String requireTitle(String raw) {
+        String title = clean(raw, MAX_TITLE, "名称");
+        if (title == null) {
+            throw BizException.badRequest("名称不能为空");
+        }
+        return title;
+    }
+
+    private String requirePath(String raw) {
+        String path = clean(raw, MAX_PATH, "路由地址");
+        if (path == null) {
+            throw BizException.badRequest("路由地址不能为空");
+        }
+        if (!path.startsWith("/")) {
+            throw BizException.badRequest("路由地址必须以 / 开头：" + path);
+        }
+        return path;
+    }
+
+    private String requireComponent(String raw) {
+        String component = clean(raw, MAX_COMPONENT, "组件路径");
+        if (component == null) {
+            throw BizException.badRequest("组件路径不能为空");
+        }
+        if (!COMPONENT_PATTERN.matcher(component).matches()) {
+            throw BizException.badRequest("组件路径应形如 views/UserView.vue：" + component);
+        }
+        return component;
+    }
+
+    private String requirePerms(String raw) {
+        String perms = cleanPerms(raw);
+        if (perms == null) {
+            throw BizException.badRequest("权限标识不能为空");
+        }
+        return perms;
+    }
+
+    private String cleanPerms(String raw) {
+        String perms = clean(raw, MAX_PERMS, "权限标识");
+        if (perms == null) {
+            return null;
+        }
+        if (!PERMS_PATTERN.matcher(perms).matches()) {
+            throw BizException.badRequest("权限标识应形如 device:write：" + perms);
+        }
+        return perms;
+    }
+
+    /** 权限标识的模块前缀（{@code device:write → device}）。 */
+    private static String moduleOf(String perms) {
+        int i = perms == null ? -1 : perms.indexOf(':');
+        return i > 0 ? perms.substring(0, i) : String.valueOf(perms);
+    }
+
+    /** 校验主键（路由 name / 分组编码 / 权限标识）。 */
+    private String requireKey(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw BizException.badRequest("menu_key 不能为空");
+        }
+        String key = raw.trim().toLowerCase(Locale.ROOT);
+        if (!KEY_PATTERN.matcher(key).matches()) {
+            throw BizException.badRequest("标识只能是小写字母开头、字母/数字/中划线/冒号，最长 64 位：" + raw);
+        }
+        return key;
+    }
+
+    /** 类型只有 D / M / B，缺省按菜单处理（调用方最常改的是菜单）。 */
     private String normalizeType(String raw) {
         if (raw == null || raw.isBlank()) {
             return GbMenu.TYPE_MENU;
         }
-        String t = raw.trim().toUpperCase();
-        if (!GbMenu.TYPE_DIRECTORY.equals(t) && !GbMenu.TYPE_MENU.equals(t)) {
-            throw BizException.badRequest("menu_type 只能是 D（目录）或 M（菜单）");
+        String t = raw.trim().toUpperCase(Locale.ROOT);
+        if (!Set.of(GbMenu.TYPE_DIRECTORY, GbMenu.TYPE_MENU, GbMenu.TYPE_BUTTON).contains(t)) {
+            throw BizException.badRequest("menu_type 只能是 D（目录）/ M（菜单）/ B（按钮）");
         }
         return t;
     }
 
-    /** 去空白；空串按「不覆盖」处理；超长直接拒绝而不是静默截断。 */
+    /** 去空白；空串按「没填」处理；超长直接拒绝而不是静默截断。 */
     private String clean(String raw, int max, String label) {
         if (raw == null) {
             return null;

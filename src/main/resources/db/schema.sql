@@ -538,53 +538,69 @@ WHERE NOT EXISTS (
 ON CONFLICT DO NOTHING;
 
 -- -------------------- gb_menu --------------------
--- 菜单外观配置：<b>目录与菜单项同表</b>，用 menu_type 区分、parent_key 自关联。
+-- 菜单结构表：<b>目录(D) / 菜单(M) / 按钮(B) 三种行同表</b>，parent_key 自关联。
 --
--- 参照若依 sys_menu 的形态（目录是表里的一行，而不是单独一张分组表）。
--- 早先拆成 gb_menu + gb_menu_group 两张表是多余的：分组改名只用 UPDATE 一行，
--- 不存在「改了一半」的风险，自增主键的方案也不会有「路由名与分组码争主键」的问题
--- —— 这里用 menu_key 做业务主键，目录和菜单项的编码天然处于不同命名空间
--- （目录 monitor/resource/…，菜单项 dashboard/devices/…）。
+-- 参照若依 sys_menu 的形态。与早期版本的最大区别：<b>整棵菜单树由本表决定</b> ——
+-- 侧栏渲染、前端路由注册、按钮级权限标识都读这里，而不是「代码里定义 + 库里只存覆盖值」。
+-- 因此现在支持在「菜单管理」页里新增/删除目录、菜单、按钮。
 --
--- 与 sys_menu 的两点<b>刻意不同</b>：
---   1. 不存 component 路径。菜单项与 `component: () => import(...)` 一一对应，
---      属于构建产物；存成字符串下发就得改成 import.meta.glob 动态解析，
---      失去构建期静态分析，且代码回滚后会出现「点了 404 的项」。
---   2. 不存 perms。权限点是跨菜单的抽象（device:write 同时管 setname/remove/setinfo），
---      不是「一个按钮一个权限点」；我们的权限点由 Java 常量 Permissions 定义、
---      由 gb_role_permission 授权。菜单表只决定「怎么显示」，<b>永远不能放宽谁能看</b>。
+-- 三层的语义：
+--   D 目录：侧栏分组标题，没有路由
+--   M 菜单：一个可打开的页面，path 是路由地址、component 是 views/ 下的组件文件
+--   B 按钮：只有权限标识，不产生路由；由后端按 Permissions 常量补齐，作为授权可视化
 --
--- 本表<b>只存覆盖值</b>：库里没有的行/列为 NULL 的列，都用前端 router/routes.js 的默认值。
--- 因此无需任何种子数据。
+-- <b>种子数据怎么来</b>：D/M 行由前端 router/routes.js 在版本变化时经 /menu/sync 补写
+-- （组件清单只有前端知道）；B 行由后端按 Permissions 清单补写。两者都只在
+-- 「种子版本不一致」时执行，所以运维删掉的行不会每次重启又冒出来。
 CREATE TABLE IF NOT EXISTS gb_menu (
-    -- 目录(D)：分组编码（g-monitor / g-resource / g-cloud / g-ops / g-system）
-    -- 菜单(M)：Vue 路由 name（dashboard / devices / ...），稳定标识，不用 path（会变）
-    --
-    -- 分组编码必须带 g- 前缀：它与路由 name 共用主键，而两者可能撞名
-    -- （"cloud" 既是云录像分组、又是云录像页的路由 name）。加前缀后两个
-    -- 命名空间错开，不需要复合主键。前缀不进界面，界面上只显示 title。
+    -- 目录(D)：分组编码（g-monitor / g-resource / ...）；菜单(M)：Vue 路由 name；
+    -- 按钮(B)：权限标识（device:write）。三者共用主键，天然处于不同命名空间。
     menu_key    VARCHAR(64) PRIMARY KEY,
-    -- 菜单项所属目录的 menu_key；NULL = 用代码里的默认分组
+    -- 上级节点：M 挂在 D 下，B 挂在 M 下；D 为 NULL
     parent_key  VARCHAR(64),
-    -- D 目录 / M 菜单
+    -- D 目录 / M 菜单 / B 按钮
     menu_type   CHAR(1)     NOT NULL DEFAULT 'M',
     title       VARCHAR(64),
     icon        VARCHAR(64),
     sort_order  INTEGER,
+    -- 是否在侧栏隐藏（隐藏仍可经直连 URL 打开，受权限守卫约束）
     hidden      BOOLEAN,
+    -- 路由地址（M 行），如 /users
+    path        VARCHAR(160),
+    -- 组件路径（M 行），如 views/UserView.vue，前端用 import.meta.glob 解析
+    component   VARCHAR(160),
+    -- 权限标识（M/B 行），如 device:read / device:write
+    perms       VARCHAR(128),
+    -- 0 正常 / 1 停用（停用不进侧栏、不注册路由）
+    status      SMALLINT    NOT NULL DEFAULT 0,
     update_time TIMESTAMP   DEFAULT NOW()
 );
 
+-- 旧库升级：早期版本只有「外观覆盖」四列
+ALTER TABLE gb_menu ADD COLUMN IF NOT EXISTS path      VARCHAR(160);
+ALTER TABLE gb_menu ADD COLUMN IF NOT EXISTS component VARCHAR(160);
+ALTER TABLE gb_menu ADD COLUMN IF NOT EXISTS perms     VARCHAR(128);
+ALTER TABLE gb_menu ADD COLUMN IF NOT EXISTS status    SMALLINT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_gb_menu_parent ON gb_menu (parent_key);
 
-COMMENT ON TABLE  gb_menu IS '菜单外观覆盖：目录与菜单项同表（menu_type 区分），只存与代码默认值的差异';
-COMMENT ON COLUMN gb_menu.menu_key   IS '目录：分组编码；菜单：Vue 路由 name（稳定标识，与前端 appRoutes[].name 对应）';
-COMMENT ON COLUMN gb_menu.parent_key IS '菜单项所属目录的 menu_key，NULL 用代码默认分组';
-COMMENT ON COLUMN gb_menu.menu_type  IS 'D 目录 / M 菜单';
-COMMENT ON COLUMN gb_menu.title      IS '显示名，NULL 用代码默认';
-COMMENT ON COLUMN gb_menu.icon       IS '图标（Element Plus 组件名），NULL 用代码默认';
-COMMENT ON COLUMN gb_menu.sort_order IS '同级排序，NULL 用代码里的声明顺序';
-COMMENT ON COLUMN gb_menu.hidden     IS '是否在菜单中隐藏（不影响路由与权限）';
+COMMENT ON TABLE  gb_menu IS '菜单结构表：目录/菜单/按钮三层同表（menu_type 区分），决定侧栏、路由与权限标识';
+COMMENT ON COLUMN gb_menu.menu_key   IS '目录：分组编码；菜单：Vue 路由 name；按钮：权限标识';
+COMMENT ON COLUMN gb_menu.parent_key IS '上级节点：菜单挂目录、按钮挂菜单，目录为 NULL';
+COMMENT ON COLUMN gb_menu.menu_type  IS 'D 目录 / M 菜单 / B 按钮';
+COMMENT ON COLUMN gb_menu.path       IS '路由地址（M 行），如 /users';
+COMMENT ON COLUMN gb_menu.component  IS '组件路径（M 行），如 views/UserView.vue';
+COMMENT ON COLUMN gb_menu.perms      IS '权限标识（M/B 行），如 device:write';
+COMMENT ON COLUMN gb_menu.status     IS '0 正常 / 1 停用';
+
+-- -------------------- gb_menu_seed --------------------
+-- 种子版本标记：记录「前端菜单结构」与「后端按钮清单」各自同步到哪个版本。
+-- 只有版本变化时才补写缺失行，避免运维删掉的菜单每次重启又被种回来。
+CREATE TABLE IF NOT EXISTS gb_menu_seed (
+    id          VARCHAR(32) PRIMARY KEY,
+    version     VARCHAR(128),
+    update_time TIMESTAMP   DEFAULT NOW()
+);
 
 -- -------------------- sa_token_store --------------------
 -- Sa-Token 会话存储（登录 token 持久化）：由 SaTokenJdbcDao 读写，

@@ -217,18 +217,21 @@ export const opLogApi = {
 }
 
 /**
- * 菜单外观配置（`/api/v1/menu/*`）。
+ * 菜单管理（`/api/v1/menu/*`）。
  *
- * <p>`config` 任何登录用户可读（渲染侧栏要用），写入需 `system:write`。
- * 服务端只存覆盖值，默认值在前端 `router/routes.js`，读到后合并。
- * 目录与菜单项在服务端是同一张表，用 `menu_type` 区分（D / M）。
+ * <p>整棵菜单树（目录 D / 菜单 M / 按钮 B）存在 `gb_menu` 里：
+ * `config` 任何登录用户可读（渲染侧栏、注册路由都要用），
+ * 写入需 `menu:write`，`sync` 是幂等的种子补齐（所有人可调）。
  */
 export const menuApi = {
   config: () => get('/menu/config'),
-  /** 字段全部可选：不传 = 不覆盖（用默认值）。menu_type=D 时 title 必填。 */
-  save: (params) => post('/menu/save', params),
-  reset: (menuKey) => post('/menu/reset', { menu_key: menuKey }),
-  resetAll: () => post('/menu/resetall')
+  /** 补写缺失的目录/菜单行；版本一致时是空操作，返回 `{deleted: 新增行数}`。 */
+  sync: (payload) => post('/menu/sync', null, payload, 20000),
+  /** 新增或修改一个节点：menu_key 为空 = 新增。 */
+  save: (payload) => post('/menu/save', null, payload),
+  /** 删除一个节点；cascade=true 连同全部下级。 */
+  remove: (menuKey, cascade = false) =>
+    post('/menu/delete', { menu_key: menuKey, cascade: cascade ? 'true' : 'false' })
 }
 
 /**

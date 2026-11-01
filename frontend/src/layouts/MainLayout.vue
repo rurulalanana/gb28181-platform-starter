@@ -1,10 +1,11 @@
 <template>
   <div class="shell" :class="{ 'is-collapsed': collapsed }">
+    <a class="skip-link" href="#main-content">跳到主内容</a>
     <!-- ============ 侧边导航 ============ -->
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">
-          <el-icon :size="18"><VideoCamera /></el-icon>
+          <el-icon :size="18" aria-hidden="true"><VideoCamera /></el-icon>
         </div>
         <transition name="fade">
           <div v-show="!collapsed" class="brand-text">
@@ -23,9 +24,10 @@
             :to="item.path"
             class="nav-item"
             :class="{ 'is-active': route.path === item.path }"
+            :aria-current="route.path === item.path ? 'page' : undefined"
             :title="collapsed ? item.title : ''"
           >
-            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+            <el-icon class="nav-icon" aria-hidden="true"><component :is="item.icon" /></el-icon>
             <transition name="fade">
               <span v-show="!collapsed" class="nav-label">{{ item.title }}</span>
             </transition>
@@ -37,7 +39,7 @@
       <!-- 侧栏底部：系统状态 -->
       <div class="sidebar-foot">
         <div class="health" :class="healthClass">
-          <span class="health-dot" />
+          <span class="health-dot" aria-hidden="true" />
           <transition name="fade">
             <span v-show="!collapsed" class="health-text">{{ healthText }}</span>
           </transition>
@@ -50,9 +52,26 @@
       <!-- 顶栏 -->
       <header class="topbar">
         <div class="topbar-left">
-          <button class="icon-btn" :title="collapsed ? '展开侧栏' : '收起侧栏'" @click="collapsed = !collapsed">
-            <el-icon :size="18"><Fold v-if="!collapsed" /><Expand v-else /></el-icon>
+          <button
+            class="icon-btn"
+            :aria-label="collapsed ? '展开侧栏' : '收起侧栏'"
+            :aria-expanded="!collapsed"
+            :title="collapsed ? '展开侧栏' : '收起侧栏'"
+            @click="collapsed = !collapsed"
+          >
+            <el-icon :size="18" aria-hidden="true"><Fold v-if="!collapsed" /><Expand v-else /></el-icon>
           </button>
+
+          <!-- RuoYi 顶部面包屑：首页 / 分组 / 当前页 -->
+          <nav class="crumb" aria-label="面包屑">
+            <span class="crumb-item">首页</span>
+            <el-icon class="crumb-sep" aria-hidden="true"><ArrowRight /></el-icon>
+            <template v-if="route.meta.group">
+              <span class="crumb-item">{{ groupTitle }}</span>
+              <el-icon class="crumb-sep" aria-hidden="true"><ArrowRight /></el-icon>
+            </template>
+            <span class="crumb-current">{{ route.meta.title || '总览' }}</span>
+          </nav>
         </div>
 
         <div class="topbar-right">
@@ -71,8 +90,14 @@
           </div>
 
           <el-tooltip content="刷新服务器信息" placement="bottom">
-            <button class="icon-btn" :loading="refreshing" @click="onRefreshInfo">
-              <el-icon :size="16"><Refresh /></el-icon>
+            <button
+              class="icon-btn"
+              :disabled="refreshing"
+              aria-label="刷新服务器信息"
+              :aria-busy="refreshing"
+              @click="onRefreshInfo"
+            >
+              <el-icon :size="16" aria-hidden="true"><Refresh /></el-icon>
             </button>
           </el-tooltip>
 
@@ -82,18 +107,18 @@
           <div class="divider" />
 
           <el-dropdown trigger="click" @command="onCommand">
-            <div class="user">
+            <div class="user" aria-haspopup="menu">
               <span class="user-welcome">欢迎,</span>
               <span class="user-name">{{ displayName }}</span>
-              <el-icon class="user-caret" :size="12"><ArrowDown /></el-icon>
+              <el-icon class="user-caret" :size="12" aria-hidden="true"><ArrowDown /></el-icon>
             </div>
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item v-if="auth.can('system:read')" command="settings">
-                  <el-icon><Setting /></el-icon> 系统设置
+                  <el-icon aria-hidden="true"><Setting /></el-icon> 系统设置
                 </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>
-                  <el-icon><SwitchButton /></el-icon> 退出登录
+                  <el-icon aria-hidden="true"><SwitchButton /></el-icon> 退出登录
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -101,18 +126,8 @@
         </div>
       </header>
 
-      <!-- 内容页签条：参考站是「页签 + 关闭」，这里页签跟随当前路由 -->
-      <div class="content-tabs">
-        <div class="ctab">
-          <span>{{ route.meta.title || '总览' }}</span>
-          <button class="ctab-close" title="关闭并返回总览" @click="router.push('/dashboard')">
-            <el-icon :size="11"><Close /></el-icon>
-          </button>
-        </div>
-      </div>
-
       <!-- 内容区 -->
-      <main class="content">
+      <main id="main-content" class="content" tabindex="-1">
         <router-view v-slot="{ Component }">
           <transition name="fade-slide" mode="out-in">
             <component :is="Component" />
@@ -153,13 +168,16 @@ window.addEventListener('resize', syncViewport)
 syncViewport()
 
 /*
- * 菜单项不再写在这里。
+ * 菜单项不写在这里。
  *
- * <p>菜单 = {@code router/routes.js} 里 {@code appRoutes} 的 meta（title / icon / group / perm）
- * ⊕ 后端 {@code gb_menu} 的覆盖值（名称/图标/分组/排序/隐藏）。
- * 由 {@link buildMenu} 合并后按当前账号权限过滤并分组。
+ * <p>侧栏完全由后端 {@code gb_menu} 决定（「菜单管理」页可增删改）：
+ * 目录行 → 分组标题，菜单行 → 可点的页面，按钮行不进侧栏。
+ * 由 {@link buildMenu} 按当前账号权限过滤后分组。
  */
-const menuGroups = computed(() => buildMenu(auth, auth.menuConfig))
+const menuGroups = computed(() => buildMenu(auth, auth.menuRows))
+
+/** 面包屑里的分组名：动态路由已把目录标题写进 {@code meta.group}。 */
+const groupTitle = computed(() => route.meta.group || '')
 
 const online = computed(() => auth.serverInfo?.deviceOnline ?? 0)
 const total = computed(() => auth.serverInfo?.deviceTotal ?? 0)
@@ -229,9 +247,31 @@ onUnmounted(() => {
 <style scoped>
 .shell {
   display: flex;
+  gap: 12px;
   height: 100vh;
+  padding: 12px;
   overflow: hidden;
   background: var(--bg-app);
+}
+
+/* 键盘用户的第一落点：平时不可见，聚焦后浮在左上角 */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  color: var(--brand-700);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  box-shadow: var(--sh-md);
+  transform: translateY(-200%);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
 }
 
 /* ============ 侧栏 ============ */
@@ -241,8 +281,11 @@ onUnmounted(() => {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  /* RuoYi 侧栏：独立的深色圆角面板，不是贴边的整条 */
   background: var(--bg-sidebar);
-  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: var(--r-panel);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
 
@@ -319,44 +362,34 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 34px;
-  padding: 0 10px;
-  margin-bottom: 1px;
+  height: 40px;
+  padding: 0 12px;
+  margin: 3px 0;
   border-radius: var(--r-md);
-  color: rgba(255, 255, 255, 0.62);
+  color: #e5edf8;
   text-decoration: none;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   white-space: nowrap;
-  transition: background 0.14s ease, color 0.14s ease;
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .nav-item:hover {
   background: var(--bg-sidebar-hover);
-  color: rgba(255, 255, 255, 0.95);
+  color: #fff;
 }
 
 .nav-item.is-active {
   background: var(--bg-sidebar-active);
   color: #fff;
   font-weight: 500;
-}
-
-/* 激活态：左侧 2px 强调条（整条贯穿，比圆点/整块填充更"仪表"） */
-.nav-item.is-active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  border-radius: 0 2px 2px 0;
-  background: var(--brand-400);
+  /* RuoYi：左侧 3px 实心亮条 + 一圈极淡描边 */
+  box-shadow: inset 3px 0 0 var(--brand-500), inset 0 0 0 1px rgba(96, 165, 250, 0.24);
 }
 
 .nav-icon {
-  font-size: var(--fs-lg);
+  font-size: 18px;
   flex-shrink: 0;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .nav-item:hover .nav-icon,
@@ -421,26 +454,56 @@ onUnmounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  gap: 12px;
   min-width: 0;
 }
 
 .topbar {
-  height: var(--header-h);
+  height: 50px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-4);
+  /* RuoYi 顶栏：白色圆角条 + 1px 描边 + 极轻投影 */
   background: var(--bg-surface);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--sh-panel);
 }
 
 .topbar-left {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
   min-width: 0;
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.crumb-item {
+  color: var(--text-secondary);
+}
+
+.crumb-sep {
+  font-size: 10px;
+  color: var(--ink-300);
+}
+
+.crumb-current {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-right {
@@ -541,7 +604,6 @@ onUnmounted(() => {
   padding: 0 8px 0 3px;
   border-radius: var(--r-md);
   cursor: pointer;
-  outline: none;
   transition: background 0.14s ease;
 }
 
@@ -593,7 +655,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  padding: var(--sp-4) var(--sp-5) var(--sp-6);
+  /* 外层已经有 12px 间隙，这里只留一点点呼吸位，页面自己用 .page 控制节奏 */
+  padding: 2px 2px var(--sp-2);
 }
 
 /* router-view 的过渡组件需要能撑满 */

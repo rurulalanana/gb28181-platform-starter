@@ -1,58 +1,29 @@
 /**
- * 路由与侧栏菜单的<b>唯一</b>数据源。
+ * 菜单种子、组件注册表与侧栏/路由装配。
  *
- * <h3>为什么单独抽这个文件</h3>
+ * <h3>菜单从哪来</h3>
  *
- * <p>改造前同一份菜单信息写了两遍：{@code router/index.js} 里写 {@code meta.perm}，
- * {@code MainLayout.vue} 里再手写一份 {@code allItems}（标题、图标、分组）。
- * 两处的图标体系还不一致（一处 mdi 字符串、一处 Element Plus 组件名），
- * 结果是加一个页面要改两个文件，漏一个就出现「菜单里有、地址打不开」
- * 或者「地址能打开、菜单里没有」。
+ * <p>整棵菜单树存在后端 {@code gb_menu} 表里（目录 D / 菜单 M / 按钮 B 三层），
+ * 侧栏与前端路由都由它决定。本文件仍保留一份<b>种子</b>：首次部署或
+ * {@link MENU_SEED_VERSION} 变化时，由 {@code /api/v1/menu/sync} 把缺失的
+ * 目录/菜单行补写进库。之后一律以库为准 —— 运维在「菜单管理」页改名、挪分组、
+ * 新增、删除都能生效，代码不会再覆盖回去。
  *
- * <p>现在 {@code appRoutes[].meta} 同时承担三件事：
- * <ol>
- *   <li>{@code title} 页面标题与菜单文字</li>
- *   <li>{@code icon} 菜单图标（Element Plus 图标组件名，见 {@code main.js} 的全局注册）</li>
- *   <li>{@code group} 菜单分组 —— <b>数组顺序即菜单顺序</b>，分组按首次出现排序</li>
- *   <li>{@code perm} 所需权限点，路由守卫与菜单过滤共用同一字段</li>
- * </ol>
+ * <p>为什么种子必须放前端：{@code component} 是构建产物路径
+ * （{@code views/UserView.vue}），清单只有前端知道；后端内置一份必然漂移，
+ * 表现为「库里有个页面、前端根本没这个组件」。
  *
- * <h3>为什么不做成后端下发</h3>
+ * <p>按钮行（权限标识）反过来由后端按 {@code Permissions} 常量补写 ——
+ * 权限点是 Java 侧的唯一真相，前端不该重复定义。
  *
- * <p>菜单项与 {@code component: () => import(...)} 一一对应，而组件是构建产物的一部分。
- * 让后端下发菜单，等于把「前端有哪些页面」也搬到服务端维护，
- * 一旦代码回滚到旧版本而库里还是新菜单，就会出现点了 404 的项。
- * 权限是可配置的（{@code gb_role_permission}），菜单结构跟着代码走，这样边界最清楚。
+ * <h3>加一个页面要做什么</h3>
  *
- * <h3>隐藏页</h3>
- *
- * <h3>隐藏页</h3>
- *
- * <p>{@code hidden: true} 的路由（云端录像详情/列表/计划）不进菜单，
- * 但保留 {@code perm}，所以直输 URL 仍然受路由守卫管辖。
- *
- * <h3>可配置部分归谁管</h3>
- *
- * <p>标题、图标、分组、排序、显隐可以被数据库覆盖（{@code gb_menu} /
- * {@code gb_menu_group}），运维在「菜单维护」页自己改，不用发版。
- * 但<b>权限判断始终用代码里的 {@code perm}</b> —— 覆盖配置只能改「怎么显示」，
- * 不能放宽「谁能看」，否则菜单维护就成了绕过 RBAC 的口子。
- *
- * <p>覆盖配置只存<b>差异</b>：库里多出来的未知 name 直接忽略，缺的项用默认值。
- * 这样代码回滚到旧版本也不会出现「点了 404 的菜单项」。
+ * <p>在 {@link SEED_PAGES} 里加一条，并把 {@link MENU_SEED_VERSION} 改成新值。
+ * 这样已部署的环境会在下次打开页面时自动补上这一行（已有行不动）。
+ * 只改标题/图标/排序 <b>不用改版本号</b>，直接在「菜单管理」页里改即可。
  */
 
-/**
- * 分组默认标题（{@code 编码 → 标题}）。库里 {@code gb_menu} 的 D 行可覆盖。
- *
- * <p><b>编码统一加 {@code g-} 前缀</b>：分组编码与菜单项的路由 name 共用
- * {@code gb_menu.menu_key} 这个主键，而两者可能撞名 —— 最初用的 {@code cloud}
- * 既是「录像」分组的编码、又是云端录像页的路由 name，同一行无法同时表示
- * 两种含义，改分组名会把菜单项一起覆盖掉。加前缀后两个命名空间彻底错开，
- * 不需要复合主键，也不需要改表结构。
- *
- * <p>编码只用于存储关联，界面上一律显示标题，所以前缀不会暴露给使用者。
- */
+/** 分组默认标题（{@code 编码 → 标题}）。库里 D 行的 title 可覆盖。 */
 export const DEFAULT_GROUP_TITLES = {
   'g-monitor': '监控',
   'g-resource': '资源',
@@ -69,7 +40,7 @@ export const ICON_OPTIONS = [
   'Picture', 'Postcard', 'Ticket', 'TrendCharts', 'View', 'Warning'
 ]
 
-/** 免登录的对外页面。 */
+/** 免登录的对外页面（不进菜单表，也不参与权限过滤）。 */
 export const publicRoutes = [
   {
     path: '/login',
@@ -116,256 +87,169 @@ export const publicRoutes = [
 ]
 
 /**
- * 主布局下的业务路由。
+ * 页面清单种子。
  *
- * <p><b>加页面只改这里</b>：菜单、路由、权限守卫三处自动跟上。
- * {@code path} 写相对段（不带前导 {@code /}），菜单里会拼成绝对路径。
+ * <p>字段对应 {@code gb_menu} 的 M 行：{@code name} → {@code menu_key}（也是路由 name），
+ * {@code group} → {@code parent_key}，{@code perm} → {@code perms}。
+ *
+ * <p>{@code hidden: true} 的页面不进侧栏，但照常注册路由（直连 URL 可打开，仍受权限守卫管辖）。
  */
-export const appRoutes = [
-  {
-    path: 'dashboard',
-    name: 'dashboard',
-    component: () => import('@/views/DashboardView.vue'),
-    meta: { title: '总览', icon: 'Odometer', group: 'g-monitor', perm: 'device:read' }
-  },
-  {
-    path: 'live',
-    name: 'live',
-    component: () => import('@/views/LiveView.vue'),
-    meta: { title: '实时预览', icon: 'VideoCamera', group: 'g-monitor', perm: 'play:live' }
-  },
-  {
-    path: 'devices',
-    name: 'devices',
-    component: () => import('@/views/DeviceView.vue'),
-    meta: { title: '设备管理', icon: 'Monitor', group: 'g-resource', perm: 'device:read' }
-  },
-  {
-    path: 'channels',
-    name: 'channels',
-    component: () => import('@/views/ChannelView.vue'),
-    meta: { title: '通道管理', icon: 'List', group: 'g-resource', perm: 'channel:read' }
-  },
-  {
-    path: 'playback',
-    name: 'playback',
-    component: () => import('@/views/PlaybackView.vue'),
-    meta: { title: '设备录像', icon: 'Film', group: 'g-cloud', perm: 'play:record' }
-  },
-  {
-    path: 'cloud',
-    name: 'cloud',
-    component: () => import('@/views/CloudRecordChannelView.vue'),
-    meta: { title: '云端录像', icon: 'Cloudy', group: 'g-cloud', perm: 'cloud:read' }
-  },
-  {
-    // 云端录像详情：某通道的时间轴视图（对齐 LiveGBS 的 timeview）
-    path: 'cloud/detail',
-    name: 'cloud-detail',
-    component: () => import('@/views/CloudRecordDetailView.vue'),
-    meta: { title: '云端录像详情', hidden: true, perm: 'cloud:read' }
-  },
-  {
-    // 云端录像列表视图：独立表格页（对齐 LiveGBS 的 listview）
-    path: 'cloud/detail/list',
-    name: 'cloud-detail-list',
-    component: () => import('@/views/CloudRecordListView.vue'),
-    meta: { title: '云端录像列表', hidden: true, perm: 'cloud:read' }
-  },
-  {
-    // 录像计划：定义哪些通道在什么时段录云端录像（对齐 LiveGBS）
-    path: 'cloud/plans',
-    name: 'cloud-plans',
-    component: () => import('@/views/CloudRecordPlanView.vue'),
-    meta: { title: '录像计划', hidden: true, perm: 'cloud:read' }
-  },
-  {
-    path: 'alarms',
-    name: 'alarms',
-    component: () => import('@/views/AlarmView.vue'),
-    meta: { title: '报警管理', icon: 'Bell', group: 'g-ops', perm: 'alarm:read' }
-  },
-  {
-    path: 'cascade',
-    name: 'cascade',
-    component: () => import('@/views/CascadeView.vue'),
-    meta: { title: '级联配置', icon: 'Share', group: 'g-ops', perm: 'cascade:read' }
-  },
-  {
-    path: 'users',
-    name: 'users',
-    component: () => import('@/views/UserView.vue'),
-    meta: { title: '用户管理', icon: 'User', group: 'g-system', perm: 'user:read' }
-  },
-  {
-    path: 'roles',
-    name: 'roles',
-    component: () => import('@/views/RoleView.vue'),
-    meta: { title: '角色权限', icon: 'Key', group: 'g-system', perm: 'user:read' }
-  },
-  {
-    path: 'menus',
-    name: 'menus',
-    component: () => import('@/views/MenuView.vue'),
-    // 菜单维护改的是全站导航，与系统配置同级；只改「怎么叫」，不涉及权限
-    meta: { title: '菜单维护', icon: 'Menu', group: 'g-system', perm: 'system:read' }
-  },
-  {
-    path: 'oplogs',
-    name: 'oplogs',
-    component: () => import('@/views/OpLogView.vue'),
-    meta: { title: '操作日志', icon: 'Document', group: 'g-system', perm: 'oplog:read' }
-  },
-  {
-    path: 'settings',
-    name: 'settings',
-    component: () => import('@/views/SettingsView.vue'),
-    meta: { title: '系统设置', icon: 'Setting', group: 'g-system', perm: 'system:read' }
-  }
+export const SEED_PAGES = [
+  { name: 'dashboard', path: '/dashboard', component: 'views/DashboardView.vue', title: '总览', icon: 'Odometer', group: 'g-monitor', perm: 'device:read' },
+  { name: 'live', path: '/live', component: 'views/LiveView.vue', title: '实时预览', icon: 'VideoCamera', group: 'g-monitor', perm: 'play:live' },
+  { name: 'devices', path: '/devices', component: 'views/DeviceView.vue', title: '设备管理', icon: 'Monitor', group: 'g-resource', perm: 'device:read' },
+  { name: 'channels', path: '/channels', component: 'views/ChannelView.vue', title: '通道管理', icon: 'List', group: 'g-resource', perm: 'channel:read' },
+  { name: 'playback', path: '/playback', component: 'views/PlaybackView.vue', title: '设备录像', icon: 'Film', group: 'g-cloud', perm: 'play:record' },
+  { name: 'cloud', path: '/cloud', component: 'views/CloudRecordChannelView.vue', title: '云端录像', icon: 'Cloudy', group: 'g-cloud', perm: 'cloud:read' },
+  { name: 'cloud-detail', path: '/cloud/detail', component: 'views/CloudRecordDetailView.vue', title: '云端录像详情', group: 'g-cloud', perm: 'cloud:read', hidden: true },
+  { name: 'cloud-detail-list', path: '/cloud/detail/list', component: 'views/CloudRecordListView.vue', title: '云端录像列表', group: 'g-cloud', perm: 'cloud:read', hidden: true },
+  { name: 'cloud-plans', path: '/cloud/plans', component: 'views/CloudRecordPlanView.vue', title: '录像计划', group: 'g-cloud', perm: 'cloud:read', hidden: true },
+  { name: 'alarms', path: '/alarms', component: 'views/AlarmView.vue', title: '报警管理', icon: 'Bell', group: 'g-ops', perm: 'alarm:read' },
+  { name: 'cascade', path: '/cascade', component: 'views/CascadeView.vue', title: '级联配置', icon: 'Share', group: 'g-ops', perm: 'cascade:read' },
+  { name: 'users', path: '/users', component: 'views/UserView.vue', title: '用户管理', icon: 'User', group: 'g-system', perm: 'user:read' },
+  { name: 'roles', path: '/roles', component: 'views/RoleView.vue', title: '角色权限', icon: 'Key', group: 'g-system', perm: 'user:read' },
+  { name: 'menus', path: '/menus', component: 'views/MenuView.vue', title: '菜单管理', icon: 'Menu', group: 'g-system', perm: 'system:read' },
+  { name: 'oplogs', path: '/oplogs', component: 'views/OpLogView.vue', title: '操作日志', icon: 'Document', group: 'g-system', perm: 'oplog:read' },
+  { name: 'settings', path: '/settings', component: 'views/SettingsView.vue', title: '系统设置', icon: 'Setting', group: 'g-system', perm: 'system:read' }
 ]
 
 /**
- * 覆盖值索引：目录行（{@code menuType='D'}）与菜单行（{@code 'M'}）分开。
+ * 种子版本。
  *
- * <p>后端只有一张 {@code gb_menu} 表，目录与菜单项混在同一个数组里，
- * 所以这里按类型分拣一次。未知 key、未知类型一律忽略 ——
- * 代码回滚后库里可能残留已删掉的菜单项，静默丢弃比报错安全。
+ * <p><b>只有在 {@link SEED_PAGES} / {@link DEFAULT_GROUP_TITLES} 增删条目时才需要改</b>：
+ * 版本一致时 {@code /menu/sync} 是空操作，不会把运维删掉的行种回来。
+ * 改标题、图标、排序、分组请直接在「菜单管理」页操作，不要动这里。
  */
-function indexOverrides(config) {
-  const dirs = new Map()
-  const menus = new Map()
-  ;(config?.items || []).forEach((o) => {
-    if (!o || !o.menuKey) return
-    const key = String(o.menuKey).toLowerCase()
-    if (o.menuType === 'D') {
-      dirs.set(key, o)
-    } else if (o.menuType === 'M' || !o.menuType) {
-      menus.set(key, o)
-    }
-  })
-  return { dirs, menus }
-}
-
-/** 菜单项（已合并覆盖值，但未过滤权限）—— 供「菜单维护」页展示。 */
-function resolveItems(config) {
-  const { menus } = indexOverrides(config)
-  const out = []
-  appRoutes.forEach((r, idx) => {
-    if (r.meta?.hidden) return
-    const ov = menus.get(r.name) || {}
-    out.push({
-      name: r.name,
-      path: '/' + r.path,
-      perm: r.meta.perm,
-      /** 默认值：页面上做占位符、也给「恢复默认」用。 */
-      defaultTitle: r.meta.title,
-      defaultIcon: r.meta.icon || 'Document',
-      defaultGroup: r.meta.group,
-      defaultSort: idx,
-      /** 生效值。 */
-      title: ov.title || r.meta.title,
-      icon: ov.icon || r.meta.icon || 'Document',
-      groupCode: ov.parentKey || r.meta.group,
-      sortOrder: ov.sortOrder == null ? idx : ov.sortOrder,
-      hidden: ov.hidden === true,
-      customized: !!(ov.title || ov.icon || ov.parentKey || ov.sortOrder != null || ov.hidden != null)
-    })
-  })
-  return out
-}
+export const MENU_SEED_VERSION = '2026-11-01.2'
 
 /**
- * 分组（已合并覆盖值）。
+ * 把种子摊平成 {@code gb_menu} 行（目录 + 菜单，不含按钮）。
  *
- * <p>分组就是 {@code gb_menu} 里 {@code menu_type='D'} 的行 ——
- * 与若依 {@code sys_menu} 的目录层同一个思路，不需要第二张表。
- * 代码里没有的目录编码但库里有的，也认（允许现场自建分组）。
+ * <p>{@code sortOrder} 按<b>同级</b>从 1 开始编号（目录 1..n，每个目录下的菜单各自 1..n）：
+ * 界面上直接显示这个数字，用全局序号（0/10/100）会让人以为排序跳着用。
  */
-function resolveGroups(config) {
-  const { dirs } = indexOverrides(config)
-  const defaults = new Map()
-  let order = 0
-  appRoutes.forEach((r) => {
-    const g = r.meta?.group
-    if (g && !defaults.has(g)) {
-      defaults.set(g, { code: g, title: DEFAULT_GROUP_TITLES[g] || g, defaultSort: order++ })
-    }
-  })
-  // 库里可能出现代码里没有的目录（用户自建分组），也要能显示
-  dirs.forEach((ov, code) => {
-    if (!defaults.has(code)) {
-      defaults.set(code, { code, title: ov.title || code, defaultSort: order++ })
-    }
-  })
-  return [...defaults.values()].map((g) => {
-    const ov = dirs.get(g.code) || {}
+export function buildSeedItems() {
+  const dirs = Object.entries(DEFAULT_GROUP_TITLES).map(([code, title], idx) => ({
+    menuKey: code,
+    parentKey: null,
+    menuType: 'D',
+    title,
+    sortOrder: idx + 1
+  }))
+  const counters = new Map()
+  const pages = SEED_PAGES.map((p) => {
+    const n = (counters.get(p.group) || 0) + 1
+    counters.set(p.group, n)
     return {
-      code: g.code,
-      defaultTitle: g.title,
-      defaultSort: g.defaultSort,
-      title: ov.title || g.title,
-      sortOrder: ov.sortOrder == null ? g.defaultSort : ov.sortOrder,
-      customized: !!(ov.title || ov.sortOrder != null)
+      menuKey: p.name,
+      parentKey: p.group,
+      menuType: 'M',
+      title: p.title,
+      icon: p.icon || null,
+      sortOrder: n,
+      path: p.path,
+      component: p.component,
+      perms: p.perm || null,
+      hidden: !!p.hidden
     }
   })
+  return [...dirs, ...pages]
+}
+
+/** 组件注册表：{@code views/Xxx.vue → () => import(...)}（构建期静态分析仍然有效）。 */
+const viewModules = import.meta.glob('../views/*.vue')
+
+/** 「菜单管理」里可选的组件路径。 */
+export const COMPONENT_OPTIONS = Object.keys(viewModules)
+  .map((k) => k.replace('../', ''))
+  .sort()
+
+/** 组件路径 → 动态 import；找不到返回 {@code null}（调用方跳过该路由）。 */
+export function resolveView(component) {
+  if (!component) return null
+  return viewModules['../' + component] || null
+}
+
+/** 同级排序：先按 sortOrder，再按主键保证稳定。 */
+function bySort(a, b) {
+  const d = (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+  return d !== 0 ? d : String(a.menuKey).localeCompare(String(b.menuKey))
+}
+
+/** 是否可用（停用节点既不进侧栏也不注册路由）。 */
+function enabled(row) {
+  return Number(row?.status ?? 0) !== 1
+}
+
+/** 行数组 → {@code parentKey → 子行[]}。 */
+function childrenOf(rows) {
+  const map = new Map()
+  rows.forEach((r) => {
+    const k = r.parentKey || ''
+    if (!map.has(k)) map.set(k, [])
+    map.get(k).push(r)
+  })
+  return map
 }
 
 /**
- * 「菜单维护」页的数据：全部菜单项 + 分组（含默认值与生效值）。
- *
- * @param {object} config 后端返回的覆盖配置 {@code {groups, items}}
- */
-export function menuCatalog(config) {
-  const items = resolveItems(config)
-  const groups = resolveGroups(config).sort((a, b) => a.sortOrder - b.sortOrder)
-  return {
-    groups,
-    items,
-    /** 按分组挂好 children，直接喂给 el-table 的树形行。 */
-    tree: groups.map((g) => ({
-      ...g,
-      rowKey: 'g:' + g.code,
-      title: g.title,
-      isGroup: true,
-      children: items
-        .filter((i) => i.groupCode === g.code)
-        .sort((a, b) => a.sortOrder - b.sortOrder)
-        .map((i) => ({ ...i, rowKey: 'i:' + i.name, isGroup: false }))
-    }))
-  }
-}
-
-/**
- * 生成侧栏菜单（已合并覆盖值，并过滤权限）。
- *
- * <p>权限判断始终用代码里的 {@code perm}：覆盖配置只能改「怎么显示」，
- * <b>不能放宽谁能看</b>。否则「菜单维护」就成了绕过 RBAC 的口子。
+ * 生成侧栏菜单（按当前账号权限过滤）。
  *
  * @param {object} auth auth store（提供 {@code can(perm)}）
- * @param {object} [config] 后端返回的覆盖配置 {@code {groups, items}}
+ * @param {Array<object>} items {@code gb_menu} 行
  * @returns {Array<{label: string, items: Array<{key: string, path: string, title: string, icon: string}>}>}
  */
-export function buildMenu(auth, config) {
-  const items = resolveItems(config).filter((i) => !i.hidden && auth.can(i.perm))
-  const groupsById = new Map(resolveGroups(config).map((g) => [g.code, g]))
+export function buildMenu(auth, items) {
+  const rows = items || []
+  const dirs = rows.filter((r) => r.menuType === 'D' && enabled(r)).sort(bySort)
+  const menus = rows.filter((r) => r.menuType === 'M' && enabled(r) && !r.hidden && auth.can(r.perms))
+  const byParent = childrenOf(menus)
+  return dirs
+    .map((d) => ({
+      key: d.menuKey,
+      label: d.title || d.menuKey,
+      items: (byParent.get(d.menuKey) || []).slice().sort(bySort).map((r) => ({
+        key: r.menuKey,
+        path: r.path,
+        title: r.title || r.path,
+        icon: r.icon || 'Document'
+      }))
+    }))
+    .filter((g) => g.items.length)
+}
 
-  const buckets = new Map()
-  items.forEach((i) => {
-    if (!buckets.has(i.groupCode)) buckets.set(i.groupCode, [])
-    buckets.get(i.groupCode).push(i)
-  })
-
-  const used = [...buckets.keys()].map((code) => {
-    const g = groupsById.get(code)
-    return { code, title: g ? g.title : code, order: g ? g.sortOrder : 9999 }
-  })
-  used.sort((a, b) => a.order - b.order)
-
-  return used.map((g) => ({
-    label: g.title,
-    items: buckets
-      .get(g.code)
-      .sort((a, b) => a.sortOrder - b.sortOrder)
-      .map((i) => ({ key: i.name, path: i.path, title: i.title, icon: i.icon }))
-  }))
+/**
+ * 生成动态路由（供 {@code router.addRoute} 注册）。
+ *
+ * <p>只有「菜单行 + 正常状态 + 组件能解析」的节点才会注册；组件缺失时打日志跳过，
+ * 而不是让整个应用因为一行脏数据白屏。
+ *
+ * @param {Array<object>} items {@code gb_menu} 行
+ * @returns {Array<object>} vue-router 路由记录
+ */
+export function buildRoutes(items) {
+  const rows = items || []
+  const dirTitle = new Map(rows.filter((r) => r.menuType === 'D').map((r) => [r.menuKey, r.title]))
+  return rows
+    .filter((r) => r.menuType === 'M' && enabled(r) && r.path && r.component)
+    .map((r) => {
+      const component = resolveView(r.component)
+      if (!component) {
+        console.warn(`[menu] 组件不存在，已跳过路由 ${r.menuKey}: ${r.component}`)
+        return null
+      }
+      return {
+        path: r.path,
+        name: r.menuKey,
+        component,
+        meta: {
+          title: r.title || r.menuKey,
+          icon: r.icon || 'Document',
+          perm: r.perms || null,
+          hidden: !!r.hidden,
+          group: dirTitle.get(r.parentKey) || ''
+        }
+      }
+    })
+    .filter(Boolean)
 }
