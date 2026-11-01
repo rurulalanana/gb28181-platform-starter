@@ -3,6 +3,7 @@
 
     <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
+      <KeywordFilter v-model="keyword" placeholder="搜索角色名称 / 编码 / 说明" width="280px" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="loadAll">
         <el-icon><Refresh /></el-icon> 刷新
@@ -18,8 +19,8 @@
     </div>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="roles" stripe table-layout="fixed">
-        <el-table-column label="角色" min-width="180">
+      <el-table v-loading="loading" :data="filteredRoles" stripe table-layout="fixed">
+        <el-table-column label="角色" min-width="170">
           <template #default="{ row }">
             <div class="role-cell">
               <span class="role-name">{{ row.name }}</span>
@@ -29,7 +30,7 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="说明" min-width="220">
+        <el-table-column label="说明" min-width="200">
           <template #default="{ row }">
             <span class="text-muted">{{ row.description || '—' }}</span>
           </template>
@@ -57,25 +58,27 @@
           <template #default="{ row }">
             <div class="row-actions">
               <el-tooltip :content="row.superRole ? '超级角色拥有全部权限，不可编辑' : '编辑权限'">
-                <el-button :disabled="!canWrite || row.superRole" @click="openEdit(row)">
-                  <el-icon><Edit /></el-icon>
+                <el-button :disabled="!canWrite || row.superRole" aria-label="编辑权限" @click="openEdit(row)">
+                  <el-icon aria-hidden="true"><Edit /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-tooltip :content="row.enable ? '停用' : '启用'">
                 <el-button
                   :disabled="!canWrite || row.superRole"
+                  :aria-label="row.enable ? '停用角色' : '启用角色'"
                   @click="toggleEnable(row)"
                 >
-                  <el-icon><SwitchButton /></el-icon>
+                  <el-icon aria-hidden="true"><SwitchButton /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-tooltip :content="row.builtin ? '内置角色不可删除' : '删除'">
                 <el-button
                   class="is-danger"
                   :disabled="!canWrite || row.builtin"
+                  aria-label="删除角色"
                   @click="removeOne(row)"
                 >
-                  <el-icon><Delete /></el-icon>
+                  <el-icon aria-hidden="true"><Delete /></el-icon>
                 </el-button>
               </el-tooltip>
             </div>
@@ -129,8 +132,12 @@
                   :key="p.code"
                   :value="p.code"
                   class="perm-item"
+                  :class="{ 'is-parent': !p.parent, 'is-child': !!p.parent }"
+                  :disabled="isInherited(p)"
+                  @change="(checked) => onPermChange(p, checked)"
                 >
                   <span class="perm-name">{{ p.name }}</span>
+                  <span v-if="p.parent && isInherited(p)" class="perm-inherited">含在上项</span>
                   <span class="perm-desc">{{ p.description }}</span>
                 </el-checkbox>
               </el-checkbox-group>
@@ -152,6 +159,7 @@ import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { roleApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import KeywordFilter from '@/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 
@@ -169,12 +177,61 @@ const form = reactive({
   permissions: []
 })
 
-const canWrite = computed(() => auth.can('user:write'))
+const canWrite = computed(() => auth.can('role:write'))
+
+/** 聚合搜索关键词（名称 / 编码 / 说明）。 */
+const keyword = ref('')
+
+const filteredRoles = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  if (!q) return roles.value
+  return roles.value.filter((r) =>
+    [r.name, r.code, r.description].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
+  )
+})
 
 /** 目录里的全部权限点编码，用于「全选」与计数。 */
 const allPermCodes = computed(() =>
   catalog.value.flatMap((g) => g.permissions.map((p) => p.code))
 )
+
+/** 上级编码 → 它包含的下级编码（由后端 PermissionVo.parent 反推）。 */
+const childrenMap = computed(() => {
+  const map = {}
+  for (const g of catalog.value) {
+    for (const p of g.permissions) {
+      if (!p.parent) continue
+      ;(map[p.parent] ||= []).push(p.code)
+    }
+  }
+  return map
+})
+
+/** 下级动作被上级「完全控制」包含时置灰：取消它没有意义，取消上级即可。 */
+/** 老数据里可能只存了上级编码，打开时把下级补齐，勾选框才不会「半勾着」。 */
+function withChildren(codes) {
+  const set = new Set(codes)
+  for (const c of codes) {
+    for (const child of childrenMap.value[c] || []) set.add(child)
+  }
+  return [...set]
+}
+
+function isInherited(p) {
+  return !!p.parent && form.permissions.includes(p.parent)
+}
+
+/** 勾选上级时连带勾上下级，取消时一起取消；下级单独勾选不受影响。 */
+function onPermChange(p, checked) {
+  const children = childrenMap.value[p.code]
+  if (!children) return
+  const set = new Set(form.permissions)
+  for (const c of children) {
+    if (checked) set.add(c)
+    else set.delete(c)
+  }
+  form.permissions = [...set]
+}
 
 async function loadAll() {
   loading.value = true
@@ -200,7 +257,7 @@ function openEdit(row) {
       code: row.code,
       name: row.name,
       description: row.description || '',
-      permissions: [...(row.permissions || [])]
+      permissions: withChildren(row.permissions || [])
     })
   } else {
     Object.assign(form, {
@@ -378,6 +435,33 @@ onMounted(loadAll)
 .perm-desc {
   font-size: var(--fs-xs);
   color: var(--ink-500);
+}
+
+/*
+ * 父子层级：上级是「完全控制」，下级动作缩进一格。
+ * 上级勾选时下级置灰并标注「含在上项」，避免出现
+ * 「明明没勾删除、实际却能删」的错觉。
+ */
+.perm-item.is-parent .perm-name {
+  font-weight: 600;
+}
+
+.perm-item.is-child {
+  padding-left: var(--sp-5);
+}
+
+.perm-item.is-child .perm-name {
+  font-size: var(--fs-xs);
+}
+
+.perm-inherited {
+  font-size: var(--fs-xs);
+  color: var(--brand-600);
+  border: 1px solid var(--brand-200);
+  border-radius: var(--r-full);
+  padding: 0 6px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .row-actions {

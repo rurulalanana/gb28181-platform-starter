@@ -66,27 +66,93 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
     private static Map<String, Rule> buildPrefixRules() {
         Map<String, Rule> m = new LinkedHashMap<>();
 
-        // ---- 需要更细粒度、必须排在父前缀之前 ----
+        // ==================== 按钮级规则 ====================
+        // 前缀匹配是「最长优先」，这些路径都比 /api/v1/device 等父前缀长，
+        // 因此会先命中这里。新增按钮时先在这里补一行，再到前端把 canWrite 换成具体编码。
+
+        // ---- 设备 ----
+        m.put("/api/v1/device/remove", new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_DELETE));
+        putAll(m, new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_SYNC),
+                "/api/v1/device/fetchcatalog",
+                "/api/v1/device/fetchinfo",
+                "/api/v1/device/fetchstatus",
+                "/api/v1/device/fetchconfig",
+                "/api/v1/device/fetchpreset",
+                "/api/v1/device/fetchhomeposition",
+                "/api/v1/device/fetchcruisetracklist",
+                "/api/v1/device/fetchcruisetrack",
+                "/api/v1/device/fetchptzposition",
+                "/api/v1/device/fetchsdcardstatus",
+                "/api/v1/device/collect",
+                "/api/v1/device/refreshsdk",
+                "/api/v1/device/adddahua");
+        putAll(m, new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_WRITE),
+                "/api/v1/device/setname",
+                "/api/v1/device/setinfo",
+                "/api/v1/device/setmediatransport",
+                "/api/v1/device/setpassword");
+
+        // ---- 通道（通道编辑接口都挂在 /api/v1/device/setchannel* 下） ----
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_WRITE),
+                "/api/v1/device/setchannelname",
+                "/api/v1/device/setchannelid",
+                "/api/v1/device/setchannelptztype",
+                "/api/v1/device/setchannelproperty");
+        m.put("/api/v1/device/setchannelposition", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_POSITION));
+        m.put("/api/v1/device/setchannelondemand", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_ONDEMAND));
+        m.put("/api/v1/device/setchannelcloudrecord", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_RECORD));
+        m.put("/api/v1/device/setchannelaudio", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_AUDIO));
+        m.put("/api/v1/device/setchannelshared", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_SHARE));
+        // 兜底：未列出的 /setchannel* 仍按「编辑通道」处理
         m.put("/api/v1/device/setchannel", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_WRITE));
-        m.put("/api/v1/stream/relay", new Rule(Permissions.PLAY_LIVE, Permissions.CASCADE_CONTROL));
-        m.put("/api/v1/cloudrecord/plan", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_WRITE));
+
+        // ---- 云端录像 ----
+        m.put("/api/v1/cloudrecord/setimportant", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_MARK));
+        m.put("/api/v1/cloudrecord/share", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_SHARE));
+        m.put("/api/v1/cloudrecord/plan", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_PLAN));
+        m.put("/api/v1/cloudrecord/download", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_DOWNLOAD));
         // 删录像不可恢复：单列 cloud:delete，默认只给管理员
         m.put("/api/v1/cloudrecord/remove", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_DELETE));
-        // 清空报警同理
+
+        // ---- 级联 ----
+        putAll(m, new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_SHARE),
+                "/api/v1/cascade/savechannels",
+                "/api/v1/cascade/removechannels",
+                "/api/v1/cascade/sharenode");
+        putAll(m, new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_PUSH),
+                "/api/v1/cascade/pushcatalog",
+                "/api/v1/cascade/pushchannelcatalog");
+        m.put("/api/v1/cascade/remove", new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_DELETE));
+
+        // ---- 用户与角色 ----
+        m.put("/api/v1/user/resetpassword", new Rule(Permissions.USER_READ, Permissions.USER_RESET));
+        m.put("/api/v1/user/remove", new Rule(Permissions.USER_READ, Permissions.USER_DELETE));
+        m.put("/api/v1/role", new Rule(Permissions.USER_READ, Permissions.ROLE_WRITE));
+
+        // ---- 系统 ----
+        m.put("/api/v1/config", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_CONFIG));
+        m.put("/api/v1/acl", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_ACL));
+        m.put("/api/v1/tls", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_TLS));
+        m.put("/api/v1/restart", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_RESTART));
+        // 菜单外观：读对所有人开放（侧栏都要用，见 SELF_SERVICE_PATHS）
+        m.put("/api/v1/menu", new Rule(Permissions.SYSTEM_READ, Permissions.MENU_WRITE));
+
+        // ==================== 模块级规则 ====================
+        m.put("/api/v1/stream/relay", new Rule(Permissions.PLAY_LIVE, Permissions.CASCADE_CONTROL));
+        // 清空报警不可恢复
         m.put("/api/v1/alarm/clear", new Rule(Permissions.ALARM_READ, Permissions.ALARM_DELETE));
         // 性能指标：能看设备的人就该看得到，不要求 system:read
         // （system:read 还覆盖运行时配置与 SIP 接入密码，不能顺手给只读账号）
         m.put("/api/v1/system/metrics", new Rule(Permissions.DEVICE_READ, Permissions.SYSTEM_WRITE));
-        // 录像下载会在服务器上落文件：能看录像不等于能指挥服务器写盘，
-        // 因此写动作要求 cloud:write（改造前也是 operator 以上才行）
-        m.put("/api/v1/playback/download", new Rule(Permissions.PLAY_RECORD, Permissions.CLOUD_WRITE));
+        // 录像下载会在服务器上落文件，单列 cloud:download
+        m.put("/api/v1/playback/download", new Rule(Permissions.PLAY_RECORD, Permissions.CLOUD_DOWNLOAD));
 
         // ---- 父前缀 ----
         m.put("/api/v1/device", new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_WRITE));
         m.put("/api/v1/stream", new Rule(Permissions.PLAY_LIVE, Permissions.PLAY_LIVE));
         m.put("/api/v1/playback", new Rule(Permissions.PLAY_RECORD, Permissions.PLAY_RECORD));
         // 手动启停本地录像属于「写盘」，不是播放
-        m.put("/api/v1/record", new Rule(Permissions.PLAY_RECORD, Permissions.CLOUD_WRITE));
+        m.put("/api/v1/record", new Rule(Permissions.PLAY_RECORD, Permissions.CLOUD_RECORD));
         m.put("/api/v1/control", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ));
         // 解码/抓拍只取设备侧画面，与实时点播同等能力
         m.put("/api/v1/decode", new Rule(Permissions.PLAY_LIVE, Permissions.PLAY_LIVE));
@@ -94,17 +160,16 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
         m.put("/api/v1/alarm", new Rule(Permissions.ALARM_READ, Permissions.ALARM_WRITE));
         m.put("/api/v1/cascade", new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_WRITE));
         m.put("/api/v1/user", new Rule(Permissions.USER_READ, Permissions.USER_WRITE));
-        m.put("/api/v1/role", new Rule(Permissions.USER_READ, Permissions.USER_WRITE));
-        // 菜单外观：读对所有人开放（侧栏都要用，见 SELF_SERVICE_PATHS），
-        // 改写全站导航 -> system:write
-        m.put("/api/v1/menu", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
-        m.put("/api/v1/config", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
-        m.put("/api/v1/acl", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
-        m.put("/api/v1/tls", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
-        m.put("/api/v1/restart", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/system", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/oplog", new Rule(Permissions.OPLOG_READ, Permissions.OPLOG_CLEAR));
         return Map.copyOf(m);
+    }
+
+    /** 一次登记多条路径到同一条规则（按钮级路径大多一个动作一个前缀）。 */
+    private static void putAll(Map<String, Rule> m, Rule rule, String... paths) {
+        for (String p : paths) {
+            m.put(p, rule);
+        }
     }
 
     /** 前缀清单，按长度降序缓存（避免每次请求都排序）。 */
@@ -133,7 +198,10 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
             "/api/v1/getserverinfo",
             // 菜单外观配置：渲染侧栏要读，每个登录用户都要用；
             // 里面只有「菜单叫什么名字」，不含任何业务数据。写接口不经此白名单
-            "/api/v1/menu/config"
+            "/api/v1/menu/config",
+            // 菜单结构补齐：幂等，且只在种子版本变化时真正写库。
+            // 若要求管理权限，普通账号首次打开会因「菜单还没种」看到空白侧栏
+            "/api/v1/menu/sync"
     ));
 
     /**

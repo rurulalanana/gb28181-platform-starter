@@ -85,6 +85,7 @@ public class RoleController {
             p.setCode(def.code());
             p.setName(def.name());
             p.setDescription(def.description());
+            p.setParent(Permissions.parentOf(def.code()));
             g.getPermissions().add(p);
         }
         PermissionGroupListVo vo = new PermissionGroupListVo();
