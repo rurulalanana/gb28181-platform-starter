@@ -12,6 +12,8 @@ import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.vo.AlarmListVo;
 import io.github.rurulalanana.starter.vo.AlarmVo;
 import io.github.rurulalanana.starter.vo.DeletedVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,6 +39,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "报警管理", description = "报警记录查询与处置")
 @RequestMapping("/api/v1/alarm")
 @RequiredArgsConstructor
 public class AlarmController {
@@ -45,6 +48,7 @@ public class AlarmController {
     private final DeviceService deviceService;
 
     /** 报警列表。 */
+    @Operation(summary = "报警列表")
     @GetMapping("/list")
     public ApiResponse<AlarmListVo> list(
             @RequestParam(required = false) String serial,
@@ -81,6 +85,7 @@ public class AlarmController {
     }
 
     /** 单条报警。 */
+    @Operation(summary = "单条报警")
     @GetMapping("/info")
     public ApiResponse<AlarmVo> info(@RequestParam String id) {
         StpUtil.checkLogin();
@@ -92,6 +97,7 @@ public class AlarmController {
     }
 
     /** 删除报警。 */
+    @Operation(summary = "删除报警")
     @PostMapping("/remove")
     public ApiResponse<DeletedVo> remove(@RequestParam String id) {
         StpUtil.checkLogin();
@@ -100,6 +106,7 @@ public class AlarmController {
     }
 
     /** 清空报警。 */
+    @Operation(summary = "清空报警")
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
         // 清空是破坏性操作：误点会丢掉全部历史警情，需要独立的 alarm:delete

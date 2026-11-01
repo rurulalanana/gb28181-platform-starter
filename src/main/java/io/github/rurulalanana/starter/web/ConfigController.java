@@ -4,6 +4,8 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.service.RuntimeConfigApplier;
 import io.github.rurulalanana.starter.service.RuntimeConfigService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,6 +39,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "运行时配置", description = "可热更新的运维参数")
 @RequestMapping("/api/v1/config")
 @RequiredArgsConstructor
 public class ConfigController {
@@ -45,6 +48,7 @@ public class ConfigController {
     private final RuntimeConfigApplier applier;
 
     /** 全部配置项（含默认值、取值范围、说明、是否已被覆盖）。 */
+    @Operation(summary = "全部配置项（含默认值、取值范围、说明、是否已被覆盖）")
     @GetMapping("/list")
     public ApiResponse<List<RuntimeConfigService.Item>> list() {
         StpUtil.checkLogin();
@@ -57,6 +61,7 @@ public class ConfigController {
      * <p>值非法时返回 400 并带上具体原因（由
      * {@code ConfigKeys.Def#validate} 抛出），而不是静默截断。
      */
+    @Operation(summary = "保存一项配置（立即生效）")
     @PostMapping("/save")
     public ApiResponse<RuntimeConfigService.Item> save(@RequestParam String key,
                                                        @RequestParam String value) {
@@ -74,6 +79,7 @@ public class ConfigController {
     }
 
     /** 恢复一项为默认值（删除数据库覆盖，回落 application.yml）。 */
+    @Operation(summary = "恢复一项为默认值（删除数据库覆盖，回落 application.yml）")
     @PostMapping("/reset")
     public ApiResponse<RuntimeConfigService.Item> reset(@RequestParam String key) {
         StpUtil.checkLogin();
@@ -101,6 +107,7 @@ public class ConfigController {
      * @param body key → 期望值（JSON 对象）
      * @return 实际生效的 key → 规范化后的值
      */
+    @Operation(summary = "批量保存（一次提交整页改动）")
     @PostMapping("/save-batch")
     public ApiResponse<java.util.Map<String, String>> saveBatch(
             @org.springframework.web.bind.annotation.RequestBody

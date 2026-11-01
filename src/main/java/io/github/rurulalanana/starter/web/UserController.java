@@ -14,6 +14,8 @@ import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.IdVo;
 import io.github.rurulalanana.starter.vo.UserListVo;
 import io.github.rurulalanana.starter.vo.UserVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +46,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "用户管理", description = "账号增删改、启用停用、重置密码")
 @RequestMapping("/api/v1/user")
 @RequiredArgsConstructor
 public class UserController {
@@ -53,6 +56,7 @@ public class UserController {
     private final GbUserMapper userMapper;
 
     /** 用户列表。 */
+    @Operation(summary = "用户列表")
     @GetMapping("/list")
     public ApiResponse<UserListVo> list(
             @RequestParam(defaultValue = "0") int start,
@@ -77,6 +81,7 @@ public class UserController {
     }
 
     /** 用户详情。 */
+    @Operation(summary = "用户详情")
     @GetMapping("/info")
     public ApiResponse<UserVo> info(@RequestParam(required = false) Long id) {
         StpUtil.checkLogin();
@@ -94,6 +99,7 @@ public class UserController {
     }
 
     /** 新增 / 修改用户。 */
+    @Operation(summary = "新增 / 修改用户")
     @PostMapping("/save")
     public ApiResponse<IdVo> save(@RequestParam String username,
                                   @RequestParam(required = false) String password,
@@ -150,6 +156,7 @@ public class UserController {
     }
 
     /** 删除用户。 */
+    @Operation(summary = "删除用户")
     @PostMapping("/remove")
     public ApiResponse<DeletedVo> remove(@RequestParam String id) {
         StpUtil.checkPermission(Permissions.USER_WRITE);
@@ -182,6 +189,7 @@ public class UserController {
     }
 
     /** 启用 / 停用。 */
+    @Operation(summary = "启用 / 停用")
     @PostMapping("/setenable")
     public ApiResponse<Void> setEnable(@RequestParam Long id,
                                        @RequestParam(defaultValue = "true") Boolean enable) {
@@ -203,6 +211,7 @@ public class UserController {
     }
 
     /** 管理员重置密码。 */
+    @Operation(summary = "管理员重置密码")
     @PostMapping("/resetpassword")
     public ApiResponse<Void> resetPassword(@RequestParam Long id,
                                            @RequestParam String password) {
@@ -229,6 +238,7 @@ public class UserController {
     }
 
     /** 修改自己的密码。 */
+    @Operation(summary = "修改自己的密码")
     @PostMapping("/setpassword")
     public ApiResponse<Void> setPassword(@RequestParam(value = "oldpassword") String oldPassword,
                                          @RequestParam(value = "newpassword") String newPassword) {

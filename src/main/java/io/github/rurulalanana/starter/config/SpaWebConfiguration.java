@@ -34,7 +34,18 @@ import java.time.Duration;
 public class SpaWebConfiguration implements WebMvcConfigurer {
 
     /** 一级路径白名单：这些前缀下的请求交给静态资源处理器，不做 SPA 回退。 */
-    private static final String STATIC_PREFIXES = "api|assets|record|error|jessibuca|js";
+    /**
+     * 交给静态资源/框架自己处理的路径首段，不参与 SPA 兜底。
+     *
+     * <p> {@code webjars}、{@code swagger-ui}、{@code v3} 是接口文档用的：
+     * Knife4j 的界面在 {@code /doc.html}，但它的脚本样式放在
+     * {@code /webjars/**}（相对路径），OpenAPI JSON 在 {@code /v3/api-docs}。
+     * 漏了 {@code webjars} 的症状是「doc.html 打得开但白屏」——
+     * 资源请求被下面 {@code /{path}/**} 的兜底规则吞掉，返回的是 index.html，
+     * 浏览器按 JS 解析直接语法错误。
+     */
+    private static final String STATIC_PREFIXES =
+            "api|assets|record|error|jessibuca|js|webjars|swagger-ui|v3";
 
     private final Gb28181Properties props;
 
@@ -132,6 +143,20 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         registry.addResourceHandler("/js/**")
                 .addResourceLocations("classpath:/static/js/")
                 .setCacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePublic());
+
+        /*
+         * 接口文档的静态资源（Knife4j 的 /doc.html 依赖 /webjars/**）。
+         *
+         * <p>必须显式注册：下面 {@code addViewControllers} 里的
+         * {@code /{path}/**} 兜底会把 {@code /webjars/js/*.js} 也转发到 index.html，
+         * 结果文档页拿到一段 HTML 当脚本，白屏 + 控制台语法错误。
+         *
+         * <p>资源在 knife4j-openapi3-ui 的 {@code META-INF/resources/webjars/} 下，
+         * 文件名带内容哈希，可以按 immutable 长缓存。
+         */
+        registry.addResourceHandler("/webjars/**")
+                .addResourceLocations("classpath:/META-INF/resources/webjars/")
+                .setCacheControl(CacheControl.maxAge(Duration.ofDays(30)).cachePublic().immutable());
 
         /*
          * 录像文件：<b>默认不在这里提供</b>，交给 nginx。

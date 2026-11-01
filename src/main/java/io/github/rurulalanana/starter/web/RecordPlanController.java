@@ -9,6 +9,8 @@ import io.github.rurulalanana.starter.entity.GbRecordPlan;
 import io.github.rurulalanana.starter.service.RecordPlanService;
 import io.github.rurulalanana.starter.vo.RecordPlanListVo;
 import io.github.rurulalanana.starter.vo.RecordPlanVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -39,6 +41,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "录像计划", description = "按周时段自动录像")
 @RequestMapping("/api/v1/cloudrecord/plan")
 @RequiredArgsConstructor
 public class RecordPlanController {
@@ -46,6 +49,7 @@ public class RecordPlanController {
     private final RecordPlanService planService;
 
     /** 计划列表。 */
+    @Operation(summary = "计划列表")
     @GetMapping("/list")
     public ApiResponse<RecordPlanListVo> list(@RequestParam(required = false) String q) {
         StpUtil.checkLogin();
@@ -71,6 +75,7 @@ public class RecordPlanController {
     }
 
     /** 新增或修改计划。 */
+    @Operation(summary = "新增或修改计划")
     @PostMapping("/save")
     public ApiResponse<String> save(@RequestParam(required = false) String id,
                                     @RequestParam String name,
@@ -81,6 +86,7 @@ public class RecordPlanController {
     }
 
     /** 启用/停用计划。 */
+    @Operation(summary = "启用/停用计划")
     @PostMapping("/enable")
     public ApiResponse<Void> enable(@RequestParam String id,
                                     @RequestParam(defaultValue = "true") Boolean enable) {
@@ -90,6 +96,7 @@ public class RecordPlanController {
     }
 
     /** 删除计划。 */
+    @Operation(summary = "删除计划")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String id) {
         StpUtil.checkLogin();
@@ -102,6 +109,7 @@ public class RecordPlanController {
      *
      * @param related 只看该计划已关联的通道
      */
+    @Operation(summary = "可关联的通道列表（供「关联通道」弹窗用）")
     @GetMapping("/channellist")
     public ApiResponse<List<ChannelRefVo>> channelList(@RequestParam(required = false) String id,
                                                        @RequestParam(required = false) String q,
@@ -125,6 +133,7 @@ public class RecordPlanController {
     }
 
     /** 设置计划的关联通道（全量覆盖）。 */
+    @Operation(summary = "设置计划的关联通道（全量覆盖）")
     @PostMapping("/setchannels")
     public ApiResponse<Void> setChannels(@RequestParam String id,
                                          @RequestParam(required = false) List<String> channels) {

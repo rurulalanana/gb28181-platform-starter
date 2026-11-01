@@ -13,6 +13,8 @@ import io.github.rurulalanana.starter.vo.PermissionGroupVo;
 import io.github.rurulalanana.starter.vo.PermissionVo;
 import io.github.rurulalanana.starter.vo.RoleListVo;
 import io.github.rurulalanana.starter.vo.RoleVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -47,6 +49,7 @@ import java.util.Map;
  */
 @Slf4j
 @RestController
+@Tag(name = "角色权限", description = "角色与 47 个按钮级权限点")
 @RequestMapping("/api/v1/role")
 @RequiredArgsConstructor
 public class RoleController {
@@ -55,6 +58,7 @@ public class RoleController {
     private final GbRoleMapper roleMapper;
 
     /** 角色列表。 */
+    @Operation(summary = "角色列表")
     @GetMapping("/list")
     public ApiResponse<RoleListVo> list() {
         StpUtil.checkPermission(Permissions.USER_READ);
@@ -69,6 +73,7 @@ public class RoleController {
     }
 
     /** 权限点目录。 */
+    @Operation(summary = "权限点目录")
     @GetMapping("/permissions")
     public ApiResponse<PermissionGroupListVo> permissions() {
         StpUtil.checkPermission(Permissions.USER_READ);
@@ -99,6 +104,7 @@ public class RoleController {
      *
      * @param permissions 逗号分隔的权限点编码
      */
+    @Operation(summary = "新增 / 修改角色")
     @PostMapping("/save")
     public ApiResponse<RoleVo> save(@RequestParam String code,
                                     @RequestParam String name,
@@ -114,6 +120,7 @@ public class RoleController {
     }
 
     /** 删除角色。 */
+    @Operation(summary = "删除角色")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String code) {
         StpUtil.checkPermission(Permissions.USER_WRITE);
@@ -122,6 +129,7 @@ public class RoleController {
     }
 
     /** 启用 / 停用角色。 */
+    @Operation(summary = "启用 / 停用角色")
     @PostMapping("/setenable")
     public ApiResponse<RoleVo> setEnable(@RequestParam String code,
                                          @RequestParam Boolean enable) {

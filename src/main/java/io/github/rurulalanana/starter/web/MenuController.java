@@ -10,6 +10,8 @@ import io.github.rurulalanana.starter.service.MenuService;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.IdVo;
 import io.github.rurulalanana.starter.vo.MenuConfigVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -38,6 +40,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "菜单管理", description = "目录/菜单/按钮三级维护")
 @RequestMapping("/api/v1/menu")
 @RequiredArgsConstructor
 public class MenuController {
@@ -45,6 +48,7 @@ public class MenuController {
     private final MenuService menuService;
 
     /** 全部菜单节点。 */
+    @Operation(summary = "全部菜单节点")
     @GetMapping("/config")
     public ApiResponse<MenuConfigVo> config() {
         StpUtil.checkLogin();
@@ -52,6 +56,7 @@ public class MenuController {
     }
 
     /** 补齐缺失的目录/菜单行 + 按钮行。 */
+    @Operation(summary = "补齐缺失的目录/菜单行 + 按钮行")
     @PostMapping("/sync")
     public ApiResponse<DeletedVo> sync(@RequestBody MenuSyncRequest req) {
         StpUtil.checkLogin();
@@ -59,6 +64,7 @@ public class MenuController {
     }
 
     /** 新增或修改一个节点（{@code menuKey} 为空 = 新增）。 */
+    @Operation(summary = "新增或修改一个节点（menuKey 为空 = 新增）")
     @PostMapping("/save")
     public ApiResponse<IdVo> save(@RequestBody MenuSaveRequest req) {
         StpUtil.checkPermission(Permissions.MENU_WRITE);
@@ -66,6 +72,7 @@ public class MenuController {
     }
 
     /** 删除一个节点；{@code cascade=true} 连同全部下级一起删除。 */
+    @Operation(summary = "删除一个节点；cascade=true 连同全部下级一起删除")
     @PostMapping("/delete")
     public ApiResponse<DeletedVo> delete(@RequestParam(value = "menu_key") String menuKey,
                                         @RequestParam(value = "cascade", required = false) Boolean cascade) {

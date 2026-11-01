@@ -110,6 +110,40 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 
 ## REST API
 
+### 零、在线接口文档（推荐入口）
+
+业务平台对接不需要看本文档下面的接口清单，直接开活文档：
+
+| 地址 | 用途 |
+|---|---|
+| `/doc.html` | Knife4j 中文界面：分组、搜索、调试、导出 Markdown |
+| `/swagger-ui.html` | 原生 Swagger UI |
+| `/v3/api-docs` | 原始 OpenAPI 3 JSON（导入 Postman / Apifox、生成 SDK） |
+| `/v3/api-docs/{business,cascade,public,system,webrtc}` | 分组文档 |
+
+- **鉴权**：`POST /api/v1/login` 拿 token，之后所有请求带 `Authorization: <token>`。
+  在文档页右上角 **Authorize** 填一次即可试调。
+- **分组**：`business` 是业务平台常用的 120 个接口（设备/通道/点播/录像/报警/云台）；
+  `public` 是免登录的分享与鉴权接口；`system` 是账号/权限/配置等管理接口。
+- **注解来源**：接口摘要取自每个 Controller 方法的 Javadoc 首句
+  （`@Operation(summary = ...)`），参数与出参结构由 springdoc 反射生成，
+  改签名文档自动跟着变，不需要维护第二份清单。
+
+配置项（`application.yml`）：
+
+```yaml
+gb28181:
+  api-docs:
+    enabled: true      # false = 完全不注册文档端点（纯内网生产可选）
+    protect: false     # true  = 文档加 HTTP Basic 口令（公网建议开）
+    basic-username: gb28181
+    basic-password: ${GB_DOCS_PASSWORD:}   # protect=true 时必须设置，否则启动失败
+```
+
+> 文档端点不在 `/api/v1/**` 下，因此**不过 Sa-Token 登录拦截**——它是静态页面 + 接口清单，
+> 不含业务数据（真实数据仍要 token）。接口清单会暴露全部路径与参数，公网部署建议
+> 把 `protect` 打开（`GB_DOCS_PASSWORD` 指定口令）或直接把 `enabled` 置 false。
+
 ### 一、平台接口 `/api/v1/*`（对齐青瓜视频 GBS）
 
 统一响应 `{"code":0,"msg":"ok","data":{...}}`，HTTP 状态码恒为 200。

@@ -6,6 +6,8 @@ import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.service.OperationLogService;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.OpLogListVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "操作日志", description = "接口调用审计")
 @RequestMapping("/api/v1/oplog")
 @RequiredArgsConstructor
 public class OpLogController {
@@ -33,6 +36,7 @@ public class OpLogController {
     private final OperationLogService operationLogService;
 
     /** 分页查询。begin/end 为可选时间范围（yyyy-MM-dd HH:mm:ss）。 */
+    @Operation(summary = "分页查询。begin/end 为可选时间范围（yyyy-MM-dd HH:mm:ss）")
     @GetMapping("/list")
     public ApiResponse<OpLogListVo> list(@RequestParam(defaultValue = "0") int start,
                                          @RequestParam(defaultValue = "100") int limit,
@@ -57,6 +61,7 @@ public class OpLogController {
      * <p>仅管理员可执行：审计日志是事后追责的唯一依据，
      * 普通用户若能清空，等于任何账号都能抹掉自己的操作痕迹。
      */
+    @Operation(summary = "清空全部日志")
     @PostMapping("/clear")
     public ApiResponse<DeletedVo> clear() {
         StpUtil.checkPermission(Permissions.OPLOG_CLEAR);

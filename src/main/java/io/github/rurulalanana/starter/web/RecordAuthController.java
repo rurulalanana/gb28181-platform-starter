@@ -1,6 +1,8 @@
 package io.github.rurulalanana.starter.web;
 
 import io.github.rurulalanana.starter.service.RecordUrlSigner;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -46,6 +48,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "录像地址鉴权", description = "nginx auth_request 子请求")
 @RequiredArgsConstructor
 public class RecordAuthController {
 
@@ -56,6 +59,7 @@ public class RecordAuthController {
      *
      * @param originalUri nginx 转发的原始请求 URI（含 query）
      */
+    @Operation(summary = "校验录像请求")
     @GetMapping("/api/v1/record/auth")
     public void auth(@RequestHeader(value = "X-Original-URI", required = false) String originalUri,
                      HttpServletRequest request,

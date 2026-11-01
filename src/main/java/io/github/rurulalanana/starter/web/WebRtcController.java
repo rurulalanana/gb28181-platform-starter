@@ -9,6 +9,8 @@ import io.github.rurulalanana.starter.vo.WebrtcPlayVo;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -46,6 +48,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "WebRTC 协商", description = "SDP 交换（播放器免登录）")
 @RequestMapping("/api/v1/webrtc")
 @RequiredArgsConstructor
 public class WebRtcController {
@@ -70,6 +73,7 @@ public class WebRtcController {
      * @param stream {@code <设备编码>/<通道编码>}；设备直连（设备编码即通道编码）
      *               时可只传一个编码
      */
+    @Operation(summary = "交换 SDP")
     @PostMapping(value = "/play", consumes = "*/*", produces = "application/json;charset=UTF-8")
     public ApiResponse<WebrtcPlayVo> play(@RequestParam String stream,
                                           @RequestParam(required = false) String peerId,
@@ -100,6 +104,7 @@ public class WebRtcController {
      * @param offerSdpBase64 base64 编码的 offer SDP
      * @return base64 编码的 answer SDP；失败时返回空串（播放器按 error 处理）
      */
+    @Operation(summary = "SRS 风格（LivePlayer 的 Webrtc tech 专用）SDP 交换")
     @PostMapping(value = "/srs", consumes = "*/*", produces = "text/plain;charset=UTF-8")
     public String srsWhep(@RequestParam String stream,
                           @RequestParam(required = false) String peerId,
@@ -196,6 +201,7 @@ public class WebRtcController {
     }
 
     /** WebRTC 播放参数。 */
+    @Operation(summary = "WebRTC 播放参数")
     @GetMapping("/config")
     public ApiResponse<WebrtcConfigVo> config() {
         WebrtcConfigVo vo = new WebrtcConfigVo();

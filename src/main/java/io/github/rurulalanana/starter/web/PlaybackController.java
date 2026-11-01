@@ -23,6 +23,8 @@ import io.github.rurulalanana.starter.vo.RecordVo;
 import io.github.rurulalanana.starter.vo.StreamListVo;
 import io.github.rurulalanana.starter.vo.StreamStopVo;
 import io.github.rurulalanana.starter.vo.StreamVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -54,6 +56,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "设备录像回放", description = "录像检索、回放点播、下载")
 @RequestMapping("/api/v1/playback")
 @RequiredArgsConstructor
 public class PlaybackController {
@@ -73,6 +76,7 @@ public class PlaybackController {
      * <p>走标准 9.8 的 {@code RecordInfo} 查询，同步等待设备应答；
      * 结果同时缓存到 {@code gb_device_record} 便于后续分页与按天统计。
      */
+    @Operation(summary = "查询录像列表")
     @GetMapping("/recordlist")
     public ApiResponse<RecordListVo> recordList(
             @RequestParam String serial,
@@ -166,6 +170,7 @@ public class PlaybackController {
     }
 
     /** 开始回放 / 下载。 */
+    @Operation(summary = "开始回放 / 下载")
     @PostMapping("/start")
     public ApiResponse<PlaybackVo> start(@RequestBody PlaybackStartRequest req) {
         StpUtil.checkLogin();
@@ -296,6 +301,7 @@ public class PlaybackController {
      * 此时返回 {@code ok=false} 并说明原因，由界面提示
      * 「后台下载中，完成后自动释放」。
      */
+    @Operation(summary = "停止回放")
     @PostMapping("/stop")
     public ApiResponse<StreamStopVo> stop(@RequestParam(required = false) String streamid,
                                           @RequestParam(required = false) String serial,
@@ -333,6 +339,7 @@ public class PlaybackController {
      * <p>命令映射到标准附录 D 的 {@code u=} 取值：
      * {@code play} / {@code pause} / {@code teardown} / {@code scale}。
      */
+    @Operation(summary = "回放控制")
     @PostMapping("/control")
     public ApiResponse<Void> control(@RequestParam(required = false) String streamid,
                                      @RequestParam(required = false) String serial,
@@ -413,6 +420,7 @@ public class PlaybackController {
      *                只能靠大小判断。{@code 0} 表示未知
      * @param name     通道名（仅用于任务列表展示）
      */
+    @Operation(summary = "开始下载：对当前回放流开始录制成本地 MP4（后台任务）")
     @PostMapping("/download/start")
     public ApiResponse<PlaybackDownloadVo.Progress> downloadStart(
             @RequestParam String streamid,
@@ -440,6 +448,7 @@ public class PlaybackController {
     }
 
     /** 下载进度。 */
+    @Operation(summary = "下载进度")
     @GetMapping("/download/progress")
     public ApiResponse<PlaybackDownloadVo.Progress> downloadProgress(@RequestParam String streamid) {
         StpUtil.checkLogin();
@@ -461,6 +470,7 @@ public class PlaybackController {
      * <p>后台下载的关键接口：任意页面都能拉到全部任务，所以用户切走页面、
      * 甚至刷新浏览器之后依然能看到进度、并取回已完成的文件。
      */
+    @Operation(summary = "全局下载任务列表（进行中 + 最近已完成）")
     @GetMapping("/download/list")
     public ApiResponse<List<PlaybackDownloadVo.Task>> downloadList() {
         StpUtil.checkLogin();
@@ -493,6 +503,7 @@ public class PlaybackController {
     }
 
     /** 从任务列表移除一条已完成/已取消的记录（不删磁盘文件）。 */
+    @Operation(summary = "从任务列表移除一条已完成/已取消的记录（不删磁盘文件）")
     @PostMapping("/download/remove")
     public ApiResponse<Void> downloadRemove(@RequestParam String taskid) {
         StpUtil.checkLogin();
@@ -506,6 +517,7 @@ public class PlaybackController {
      * <p>地址走已有的 {@code /record/...} 静态路径（nginx sendfile + 签名鉴权），
      * 前端 {@code <a download>} 即可直接下载，支持 Range 断点续传。
      */
+    @Operation(summary = "结束下载，返回可下载的 MP4 地址")
     @PostMapping("/download/finish")
     public ApiResponse<PlaybackDownloadVo.Finish> downloadFinish(@RequestParam String streamid) {
         StpUtil.checkLogin();
@@ -540,6 +552,7 @@ public class PlaybackController {
     }
 
     /** 取消下载。 */
+    @Operation(summary = "取消下载")
     @PostMapping("/download/cancel")
     public ApiResponse<Void> downloadCancel(@RequestParam String streamid) {
         StpUtil.checkLogin();
@@ -548,6 +561,7 @@ public class PlaybackController {
     }
 
     /** 回放流列表。 */
+    @Operation(summary = "回放流列表")
     @GetMapping("/streamlist")
     public ApiResponse<StreamListVo> streamList(
             @RequestParam(defaultValue = "0") int start,
@@ -560,6 +574,7 @@ public class PlaybackController {
     }
 
     /** 单条回放流信息。 */
+    @Operation(summary = "单条回放流信息")
     @GetMapping("/streaminfo")
     public ApiResponse<PlaybackVo> streamInfo(@RequestParam String streamid) {
         StpUtil.checkLogin();

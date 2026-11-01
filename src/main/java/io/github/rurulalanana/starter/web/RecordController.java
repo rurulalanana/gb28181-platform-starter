@@ -10,6 +10,8 @@ import io.github.rurulalanana.starter.service.RecordService;
 import io.github.rurulalanana.starter.vo.CloudRecordVo;
 import io.github.rurulalanana.starter.vo.RecordFileListVo;
 import io.github.rurulalanana.starter.vo.RecordStartVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -35,6 +37,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "本地录像控制", description = "手动启停云端录像")
 @RequestMapping("/api/v1/record")
 @RequiredArgsConstructor
 public class RecordController {
@@ -42,6 +45,7 @@ public class RecordController {
     private final RecordService recordService;
 
     /** 开始实时录像。 */
+    @Operation(summary = "开始实时录像")
     @PostMapping("/start")
     public ApiResponse<RecordStartVo> start(@RequestParam String serial,
                                             @RequestParam(required = false) String code,
@@ -63,6 +67,7 @@ public class RecordController {
     }
 
     /** 停止实时录像。 */
+    @Operation(summary = "停止实时录像")
     @PostMapping("/stop")
     public ApiResponse<RecordFileListVo> stop(@RequestParam String serial,
                                               @RequestParam(required = false) String code,
@@ -83,6 +88,7 @@ public class RecordController {
     }
 
     /** 查询实时录像文件。 */
+    @Operation(summary = "查询实时录像文件")
     @GetMapping("/list")
     public ApiResponse<RecordFileListVo> list(@RequestParam String serial,
                                               @RequestParam(required = false) String code,

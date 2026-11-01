@@ -19,6 +19,8 @@ import io.github.rurulalanana.starter.service.ControlService;
 import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.LiveShareVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.CacheControl;
@@ -70,6 +72,7 @@ import java.util.Set;
  */
 @Slf4j
 @RestController
+@Tag(name = "直播分享", description = "免登录的分享播放页数据")
 @RequestMapping("/api/v1/share")
 @RequiredArgsConstructor
 public class LiveShareController {
@@ -90,6 +93,7 @@ public class LiveShareController {
      * @param serial 设备编码
      * @param code   通道编码；省略时视为设备直连（设备编码即通道编码）
      */
+    @Operation(summary = "取分享页所需的通道信息与播放地址")
     @GetMapping("/live")
     public ApiResponse<LiveShareVo> live(@RequestParam String serial,
                                          @RequestParam(required = false) String code) {
@@ -190,6 +194,7 @@ public class LiveShareController {
      * @param command 动作：{@code up/down/left/right/upleft/.../zoomin/zoomout/stop}
      * @param speed   速度 0~255，默认 129（与登录版一致）
      */
+    @Operation(summary = "分享页的云台控制（免登录）")
     @PostMapping("/ptz")
     public ApiResponse<Void> ptz(@RequestParam String serial,
                                  @RequestParam(required = false) String code,
@@ -305,6 +310,7 @@ public class LiveShareController {
      * @param text 要编码的文本（分享页 URL）
      * @param size 边长（像素），默认 180；限制在 [80, 600]
      */
+    @Operation(summary = "生成二维码 PNG（分享页的「扫码直播」）")
     @GetMapping(value = "/qr", produces = MediaType.IMAGE_PNG_VALUE)
     public ResponseEntity<byte[]> qr(@RequestParam String text,
                                      @RequestParam(defaultValue = "180") int size) {

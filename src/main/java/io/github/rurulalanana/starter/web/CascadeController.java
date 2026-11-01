@@ -23,6 +23,8 @@ import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.IdVo;
 import io.github.rurulalanana.starter.vo.StatusLogListVo;
 import io.github.rurulalanana.starter.vo.StatusLogVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -56,6 +58,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "级联对接", description = "上下级平台配置与目录推送")
 @RequestMapping("/api/v1/cascade")
 @RequiredArgsConstructor
 public class CascadeController {
@@ -145,6 +148,7 @@ public class CascadeController {
     }
 
     /** 级联配置列表。 */
+    @Operation(summary = "级联配置列表")
     @GetMapping("/list")
     public ApiResponse<CascadeListVo> list(
             @RequestParam(defaultValue = "0") int start,
@@ -165,6 +169,7 @@ public class CascadeController {
     }
 
     /** 单条级联配置。 */
+    @Operation(summary = "单条级联配置")
     @GetMapping("/info")
     public ApiResponse<CascadeVo> info(@RequestParam String id) {
         StpUtil.checkLogin();
@@ -176,6 +181,7 @@ public class CascadeController {
     }
 
     /** 级联状态记录。 */
+    @Operation(summary = "级联状态记录")
     @GetMapping("/statuslog")
     public ApiResponse<StatusLogListVo> statusLog(
             @RequestParam String id,
@@ -215,6 +221,7 @@ public class CascadeController {
      * @param sort        排序字段：{@code deviceId} / {@code channelId} / {@code customId} / {@code name}
      * @param order       {@code asc} / {@code desc}
      */
+    @Operation(summary = "级联通道列表（共享通道选择弹窗的数据源）")
     @GetMapping("/channellist")
     public ApiResponse<CascadeChannelListVo> channelList(
             @RequestParam String id,
@@ -441,6 +448,7 @@ public class CascadeController {
     }
 
     /** 保存级联配置。 */
+    @Operation(summary = "保存级联配置")
     @PostMapping("/save")
     public ApiResponse<IdVo> save(@RequestBody CascadeSaveRequest req) {
         StpUtil.checkLogin();
@@ -492,6 +500,7 @@ public class CascadeController {
     }
 
     /** 启用 / 停用。 */
+    @Operation(summary = "启用 / 停用")
     @PostMapping("/setenable")
     public ApiResponse<Void> setEnable(@RequestParam String id,
                                        @RequestParam(defaultValue = "false") Boolean enable) {
@@ -512,6 +521,7 @@ public class CascadeController {
     }
 
     /** 共享全部通道。 */
+    @Operation(summary = "共享全部通道")
     @PostMapping("/setshareallchannel")
     public ApiResponse<Void> setShareAllChannel(
             @RequestParam String id,
@@ -530,6 +540,7 @@ public class CascadeController {
      * {@code required = false}：前端「清空后保存」时不会带这个参数，
      * 若声明为必填，这个合法操作会被 400 挡住。
      */
+    @Operation(summary = "保存共享通道（全量覆盖）")
     @PostMapping("/savechannels")
     public ApiResponse<DeletedVo> saveChannels(
             @RequestParam String id,
@@ -540,6 +551,7 @@ public class CascadeController {
     }
 
     /** 移除共享通道。 */
+    @Operation(summary = "移除共享通道")
     @PostMapping("/removechannels")
     public ApiResponse<DeletedVo> removeChannels(@RequestParam String id,
                                                  @RequestParam("channels[]") List<String> channels) {
@@ -549,6 +561,7 @@ public class CascadeController {
     }
 
     /** 共享 / 取消共享节点。 */
+    @Operation(summary = "共享 / 取消共享节点")
     @PostMapping("/sharenode")
     public ApiResponse<Void> shareNode(@RequestParam String serial,
                                        @RequestParam String code,
@@ -564,6 +577,7 @@ public class CascadeController {
     }
 
     /** 推送全部共享通道目录。 */
+    @Operation(summary = "推送全部共享通道目录")
     @PostMapping("/pushcatalog")
     public ApiResponse<DeletedVo> pushCatalog(
             @RequestParam(required = false) String id,
@@ -578,6 +592,7 @@ public class CascadeController {
     }
 
     /** 推送单条共享通道目录。 */
+    @Operation(summary = "推送单条共享通道目录")
     @PostMapping("/pushchannelcatalog")
     public ApiResponse<Void> pushChannelCatalog(
             @RequestParam(required = false) String id,
@@ -594,6 +609,7 @@ public class CascadeController {
     }
 
     /** 删除级联配置。 */
+    @Operation(summary = "删除级联配置")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String id) {
         StpUtil.checkLogin();

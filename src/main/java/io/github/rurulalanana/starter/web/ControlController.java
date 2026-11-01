@@ -10,6 +10,8 @@ import io.github.rurulalanana.starter.vo.ChannelNavigateVo;
 import io.github.rurulalanana.starter.vo.DeviceUpgradeVo;
 import io.github.rurulalanana.starter.vo.SnapshotConfigVo;
 import io.github.rurulalanana.starter.vo.TalkVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -56,6 +58,7 @@ import java.util.UUID;
  */
 @Slf4j
 @RestController
+@Tag(name = "云台与设备控制", description = "方向、预置位、巡航、拉框缩放、重启")
 @RequestMapping("/api/v1/control")
 @RequiredArgsConstructor
 public class ControlController {
@@ -68,6 +71,7 @@ public class ControlController {
     // ==================== 云台 ====================
 
     /** 云台控制。 */
+    @Operation(summary = "云台控制")
     @PostMapping("/ptz")
     public ApiResponse<Void> ptz(@RequestParam String serial,
                                  @RequestParam(required = false) String code,
@@ -79,6 +83,7 @@ public class ControlController {
     }
 
     /** 焦点光圈控制。 */
+    @Operation(summary = "焦点光圈控制")
     @PostMapping("/fi")
     public ApiResponse<Void> focusIris(@RequestParam String serial,
                                        @RequestParam(required = false) String code,
@@ -90,6 +95,7 @@ public class ControlController {
     }
 
     /** 精确云台控制（2022）。 */
+    @Operation(summary = "精确云台控制（2022）")
     @PostMapping("/ptzprecise")
     public ApiResponse<Void> ptzPrecise(@RequestParam String serial,
                                         @RequestParam(required = false) String code,
@@ -102,6 +108,7 @@ public class ControlController {
     }
 
     /** 拉框放大。 */
+    @Operation(summary = "拉框放大")
     @PostMapping("/dragzoomin")
     public ApiResponse<Void> dragZoomIn(@RequestParam String serial,
                                         @RequestParam(required = false) String code,
@@ -118,6 +125,7 @@ public class ControlController {
     }
 
     /** 拉框缩小。 */
+    @Operation(summary = "拉框缩小")
     @PostMapping("/dragzoomout")
     public ApiResponse<Void> dragZoomOut(@RequestParam String serial,
                                          @RequestParam(required = false) String code,
@@ -144,6 +152,7 @@ public class ControlController {
      *                且只存平台侧（{@code gb_preset}）—— 设备只存编号，
      *                各厂商对 {@code PresetName} 的支持程度差异很大。
      */
+    @Operation(summary = "预置位控制")
     @PostMapping("/preset")
     public ApiResponse<Void> preset(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
@@ -176,6 +185,7 @@ public class ControlController {
     }
 
     /** 看守位控制。 */
+    @Operation(summary = "看守位控制")
     @PostMapping("/homeposition")
     public ApiResponse<Void> homePosition(@RequestParam String serial,
                                           @RequestParam(required = false) String code,
@@ -192,6 +202,7 @@ public class ControlController {
      *
      * <p>{@code command=query} 时返回巡航组列表结构（数据由设备 MANSCDP 应答异步返回）。
      */
+    @Operation(summary = "巡航控制")
     @PostMapping("/navigate")
     public ApiResponse<ChannelNavigateVo> navigate(@RequestParam String serial,
                                                    @RequestParam(required = false) String code,
@@ -218,6 +229,7 @@ public class ControlController {
     // ==================== 辅助开关 ====================
 
     /** 雨刷开关。 */
+    @Operation(summary = "雨刷开关")
     @PostMapping("/wiper")
     public ApiResponse<Void> wiper(@RequestParam String serial,
                                    @RequestParam(required = false) String code,
@@ -229,6 +241,7 @@ public class ControlController {
     }
 
     /** 补光灯开关。 */
+    @Operation(summary = "补光灯开关")
     @PostMapping("/filllight")
     public ApiResponse<Void> fillLight(@RequestParam String serial,
                                        @RequestParam(required = false) String code,
@@ -243,6 +256,7 @@ public class ControlController {
     // ==================== 设备动作 ====================
 
     /** 设备远程重启。 */
+    @Operation(summary = "设备远程重启")
     @PostMapping("/teleboot")
     public ApiResponse<Void> teleBoot(@RequestParam String serial,
                                       @RequestParam(required = false) String code) {
@@ -252,6 +266,7 @@ public class ControlController {
     }
 
     /** 设备端录像控制。 */
+    @Operation(summary = "设备端录像控制")
     @PostMapping("/record")
     public ApiResponse<Void> record(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
@@ -263,6 +278,7 @@ public class ControlController {
     }
 
     /** 布防撤防。 */
+    @Operation(summary = "布防撤防")
     @PostMapping("/guard")
     public ApiResponse<Void> guard(@RequestParam String serial,
                                    @RequestParam(required = false) String code,
@@ -273,6 +289,7 @@ public class ControlController {
     }
 
     /** 强制关键帧。 */
+    @Operation(summary = "强制关键帧")
     @PostMapping("/iframe")
     public ApiResponse<Void> forceIFrame(@RequestParam String serial,
                                          @RequestParam(required = false) String code) {
@@ -282,6 +299,7 @@ public class ControlController {
     }
 
     /** 存储卡格式化（2022）。 */
+    @Operation(summary = "存储卡格式化（2022）")
     @PostMapping("/formatsdcard")
     public ApiResponse<Void> formatSdCard(@RequestParam String serial,
                                           @RequestParam(required = false) String code,
@@ -294,6 +312,7 @@ public class ControlController {
     // ==================== 报警 ====================
 
     /** 报警通知下发。 */
+    @Operation(summary = "报警通知下发")
     @PostMapping("/alarmnotify")
     public ApiResponse<Void> alarmNotify(@RequestParam String serial,
                                          @RequestParam(required = false) String code,
@@ -310,6 +329,7 @@ public class ControlController {
     }
 
     /** 报警复位。 */
+    @Operation(summary = "报警复位")
     @PostMapping("/alarmreset")
     public ApiResponse<Void> alarmReset(@RequestParam String serial,
                                         @RequestParam(required = false) String code,
@@ -328,6 +348,7 @@ public class ControlController {
      *
      * @param time 要下发的本地时间 {@code yyyy-MM-dd'T'HH:mm:ss}；留空用平台当前时间
      */
+    @Operation(summary = "设备校时")
     @PostMapping("/synctime")
     public ApiResponse<Void> syncTime(@RequestParam String serial,
                                       @RequestParam(required = false) String code,
@@ -349,6 +370,7 @@ public class ControlController {
     // ==================== 配置 / 订阅 ====================
 
     /** 设备配置。 */
+    @Operation(summary = "设备配置")
     @PostMapping("/deviceconfig")
     public ApiResponse<Void> deviceConfig(@RequestParam String serial,
                                           @RequestParam(required = false) String code,
@@ -359,6 +381,7 @@ public class ControlController {
     }
 
     /** 设备订阅。 */
+    @Operation(summary = "设备订阅")
     @PostMapping("/devicesubscribe")
     public ApiResponse<Void> subscribe(@RequestParam String serial,
                                        @RequestParam(required = false) String code,
@@ -381,6 +404,7 @@ public class ControlController {
      * 下行通道 → 音频数据持续推送。本接口完成第一步；
      * 实时音频推送建议改用 WebSocket 接口（{@code ws-talk}）。
      */
+    @Operation(summary = "语音喊话")
     @PostMapping("/talk")
     public ApiResponse<TalkVo> talk(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
@@ -409,6 +433,7 @@ public class ControlController {
     // ==================== 2022 扩展 ====================
 
     /** OSD 配置（2022）。 */
+    @Operation(summary = "OSD 配置（2022）")
     @PostMapping("/osdconfig")
     public ApiResponse<Void> osdConfig(@RequestParam String serial,
                                        @RequestParam(required = false) String code,
@@ -429,6 +454,7 @@ public class ControlController {
     }
 
     /** 图像抓拍配置（2022）。 */
+    @Operation(summary = "图像抓拍配置（2022）")
     @PostMapping("/snapshotconfig")
     public ApiResponse<SnapshotConfigVo> snapshotConfig(
             @RequestParam String serial,
@@ -447,6 +473,7 @@ public class ControlController {
     }
 
     /** 设备软件升级（2022）。 */
+    @Operation(summary = "设备软件升级（2022）")
     @PostMapping("/deviceupgrade")
     public ApiResponse<DeviceUpgradeVo> deviceUpgrade(@RequestParam String serial,
                                                       @RequestParam(required = false) String code,
@@ -463,6 +490,7 @@ public class ControlController {
     }
 
     /** 目标跟踪控制（2022）。 */
+    @Operation(summary = "目标跟踪控制（2022）")
     @PostMapping("/targettrack")
     public ApiResponse<Void> targetTrack(@RequestParam String serial,
                                          @RequestParam(required = false) String code,

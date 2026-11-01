@@ -71,6 +71,31 @@ logging:
     # io.github.rurulalanana.starter.mapper: DEBUG
 
 
+# ==================== 接口文档（Swagger + Knife4j） ====================
+# 业务平台按接口对接，所以文档是活文档（从 Controller 反射生成），不是手写 Markdown。
+#   /doc.html        Knife4j 中文界面（推荐给对接方）
+#   /swagger-ui.html 原生 Swagger UI
+#   /v3/api-docs     原始 OpenAPI JSON（可导入 Postman / Apifox / 生成 SDK）
+#   /v3/api-docs/business|cascade|public|system|webrtc  分组文档
+#
+# 这些路径不在 /api/v1/** 下，因此不过 Sa-Token 登录拦截——文档本身是公开的静态资源，
+# 真正的数据仍然要凭证才能取。接口清单会暴露全部路径/参数/结构，公网部署建议两者选一：
+#   1) gb28181.api-docs.enabled=false   彻底不注册文档端点
+#   2) gb28181.api-docs.protect=true    打开文档的 HTTP Basic 口令
+springdoc:
+  api-docs:
+    enabled: ${gb28181.api-docs.enabled:true}
+  swagger-ui:
+    enabled: ${gb28181.api-docs.enabled:true}
+    # 分组与接口都按声明顺序展示，避免中文标签被字母序打乱
+    tags-sorter: order
+    operations-sorter: method
+  default-produces-media-type: application/json
+
+# Knife4j 只用了它的静态 UI（/doc.html），没有引 starter（与 springdoc 2.6 字节码不兼容），
+# 所以这里没有 knife4j.* 配置项；文档口令保护由 ApiDocsProtectionFilter 负责。
+
+
 # ==================== Sa-Token ====================
 # 会话已持久化到 PostgreSQL（sa_token_store 表，见 SaTokenJdbcDao）：
 # 服务重启后已签发的 token 依然有效，用户无需重新登录。
@@ -91,6 +116,16 @@ sa-token:
   is-read-body: true
 
 gb28181:
+  # ==================== 接口文档（对外对接用） ====================
+  # /doc.html 是 Knife4j 中文界面；/v3/api-docs 是原始 OpenAPI JSON。
+  # 交付给业务平台时保持 true；纯内网生产可置 false 让文档端点彻底不注册。
+  api-docs:
+    enabled: true
+    # true 时文档要 HTTP Basic 口令（接口清单会暴露全部路径与参数，公网建议开启）
+    protect: false
+    basic-username: gb28181
+    # 口令只从环境变量取（仓库里不放默认值）；protect=true 而这里为空时启动会直接失败
+    basic-password: ${GB_DOCS_PASSWORD:}
   # 平台 20 位编码
   platform-id: "34020000002000000001"
   # SIP 信令监听
@@ -284,3 +319,9 @@ dahua:
     # 太小 → 在线设备被误判离线（「明明在线却连不上」）；
     # 太大 → 僵尸地址拖慢巡检（每次都要等满登录超时）。
     expire-seconds: 180
+
+# 接口文档里展示的版本号：由 maven 资源过滤注入（spring-boot-starter-parent 用 @ 作定界符），
+# 这样 pom 改版本时文档自动跟着变，不需要手改常量。
+info:
+  app:
+    version: '@project.version@'

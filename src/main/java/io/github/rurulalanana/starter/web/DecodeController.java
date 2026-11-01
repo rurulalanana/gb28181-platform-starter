@@ -8,6 +8,8 @@ import io.github.rurulalanana.starter.service.DeviceService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.DecodeInfoVo;
 import io.github.rurulalanana.starter.vo.DecodeStartVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -28,6 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "解码与抓拍", description = "上墙解码、图片抓拍")
 @RequestMapping("/api/v1/decode")
 @RequiredArgsConstructor
 public class DecodeController {
@@ -37,6 +40,7 @@ public class DecodeController {
     private final DeviceService deviceService;
 
     /** 开始解码。 */
+    @Operation(summary = "开始解码")
     @PostMapping("/start")
     public ApiResponse<DecodeStartVo> start(@RequestParam String serial,
                                             @RequestParam String code,
@@ -62,6 +66,7 @@ public class DecodeController {
     }
 
     /** 解码状态。 */
+    @Operation(summary = "解码状态")
     @GetMapping("/info")
     public ApiResponse<DecodeInfoVo> info(@RequestParam String serial,
                                           @RequestParam String code) {
@@ -79,6 +84,7 @@ public class DecodeController {
     }
 
     /** 停止解码。 */
+    @Operation(summary = "停止解码")
     @PostMapping("/stop")
     public ApiResponse<Void> stop(@RequestParam String serial, @RequestParam String code) {
         StpUtil.checkLogin();

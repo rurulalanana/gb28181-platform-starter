@@ -7,6 +7,8 @@ import io.github.rurulalanana.starter.entity.GbAcl;
 import io.github.rurulalanana.starter.service.AccessControlService;
 import io.github.rurulalanana.starter.vo.AclListVo;
 import io.github.rurulalanana.starter.vo.AclVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -36,6 +38,7 @@ import java.util.List;
  */
 @Slf4j
 @RestController
+@Tag(name = "接入控制", description = "IP 黑白名单")
 @RequestMapping("/api/v1/acl")
 @RequiredArgsConstructor
 public class AclController {
@@ -47,6 +50,7 @@ public class AclController {
      *
      * @param listType BLACK / WHITE；留空返回全部
      */
+    @Operation(summary = "查询规则")
     @GetMapping("/list")
     public ApiResponse<AclListVo> list(
             @RequestParam(value = "list_type", required = false) String listType) {
@@ -73,6 +77,7 @@ public class AclController {
      * @param value    匹配值
      * @param remark   备注（建议写明原因）
      */
+    @Operation(summary = "新增规则（立即生效）")
     @PostMapping("/add")
     public ApiResponse<AclVo> add(
             @RequestParam(value = "list_type") String listType,
@@ -84,6 +89,7 @@ public class AclController {
     }
 
     /** 删除规则（立即生效）。 */
+    @Operation(summary = "删除规则（立即生效）")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam Long id) {
         StpUtil.checkPermission(Permissions.SYSTEM_WRITE);

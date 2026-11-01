@@ -14,6 +14,8 @@ import io.github.rurulalanana.starter.vo.ServerInfoVo;
 import io.github.rurulalanana.starter.vo.TokenVo;
 import io.github.rurulalanana.starter.vo.UserInfoVo;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,6 +51,7 @@ import java.util.Enumeration;
  */
 @Slf4j
 @RestController
+@Tag(name = "登录与平台信息", description = "登录、会话、服务器信息、改密")
 @RequestMapping("/api/v1")
 @RequiredArgsConstructor
 public class SystemController {
@@ -84,6 +87,7 @@ public class SystemController {
      * <p>返回 {@code cookieToken} / {@code urlToken} / {@code tokenTimeout} 三个字段，
      * 同时把 Token 写入响应头 {@code Authorization}，便于前端直接使用。
      */
+    @Operation(summary = "登录")
     @PostMapping("/login")
     public ApiResponse<TokenVo> login(@RequestBody LoginRequest req) {
         GbUser user = userService.authenticate(req.getUsername(), req.getPassword());
@@ -98,6 +102,7 @@ public class SystemController {
     }
 
     /** 登出。 */
+    @Operation(summary = "登出")
     @GetMapping("/logout")
     public ApiResponse<Void> logout() {
         if (StpUtil.isLogin()) {
@@ -116,6 +121,7 @@ public class SystemController {
     }
 
     /** 修改密码。 */
+    @Operation(summary = "修改密码")
     @PostMapping("/modifypassword")
     public ApiResponse<TokenVo> modifyPassword(@RequestBody ModifyPasswordRequest req) {
         StpUtil.checkLogin();
@@ -130,6 +136,7 @@ public class SystemController {
     // ==================== 信息查询 ====================
 
     /** 当前登录用户信息。 */
+    @Operation(summary = "当前登录用户信息")
     @GetMapping("/userinfo")
     public ApiResponse<UserInfoVo> userInfo() {
         StpUtil.checkLogin();
@@ -156,6 +163,7 @@ public class SystemController {
     }
 
     /** 平台运行信息。 */
+    @Operation(summary = "平台运行信息")
     @GetMapping("/getserverinfo")
     public ApiResponse<ServerInfoVo> serverInfo() {
         long[] deviceStats = deviceService.deviceStats();
@@ -245,6 +253,7 @@ public class SystemController {
      * 拉起；若以 {@code java -jar} 裸跑且无守护进程，进程退出后不会自动重启，
      * 因此默认拒绝该操作，需显式开启 {@code gb28181.starter.allow-restart}。
      */
+    @Operation(summary = "重启服务")
     @PostMapping("/restart")
     public ApiResponse<Void> restart(@RequestParam(defaultValue = "false") boolean force) {
         StpUtil.checkLogin();

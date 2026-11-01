@@ -4,6 +4,8 @@ import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.starter.common.ApiResponse;
 import io.github.rurulalanana.starter.common.Permissions;
 import io.github.rurulalanana.starter.service.TlsCertificateService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +36,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @Slf4j
 @RestController
+@Tag(name = "HTTPS 与国密", description = "证书安装、状态、国密就绪度")
 @RequestMapping("/api/v1/tls")
 @RequiredArgsConstructor
 public class TlsController {
@@ -41,6 +44,7 @@ public class TlsController {
     private final TlsCertificateService tlsService;
 
     /** 当前 HTTPS 状态。 */
+    @Operation(summary = "当前 HTTPS 状态")
     @GetMapping("/status")
     public ApiResponse<TlsCertificateService.TlsStatus> status() {
         StpUtil.checkLogin();
@@ -53,6 +57,7 @@ public class TlsController {
      * <p>用 POST body 而不是表单参数：证书链 PEM 动辄 5~10KB，
      * 带上中间证书后还会更长，塞进 URL 或表单字段都容易在中间环节被截断。
      */
+    @Operation(summary = "安装证书并启用 HTTPS")
     @PostMapping("/install")
     public ApiResponse<TlsCertificateService.TlsStatus> install(
             @RequestBody TlsInstallRequest request) {
@@ -68,6 +73,7 @@ public class TlsController {
     }
 
     /** 停用 HTTPS。 */
+    @Operation(summary = "停用 HTTPS")
     @PostMapping("/disable")
     public ApiResponse<TlsCertificateService.TlsStatus> disable() {
         StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
@@ -82,6 +88,7 @@ public class TlsController {
      * 而重新上传证书意味着把私钥再从本地贴一遍 —— 私钥经手次数越多，
      * 泄漏风险越大。证书文件本来就在磁盘上，只重写配置就够。
      */
+    @Operation(summary = "按当前配置重新生成 nginx 配置并 reload（不重传证书）")
     @PostMapping("/regenerate")
     public ApiResponse<TlsCertificateService.TlsStatus> regenerate() {
         StpUtil.checkPermission(Permissions.SYSTEM_WRITE);
@@ -95,6 +102,7 @@ public class TlsController {
      * 而不是提供一个「启用国密」的开关。原因见
      * {@link TlsCertificateService#gmReadiness()}。
      */
+    @Operation(summary = "国密 35114 就绪度自检")
     @GetMapping("/gm-readiness")
     public ApiResponse<TlsCertificateService.GmReadiness> gmReadiness() {
         StpUtil.checkLogin();
@@ -107,6 +115,7 @@ public class TlsController {
      * <p>专治「本机 curl 通、浏览器打不开」——九成是云安全组没放通端口。
      * 检测走公网 IP（云环境下会经过网关，因而能命中安全组规则）。
      */
+    @Operation(summary = "检测 HTTPS 端口能否从公网访问")
     @GetMapping("/probe")
     public ApiResponse<TlsCertificateService.PortProbe> probe(
             @org.springframework.web.bind.annotation.RequestParam(required = false) Integer port) {

@@ -25,6 +25,8 @@ import io.github.rurulalanana.starter.vo.CloudPlayVo;
 import io.github.rurulalanana.starter.vo.CloudRecordVo;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.DownloadVo;import io.github.rurulalanana.starter.vo.SnapVo;import io.github.rurulalanana.starter.vo.VideoRangeVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -70,6 +72,7 @@ import java.util.Map;
  */
 @Slf4j
 @RestController
+@Tag(name = "云端录像", description = "录像检索、点播、下载、分享")
 @RequestMapping("/api/v1/cloudrecord")
 @RequiredArgsConstructor
 public class CloudRecordController {
@@ -83,6 +86,7 @@ public class CloudRecordController {
     private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
     /** 有云端录像的通道。 */
+    @Operation(summary = "有云端录像的通道")
     @GetMapping("/querychannels")
     public ApiResponse<CloudChannelListVo> queryChannels(
             @RequestParam(defaultValue = "0") int start,
@@ -130,6 +134,7 @@ public class CloudRecordController {
     }
 
     /** 按通道统计有录像的月份。 */
+    @Operation(summary = "按通道统计有录像的月份")
     @GetMapping("/queryflags")
     public ApiResponse<CloudFlagsVo> queryFlags(
             @RequestParam String serial,
@@ -154,6 +159,7 @@ public class CloudRecordController {
     }
 
     /** 按月查询。 */
+    @Operation(summary = "按月查询")
     @GetMapping("/querymonthly")
     public ApiResponse<CloudMonthVo> queryMonthly(@RequestParam String serial,
                                                   @RequestParam(required = false) String code,
@@ -166,6 +172,7 @@ public class CloudRecordController {
     }
 
     /** 按日查询。 */
+    @Operation(summary = "按日查询")
     @GetMapping("/querydaily")
     public ApiResponse<CloudDailyVo> queryDaily(@RequestParam String serial,
                                                 @RequestParam(required = false) String code,
@@ -200,6 +207,7 @@ public class CloudRecordController {
     }
 
     /** 删除单条录像（仅管理员：录像文件不可恢复）。 */
+    @Operation(summary = "删除单条录像（仅管理员：录像文件不可恢复）")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String serial,
                                     @RequestParam(required = false) String code,
@@ -216,6 +224,7 @@ public class CloudRecordController {
     }
 
     /** 删除通道所有录像（仅管理员）。 */
+    @Operation(summary = "删除通道所有录像（仅管理员）")
     @PostMapping("/removechannel")
     public ApiResponse<DeletedVo> removeChannel(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
@@ -233,6 +242,7 @@ public class CloudRecordController {
     }
 
     /** 按天删除（仅管理员）。 */
+    @Operation(summary = "按天删除（仅管理员）")
     @PostMapping("/removedaily")
     public ApiResponse<DeletedVo> removeDaily(@RequestParam String serial,
                                               @RequestParam(required = false) String code,
@@ -253,6 +263,7 @@ public class CloudRecordController {
     }
 
     /** 重要标记。 */
+    @Operation(summary = "重要标记")
     @PostMapping("/setimportant")
     public ApiResponse<Void> setImportant(@RequestParam String serial,
                                           @RequestParam(required = false) String code,
@@ -269,6 +280,7 @@ public class CloudRecordController {
     }
 
     /** 录像点播：把 MP4 拉入 ZLM 转协议输出（返回 WebRTC/FLV/HLS 等播放地址）。 */
+    @Operation(summary = "录像点播：把 MP4 拉入 ZLM 转协议输出（返回 WebRTC/FLV/HLS 等播放地址）")
     @PostMapping("/play")
     public ApiResponse<CloudPlayVo> play(@RequestParam String recordId) {
         StpUtil.checkLogin();
@@ -313,6 +325,7 @@ public class CloudRecordController {
     }
 
     /** 停止录像点播。 */
+    @Operation(summary = "停止录像点播")
     @PostMapping("/stopplay")
     public ApiResponse<Void> stopPlay(@RequestParam String recordId) {
         StpUtil.checkLogin();
@@ -321,6 +334,7 @@ public class CloudRecordController {
     }
 
     /** 下载录像文件。 */
+    @Operation(summary = "下载录像文件")
     @GetMapping("/download/{serial}/{code}/{period}")
     public ApiResponse<DownloadVo> download(@PathVariable String serial,
                                             @PathVariable String code,
@@ -365,6 +379,7 @@ public class CloudRecordController {
      * 再经平台转发一遍纯属浪费（还多一跳延迟）。签名地址自带有效期，
      * 浏览器拿到后自己直连 OSS。
      */
+    @Operation(summary = "录像文件流：浏览器  直接播放，也用于下载")
     @GetMapping("/file/{recordId}")
     public void file(@PathVariable String recordId,
                      @RequestParam(value = "download", required = false) String download,
@@ -520,6 +535,7 @@ public class CloudRecordController {
      * 改为返回区间内的录像段列表，由前端按顺序播放；如需真正的单文件合成，
      * 可在部署环境额外接入 ffmpeg。
      */
+    @Operation(summary = "指定时间段录像播放 / 下载")
     @GetMapping("/video/{operate}/{serial}/{code}/{starttime}/{endtime}/video.mp4")
     public ApiResponse<VideoRangeVo> videoOperate(@PathVariable String operate,
                                                   @PathVariable String serial,
@@ -605,6 +621,7 @@ public class CloudRecordController {
      * @param code   通道编码
      * @return 快照访问路径
      */
+    @Operation(summary = "服务端抓拍：拉流 → ffmpeg 解码 → 存盘")
     @PostMapping("/snap/grab")
     public ApiResponse<SnapVo> grabSnap(@RequestParam String serial,
                                          @RequestParam(required = false) String code) {
@@ -624,6 +641,7 @@ public class CloudRecordController {
      * {@code <img src>} 里加载 —— {@code <img>} 请求不带自定义头，
      * 带鉴权就永远加载不出来。故按公开静态资源处理。
      */
+    @Operation(summary = "读取通道快照")
     @GetMapping("/snap/{serial}/{code}.jpg")
     public org.springframework.http.ResponseEntity<byte[]> snap(
             @PathVariable String serial, @PathVariable String code) {
@@ -646,6 +664,7 @@ public class CloudRecordController {
      * <p>对齐 LiveGBS 的「分享页」：详情页点分享 → 拿到一个免登录链接 →
      * 别人直接打开就能看这一段录像。
      */
+    @Operation(summary = "生成某段录像的分享链接")
     @PostMapping("/share")
     public ApiResponse<Map<String, String>> share(@RequestParam String recordId) {
         StpUtil.checkLogin();
@@ -669,6 +688,7 @@ public class CloudRecordController {
      * <p>路径在 {@code SaTokenConfiguration} 的放行名单里 —— 分享链接就是给
      * 不登录的人用的。
      */
+    @Operation(summary = "按分享令牌取录像信息（免登录）")
     @GetMapping("/share/{token}")
     public ApiResponse<Map<String, Object>> shareInfo(@PathVariable String token) {
         GbRecord record = shareTokenService.resolve(recordService, token);

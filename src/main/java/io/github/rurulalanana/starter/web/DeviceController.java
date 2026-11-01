@@ -42,6 +42,8 @@ import io.github.rurulalanana.starter.vo.StreamLogVo;
 import io.github.rurulalanana.starter.vo.StreamVo;
 import io.github.rurulalanana.starter.vo.TreeNodeVo;
 import io.github.rurulalanana.starter.vo.TreeVo;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -80,6 +82,7 @@ import java.util.Map;
  */
 @Slf4j
 @RestController
+@Tag(name = "设备与通道", description = "设备/通道查询、采集、维护")
 @RequestMapping("/api/v1/device")
 @RequiredArgsConstructor
 public class DeviceController {
@@ -109,6 +112,7 @@ public class DeviceController {
      * 设备列表、通道列表、点播、云台、录像接口全部照旧可用 ——
      * 前端不需要区分类型。
      */
+    @Operation(summary = "纳管一台 SDK 直连设备（大华 NetSDK）")
     @PostMapping("/adddahua")
     public ApiResponse<DeviceVo> addDahua(@RequestParam String serial,
                                           @RequestParam String host,
@@ -128,6 +132,7 @@ public class DeviceController {
      * <p>国标设备走 {@link #fetchCatalog}（下发 Catalog 查询，等设备应答）；
      * SDK 设备走本接口（平台主动去问，同步返回结果）。
      */
+    @Operation(summary = "探测 SDK 直连设备并同步通道目录")
     @PostMapping("/refreshsdk")
     public ApiResponse<FetchResultVo> refreshSdk(@RequestParam String serial) {
         StpUtil.checkLogin();
@@ -137,6 +142,7 @@ public class DeviceController {
     }
 
     /** 设备列表。 */
+    @Operation(summary = "设备列表")
     @GetMapping("/list")
     public ApiResponse<DeviceListVo> list(DeviceListQuery query) {
         StpUtil.checkLogin();
@@ -160,6 +166,7 @@ public class DeviceController {
     }
 
     /** 单条设备信息。 */
+    @Operation(summary = "单条设备信息")
     @GetMapping("/info")
     public ApiResponse<DeviceVo> info(@RequestParam String serial) {
         StpUtil.checkLogin();
@@ -171,6 +178,7 @@ public class DeviceController {
     }
 
     /** 在线统计。 */
+    @Operation(summary = "在线统计")
     @GetMapping("/onlinestats")
     public ApiResponse<OnlineStatsVo> onlineStats() {
         StpUtil.checkLogin();
@@ -187,6 +195,7 @@ public class DeviceController {
     // ==================== 通道 ====================
 
     /** 通道列表。 */
+    @Operation(summary = "通道列表")
     @GetMapping("/channellist")
     public ApiResponse<ChannelListVo> channelList(ChannelListQuery query) {
         StpUtil.checkLogin();
@@ -205,6 +214,7 @@ public class DeviceController {
     }
 
     /** 单条通道信息。 */
+    @Operation(summary = "单条通道信息")
     @GetMapping("/channelinfo")
     public ApiResponse<ChannelVo> channelInfo(@RequestParam String serial,
                                               @RequestParam(required = false) String code) {
@@ -222,6 +232,7 @@ public class DeviceController {
      * @param serial   设备编号；为空时返回顶级设备节点
      * @param subfetch 是否递归抓取子节点（false 时只返回一层）
      */
+    @Operation(summary = "通道树")
     @GetMapping("/channeltree")
     public ApiResponse<TreeVo> channelTree(
             @RequestParam(required = false) String serial,
@@ -259,6 +270,7 @@ public class DeviceController {
     }
 
     /** 分组树。 */
+    @Operation(summary = "分组树")
     @GetMapping("/grouptree")
     public ApiResponse<TreeVo> groupTree(
             @RequestParam(required = false) String pcode,
@@ -277,6 +289,7 @@ public class DeviceController {
     }
 
     /** 位置记录。 */
+    @Operation(summary = "位置记录")
     @GetMapping("/positionlog")
     public ApiResponse<PositionLogListVo> positionLog(
             @RequestParam(required = false) String serial,
@@ -309,6 +322,7 @@ public class DeviceController {
     // ==================== 抓取类 ====================
 
     /** 主动抓取下级通道目录。 */
+    @Operation(summary = "主动抓取下级通道目录")
     @PostMapping("/fetchcatalog")
     public ApiResponse<FetchResultVo> fetchCatalog(
             @RequestParam String serial,
@@ -325,6 +339,7 @@ public class DeviceController {
     }
 
     /** 抓取下级设备信息。 */
+    @Operation(summary = "抓取下级设备信息")
     @PostMapping("/fetchinfo")
     public ApiResponse<FetchResultVo> fetchInfo(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
@@ -334,6 +349,7 @@ public class DeviceController {
     }
 
     /** 抓取下级通道状态。 */
+    @Operation(summary = "抓取下级通道状态")
     @PostMapping("/fetchstatus")
     public ApiResponse<FetchResultVo> fetchStatus(@RequestParam String serial,
                                                   @RequestParam(required = false) String code) {
@@ -344,6 +360,7 @@ public class DeviceController {
     }
 
     /** 抓取下级通道配置。 */
+    @Operation(summary = "抓取下级通道配置")
     @PostMapping("/fetchconfig")
     public ApiResponse<FetchResultVo> fetchConfig(@RequestParam String serial,
                                                   @RequestParam(required = false) String code,
@@ -355,6 +372,7 @@ public class DeviceController {
     }
 
     /** 抓取预置位。 */
+    @Operation(summary = "抓取预置位")
     @PostMapping("/fetchpreset")
     public ApiResponse<FetchResultVo> fetchPreset(@RequestParam String serial,
                                                   @RequestParam(required = false) String code) {
@@ -375,6 +393,7 @@ public class DeviceController {
      * <p>{@code queriedAt} 为 {@code null} 表示还没收到过设备应答，
      * 前端据此继续轮询或提示「设备未响应」。
      */
+    @Operation(summary = "读取通道的预置位列表")
     @GetMapping("/presetlist")
     public ApiResponse<PresetListVo> presetList(@RequestParam String serial,
                                                 @RequestParam(required = false) String code) {
@@ -384,6 +403,7 @@ public class DeviceController {
     }
 
     /** 抓取看守位信息。 */
+    @Operation(summary = "抓取看守位信息")
     @PostMapping("/fetchhomeposition")
     public ApiResponse<FetchResultVo> fetchHomePosition(@RequestParam String serial,
                                                         @RequestParam(required = false) String code) {
@@ -393,6 +413,7 @@ public class DeviceController {
     }
 
     /** 抓取巡航组列表。 */
+    @Operation(summary = "抓取巡航组列表")
     @PostMapping("/fetchcruisetracklist")
     public ApiResponse<FetchResultVo> fetchCruiseList(@RequestParam String serial,
                                                       @RequestParam(required = false) String code) {
@@ -402,6 +423,7 @@ public class DeviceController {
     }
 
     /** 抓取巡航轨迹。 */
+    @Operation(summary = "抓取巡航轨迹")
     @PostMapping("/fetchcruisetrack")
     public ApiResponse<FetchResultVo> fetchCruiseTrack(@RequestParam String serial,
                                                        @RequestParam(required = false) String code,
@@ -414,6 +436,7 @@ public class DeviceController {
     }
 
     /** 抓取 PTZ 精确状态。 */
+    @Operation(summary = "抓取 PTZ 精确状态")
     @PostMapping("/fetchptzposition")
     public ApiResponse<FetchResultVo> fetchPtzPosition(@RequestParam String serial,
                                                        @RequestParam(required = false) String code) {
@@ -423,6 +446,7 @@ public class DeviceController {
     }
 
     /** 抓取存储卡状态。 */
+    @Operation(summary = "抓取存储卡状态")
     @PostMapping("/fetchsdcardstatus")
     public ApiResponse<FetchResultVo> fetchSdCardStatus(@RequestParam String serial,
                                                         @RequestParam(required = false) String code) {
@@ -432,6 +456,7 @@ public class DeviceController {
     }
 
     /** 查询通道巡航列表。 */
+    @Operation(summary = "查询通道巡航列表")
     @GetMapping("/getchannelnavigate")
     public ApiResponse<ChannelNavigateVo> getChannelNavigate(@RequestParam String serial,
                                                              @RequestParam(required = false) String code) {
@@ -448,6 +473,7 @@ public class DeviceController {
     // ==================== 状态 / 流量记录 ====================
 
     /** 状态变更记录。 */
+    @Operation(summary = "状态变更记录")
     @GetMapping("/statuslog")
     public ApiResponse<StatusLogListVo> statusLog(
             @RequestParam String serial,
@@ -482,6 +508,7 @@ public class DeviceController {
      * <p>嵌入式 ZLMediaKit 未注册 {@code /index/api/*}，无法主动查询流量计数；
      * 如需真实流量，应改为独立部署 MediaServer 并读取其 REST 接口。
      */
+    @Operation(summary = "流量统计")
     @GetMapping("/streamlog")
     public ApiResponse<StreamLogVo> streamLog(
             @RequestParam String serial,
@@ -497,6 +524,7 @@ public class DeviceController {
     // ==================== 属性编辑 ====================
 
     /** 自定义设备名称。 */
+    @Operation(summary = "自定义设备名称")
     @PostMapping("/setname")
     public ApiResponse<Void> setDeviceName(@RequestParam String serial,
                                            @RequestParam(value = "custom_name", required = false) String customName) {
@@ -512,6 +540,7 @@ public class DeviceController {
     }
 
     /** 自定义通道名称。 */
+    @Operation(summary = "自定义通道名称")
     @PostMapping("/setchannelname")
     public ApiResponse<Void> setChannelName(@RequestParam String serial,
                                             @RequestParam String code,
@@ -541,6 +570,7 @@ public class DeviceController {
      * 多设备环境里两台设备都可能有 {@code ...1320000001}，
      * 只按 code 查会改到另一台设备的同名通道上。
      */
+    @Operation(summary = "自定义通道国标编号")
     @PostMapping("/setchannelid")
     public ApiResponse<Void> setChannelId(@RequestParam String serial,
                                           @RequestParam String code,
@@ -555,6 +585,7 @@ public class DeviceController {
     }
 
     /** 自定义通道云台类型。 */
+    @Operation(summary = "自定义通道云台类型")
     @PostMapping("/setchannelptztype")
     public ApiResponse<Void> setChannelPtzType(@RequestParam String serial,
                                                @RequestParam String code,
@@ -573,6 +604,7 @@ public class DeviceController {
     }
 
     /** 自定义通道移动位置。 */
+    @Operation(summary = "自定义通道移动位置")
     @PostMapping("/setchannelposition")
     public ApiResponse<Void> setChannelPosition(
             @RequestParam String serial, @RequestParam String code,
@@ -603,6 +635,7 @@ public class DeviceController {
     }
 
     /** 自定义通道属性。 */
+    @Operation(summary = "自定义通道属性")
     @PostMapping("/setchannelproperty")
     public ApiResponse<Void> setChannelProperty(@RequestParam String serial,
                                                 @RequestParam String code,
@@ -641,6 +674,7 @@ public class DeviceController {
      * 「有人看就录、没人看就停」录出来的必然是残缺片段，
      * 用户会以为录像功能坏了。因此这里强制互斥：开按需就关录像（并归档已有片段）。
      */
+    @Operation(summary = "设置通道按需直播")
     @PostMapping("/setchannelondemand")
     public ApiResponse<Void> setChannelOndemand(@RequestParam String serial,
                                                 @RequestParam String code,
@@ -692,6 +726,7 @@ public class DeviceController {
      * <p>关闭时若在录，立即停止并归档 —— 否则开关要到「下一次流上下线」
      * 才体现，用户会以为功能坏了。
      */
+    @Operation(summary = "设置通道云端录像")
     @PostMapping("/setchannelcloudrecord")
     public ApiResponse<Void> setChannelCloudRecord(@RequestParam String serial,
                                                    @RequestParam String code,
@@ -744,6 +779,7 @@ public class DeviceController {
     }
 
     /** 设置通道音频开关。 */
+    @Operation(summary = "设置通道音频开关")
     @PostMapping("/setchannelaudio")
     public ApiResponse<Void> setChannelAudio(@RequestParam String serial,
                                              @RequestParam String code,
@@ -756,6 +792,7 @@ public class DeviceController {
     }
 
     /** 设置通道分享开关。 */
+    @Operation(summary = "设置通道分享开关")
     @PostMapping("/setchannelshared")
     public ApiResponse<Void> setChannelShared(@RequestParam String serial,
                                               @RequestParam String code,
@@ -768,6 +805,7 @@ public class DeviceController {
     }
 
     /** 设置流传输模式。 */
+    @Operation(summary = "设置流传输模式")
     @PostMapping("/setmediatransport")
     public ApiResponse<Void> setMediaTransport(
             @RequestParam String serial,
@@ -812,6 +850,7 @@ public class DeviceController {
     }
 
     /** 编辑设备。 */
+    @Operation(summary = "编辑设备")
     @PostMapping("/setinfo")
     public ApiResponse<Void> setDeviceInfo(@RequestParam String serial,
                                            @RequestParam(value = "custom_name", required = false) String customName,
@@ -891,6 +930,7 @@ public class DeviceController {
      * 不一定是设备编号，所以无法按设备编号可靠地区分密码。
      * 这里存的值用于记录「该设备安装时设的密码」，方便运维排查。
      */
+    @Operation(summary = "设置设备的 SIP 密码记录（仅平台侧留存，供运维参考）")
     @PostMapping("/setpassword")
     public ApiResponse<SetPasswordVo> setPassword(
             @RequestParam String serial,
@@ -918,6 +958,7 @@ public class DeviceController {
      *
      * <p>采集是异步的：接口返回后 1~3 秒再查 {@code /channellist} 即可看到通道。
      */
+    @Operation(summary = "一键采集设备全量数据（目录 + 信息 + 状态）")
     @PostMapping("/collect")
     public ApiResponse<FetchResultVo> collect(@RequestParam String serial) {
         StpUtil.checkLogin();
@@ -935,6 +976,7 @@ public class DeviceController {
     }
 
     /** 删除离线设备。 */
+    @Operation(summary = "删除离线设备")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String serial) {
         StpUtil.checkLogin();
@@ -950,6 +992,7 @@ public class DeviceController {
     }
 
     /** 指定设备推流 SMS。 */
+    @Operation(summary = "指定设备推流 SMS")
     @PostMapping("/setsms")
     public ApiResponse<Void> setSms(@RequestParam String serial,
                                     @RequestParam(value = "sms_id", required = false) String smsId,
@@ -965,6 +1008,7 @@ public class DeviceController {
     }
 
     /** 自定义预置位名称。 */
+    @Operation(summary = "自定义预置位名称")
     @PostMapping("/setpresetname")
     public ApiResponse<Void> setPresetName(@RequestParam String serial,
                                            @RequestParam String code,
