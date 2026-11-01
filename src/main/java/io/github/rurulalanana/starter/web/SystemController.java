@@ -87,7 +87,10 @@ public class SystemController {
      * <p>返回 {@code cookieToken} / {@code urlToken} / {@code tokenTimeout} 三个字段，
      * 同时把 Token 写入响应头 {@code Authorization}，便于前端直接使用。
      */
-    @Operation(summary = "登录")
+    @Operation(summary = "登录换取 token",
+            description = "body: {\"username\":\"...\",\"password\":\"<MD5 32 位小写>\"}；"
+                    + "返回 data.token，之后放进 Authorization 请求头。本接口不需要 token。",
+            security = {})
     @PostMapping("/login")
     public ApiResponse<TokenVo> login(@RequestBody LoginRequest req) {
         GbUser user = userService.authenticate(req.getUsername(), req.getPassword());

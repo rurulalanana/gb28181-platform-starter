@@ -428,6 +428,48 @@ public class StreamService {
         return platform.mediaService().stop(deviceId, channelId, type);
     }
 
+    /**
+     * 某通道的<b>回放</b>会话。
+     *
+     * <p><b>为什么必须按类型查</b>：同一通道上通常同时存在两路会话 ——
+     * 一路直播（云端录像保活会让它长期在线）和一路回放，键分别是
+     * {@code 设备/通道} 与 {@code 设备/通道_playback}。
+     * 用 {@link #session(String, String)} 按「设备+通道」查只能拿到<b>直播</b>会话，
+     * 于是回放控制（定位/暂停/倍速）会发到直播的对话框里：
+     * 设备回 200 却不执行，回放原地不动；严重的还会把直播打断。
+     *
+     * <p>这就是「拖动进度条像重新播流、倍速完全没用」的根因。
+     *
+     * @param deviceId  设备编码
+     * @param channelId 通道编码
+     * @return 回放会话；该通道没有回放时返回 {@code null}
+     */
+    public RtpSession playbackSession(String deviceId, String channelId) {
+        if (channelId == null || channelId.isBlank()) {
+            return null;
+        }
+        RtpSession session = platform.sessionManager()
+                .getByChannel(deviceId == null ? channelId : deviceId, channelId, MediaType.PLAYBACK);
+        if (session != null) {
+            return session;
+        }
+        /*
+         * 兜底：按通道编码在所有会话里找「回放类型」的那一个。
+         *
+         * <p>调用方可能只给了通道编码（设备直连场景 serial == code），
+         * 也可能会话是用旧规则建的。这里只认 {@link MediaType#PLAYBACK}，
+         * 绝不能退化成「任意类型」—— 那就又抓回直播会话了。
+         */
+        for (RtpSession s : sessions()) {
+            if (channelId.equals(s.getChannelId())
+                    && s.getType() == MediaType.PLAYBACK
+                    && !RtpSession.CLOSED.equals(s.getState())) {
+                return s;
+            }
+        }
+        return null;
+    }
+
     /** 停止全部流。 */
     public int stopAll() {
         List<RtpSession> sessions = new ArrayList<>(platform.sessionManager().sessions());

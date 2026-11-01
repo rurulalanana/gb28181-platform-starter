@@ -3,6 +3,7 @@ package io.github.rurulalanana.starter.web;
 import io.github.rurulalanana.starter.dto.DeviceRef;
 import cn.dev33.satoken.stp.StpUtil;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaService;
+import io.github.rurulalanana.gb28181.sip.zlm.MediaType;
 import io.github.rurulalanana.gb28181.sip.zlm.RecordItem;
 import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
@@ -596,23 +597,32 @@ public class PlaybackController {
     // ==================== 内部 ====================
 
     /**
-     * 由 streamid 或 serial/code 定位回放会话。
+     * 由 streamid 或 serial/code 定位<b>回放</b>会话。
      *
      * <p>会话对象同时带设备编码与通道编码，故直接返回会话而非通道编码——
      * 通道编码跨设备可重复，光有通道编码无法唯一定位（会误停别的设备的流）。
+     *
+     * <p><b>必须按 {@link MediaType#PLAYBACK} 查</b>：同一通道上通常还有一路直播
+     * （云端录像保活让它长期在线），而直播与回放是两个独立会话，
+     * 键分别是 {@code 设备/通道} 与 {@code 设备/通道_playback}。
+     * 早先这里用 {@code streamService.session(serial, code)}（只查直播键），
+     * 于是「拖动定位 / 暂停 / 倍速」的 SIP INFO 全部发到了<b>直播</b>对话框里 ——
+     * 设备回 200 却不执行，表现为「拖进度条没反应，甚至像重新拉流」、
+     * 「倍速选了等于没选」。{@code /playback/stop} 早就按类型停流了，
+     * 但解析会话这一步没跟着改，等于白改。
      */
     private RtpSession resolveSession(String streamid, String serial, String code) {
         if (streamid != null && !streamid.isBlank()) {
-            return streamService.findSession(streamid);
+            RtpSession byKey = streamService.findSession(streamid);
+            if (byKey != null) {
+                return byKey;
+            }
         }
         String channel = DeviceRef.channelOf(serial, code);
         if (channel == null || channel.isBlank()) {
             return null;
         }
-        // serial 是设备编码：能同时命中 (设备, 通道) 时最准
-        RtpSession session = (serial == null || serial.isBlank())
-                ? null : streamService.session(serial, channel);
-        return session != null ? session : streamService.session(channel);
+        return streamService.playbackSession(serial == null || serial.isBlank() ? null : serial, channel);
     }
 
     /**

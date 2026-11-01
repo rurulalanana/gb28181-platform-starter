@@ -664,7 +664,15 @@ function onTrackClick(ev) {
    * 不必拆会话重新协商 —— 后者的代价是 2~3 秒黑屏。
    */
   const offset = Math.floor((point.at - parseWall(hit.row.startTime)) / 1000)
-  if (current.value && hit.row === current.value && playing.value) {
+  /*
+   * 正在播的<b>就是这一段</b> → 定位，绝不重新拉流。
+   *
+   * <p>早先的条件里带了 {@code && playing.value}：只要播放器那一刻不在
+   * “播放中”状态（缓冲、重连、刚点完还没起画面），同段点击就会走到下面的
+   * {@code play()} —— 那是一次 stop + 重新 INVITE，用户看到的就是
+   * 「拖一下进度条整路重来」。现在只要同一段就走定位。
+   */
+  if (current.value && hit.row === current.value) {
     seekTo(Math.max(0, offset))
     return
   }
@@ -904,6 +912,22 @@ async function play(row, opts = {}) {
   segmentSeconds.value = segmentLengthOf(row)
   // 本段从第 offset 秒开始推，媒体时间轴的 0 点对应段内这个位置
   positionOffset.value = offset
+  /*
+   * 新会话一律回到 1 倍速。
+   *
+   * <p>设备是按 INVITE 时的速率起推的，上一段设的 2 倍速不会带过来；
+   * 本地若还停在 2 倍速，缓冲会立刻被抽干（表现为一起播就卡）。
+   * 用户想要倍速，每一段都得重新选一次 —— 与设备侧的行为一致。
+   */
+  clearRateWatch()
+  if (seekTimer) {
+    clearTimeout(seekTimer)
+    seekTimer = null
+  }
+  pendingSeek = null
+  if (playRate.value !== 1) {
+    playRate.value = 1
+  }
   await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
@@ -1014,24 +1038,54 @@ function addSeconds(timeStr, seconds) {
  *   <li>不打扰设备：不会反复拆建会话（部分设备有并发会话数限制）</li>
  * </ul>
  */
-async function seekTo(sec) {
+let seekTimer = null
+let pendingSeek = null
+
+/**
+ * 拖动/点击定位：发 SIP {@code INFO} 让设备自己跳（带防抖）。
+ *
+ * <p><b>为什么防抖</b>：拖动时控件会连续触发多次定位，每次都发 INFO 会把信令
+ * 打爆 —— 设备侧的处理能力只有每秒几条，多余的指令要么排队要么被丢弃，
+ * 用户看到的是「拖完半天画面才动」。这里只保留最后一次，200ms 后发。
+ *
+ * <p><b>失败不再自动重新拉流</b>：早先定位失败会 stop + 重新 INVITE，
+ * 用户感受到的就是「拖一下整路重来、卡好几秒」。设备不支持 npt 时
+ * 重拉也定位不到目标，只是白等一次；改成如实提示，让用户自己决定
+ * 要不要重播（时间轴上换个段点就是了）。
+ */
+function seekTo(sec) {
   const row = current.value
   if (!row) return
-  const offset = Math.max(0, Math.floor(Number(sec) || 0))
+  pendingSeek = Math.max(0, Math.floor(Number(sec) || 0))
+  if (seekTimer) clearTimeout(seekTimer)
+  seekTimer = setTimeout(() => {
+    seekTimer = null
+    if (pendingSeek !== null) flushSeek(pendingSeek)
+  }, 200)
+}
+
+/** 真正发出定位指令，并把本地进度条挪到目标位置。 */
+async function flushSeek(offset) {
+  pendingSeek = null
   try {
     await playbackApi.control({
+      streamid: playbackKey.value,
       serial: serial.value,
       code: code.value,
       command: 'seek',
       range: offset
     })
+    /*
+     * 乐观地挪动进度显示。
+     *
+     * <p>设备跳转后媒体时间轴并不会重置（我们收到的仍是连续 FLV），
+     * 所以「段内位置 = 偏移 + 媒体已播秒数」。把偏移改成 {@code 目标 - 当前}，
+     * 进度条立刻落到目标处并继续走 —— 否则用户拖完看到进度条弹回原处，
+     * 会以为没生效（其实画面已经跳了）。
+     */
+    positionOffset.value = Math.max(0, offset - (player.position.value || 0))
   } catch (e) {
-    //
-    // 设备不支持 npt（少数老型号）或会话已被回收：退回重新协商。
-    // 这只作为兜底 —— 正常设备走上面的 INFO 就行，不应该常走这里。
-    //
-    ElMessage.warning(e.message || '设备不支持跳转，正在按目标时间重新拉流…')
-    await restartAt(offset)
+    ElMessage.warning(e.message || '定位失败：该设备可能不支持 npt 跳转')
   }
 }
 
@@ -1181,11 +1235,19 @@ function hasTaskOfRow(row) {
   })
 }
 
-/** 回放控制：暂停 / 继续 / 倍速 / 拖动。 */
+/**
+ * 回放控制：暂停 / 继续 / 倍速 / 拖动。
+ *
+ * <p><b>必须带 {@code streamid}</b>：同一通道上通常还有一路直播（云端录像保活），
+ * 后端按 {@code serial/code} 定位时会拿到直播会话，控制指令就发到错的 SIP 对话框里 ——
+ * 设备回 200 却不执行。{@link playbackKey} 正是回放会话键（带 {@code _playback} 后缀），
+ * 传它后端就能唯一命中。
+ */
 async function control(command, extra = {}) {
-  if (!current.value) return
+  if (!current.value) return false
   try {
     await playbackApi.control({
+      streamid: playbackKey.value,
       serial: serial.value,
       code: code.value,
       command,
@@ -1193,8 +1255,10 @@ async function control(command, extra = {}) {
     })
     if (command === 'pause') ElMessage.success('已暂停')
     else if (command === 'play') ElMessage.success('已继续')
+    return true
   } catch (e) {
     ElMessage.error(e.message || '控制失败')
+    return false
   }
 }
 
@@ -1281,10 +1345,67 @@ const playhead = computed(() => {
   }
 })
 
-/** 倍速切换：国标 Scale，设备侧变速推流。 */
+/**
+ * 倍速切换：设备侧 {@code Scale} + 本地 {@code playbackRate} 同时改。
+ *
+ * <p>只有两边同速才对得上：设备按 2 倍速推、客户端按 1 倍速播，
+ * 缓冲区会一路涨（延迟越来越大）；反过来设备不加速而客户端加速，
+ * 缓冲几秒就被抽干，画面一顿一顿。
+ *
+ * <p>{@code setPlaybackRate} 会触发 {@code ratechange}，由播放器把速率
+ * 转成 SIP {@code Scale}（见 {@code useLivePlayer#bindVodControls}），
+ * 所以这里不再重复发指令。播放器没就绪时才直接发一次。
+ *
+ * <p><b>设备不支持时自动退回 1 倍速</b>：Scale 发出去但设备照旧 1 倍速推，
+ * 本地 2 倍速几秒内就会把缓冲抽干。3 秒后抽样对比「实际走了多少秒」，
+ * 低于期望的六成就判定不支持，退回 1 倍速并说明 —— 比让画面一直卡着好。
+ */
 async function onRateChange(rate) {
   playRate.value = rate
-  await control('scale', { scale: rate })
+  const localApplied = player.setPlaybackRate(rate)
+  if (!localApplied) {
+    // 播放器还没起（没画面/没媒体元素）：直接发指令，效果在设备侧
+    await control('scale', { scale: rate })
+    return
+  }
+  if (rate <= 1) {
+    clearRateWatch()
+    return
+  }
+  watchRateEffect(rate)
+}
+
+/** 倍速生效性检查的定时器。 */
+let rateWatchTimer = null
+
+function clearRateWatch() {
+  if (rateWatchTimer) {
+    clearTimeout(rateWatchTimer)
+    rateWatchTimer = null
+  }
+}
+
+/**
+ * 3 秒后抽样：本地 2 倍速下媒体时间应走 ~2×3=6 秒。
+ * 不足期望的 60% 说明数据供不上（设备没跟着加速），退回 1 倍速。
+ */
+function watchRateEffect(rate) {
+  clearRateWatch()
+  const startPos = player.position.value || 0
+  const startAt = Date.now()
+  rateWatchTimer = setTimeout(() => {
+    rateWatchTimer = null
+    const elapsed = (Date.now() - startAt) / 1000
+    const advanced = (player.position.value || 0) - startPos
+    if (elapsed <= 0) return
+    if (advanced < elapsed * rate * 0.6) {
+      playRate.value = 1
+      // setPlaybackRate 会触发 ratechange → vod.onRate → 发一次 Scale(1)，
+      // 不再单独补发，否则同一条指令会发两遍
+      player.setPlaybackRate(1)
+      ElMessage.warning('该设备不支持回放倍速，已恢复 1 倍速（画面会继续正常播放）')
+    }
+  }, 3000)
 }
 
 /**
@@ -1416,6 +1537,14 @@ onMounted(async () => {
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
   nowTimer = null
+  // 离开页面时把定位防抖与倍速检查的定时器一并清掉，
+  // 否则它们会在组件销毁后继续跑，触发对已失效会话的请求
+  clearRateWatch()
+  if (seekTimer) {
+    clearTimeout(seekTimer)
+    seekTimer = null
+  }
+  pendingSeek = null
   /*
    * 离开页面必须释放设备侧的会话。
    *

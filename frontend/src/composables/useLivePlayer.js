@@ -665,6 +665,31 @@ export function useLivePlayer(containerRef, hooks = {}) {
     )
   }
 
+  /**
+   * 调整<b>本地</b>播放速率（回放倍速的客户端那一半）。
+   *
+   * <p><b>为什么要本地也变</b>：国标回放的倍速是<b>设备侧</b>的
+   * {@code Scale}（设备按 2 倍速往平台推），平台只是转发。客户端若仍按 1 倍速
+   * 消耗，缓冲区会一路涨上去 —— 表现是「延迟越来越大、画面越来越滞后」，
+   * 而不是「快放」。所以两边必须同速。
+   *
+   * <p>设置 {@code playbackRate} 会触发 {@code ratechange}，
+   * 由 {@code bindVodControls} 转成 SIP {@code Scale}，不需要调用方再发一次。
+   *
+   * @param {number} rate 1 为正常
+   * @returns {boolean} 是否设置成功（播放器还没就绪时返回 false）
+   */
+  function setPlaybackRate(rate) {
+    const media = engine && engine.videoEl
+    if (!media) return false
+    try {
+      media.playbackRate = rate
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+
   /** 用户是否已经开始看（起播后才有资格上报暂停/继续）。 */
   let userReady = false
 
@@ -800,6 +825,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     currentUrl,
     videoInfo,
     position,
+    setPlaybackRate,
     play,
     playFile,
     stop,

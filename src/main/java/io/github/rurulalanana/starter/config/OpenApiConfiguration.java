@@ -65,8 +65,8 @@ public class OpenApiConfiguration {
                                 面向业务平台的 REST 接口。全部响应为统一信封 `{code, msg, data}`，
                                 **HTTP 状态码恒为 200**，业务成败看 `code`：0 成功 / 400 参数错 / 401 未登录 / 403 无权限 / 500 服务端异常。
 
-                                **鉴权**：先 `POST /api/v1/login` 拿到 `token`，之后所有请求带
-                                `Authorization: <token>` 请求头。token 有效期 7 天，服务重启不失效。
+                                **鉴权**：先 `POST /api/v1/login` 拿到 `token`（见 **auth** 分组），
+                                之后所有请求带 `Authorization: <token>` 请求头。token 有效期 7 天，服务重启不失效。
 
                                 **字段风格**：请求参数（query/form）为 snake_case，
                                 请求体（JSON）与响应字段为 camelCase；null 字段默认省略。
@@ -93,6 +93,38 @@ public class OpenApiConfiguration {
     }
 
     /**
+     * 鉴权与会话：登录换 token、登出、当前用户、改密码。
+     *
+     * <p><b>单独成组的原因</b>：对接方第一件事就是「怎么拿 token」，
+     * 而它原本混在 {@code system}（账号/权限/配置共 38 个接口）里，
+     * 在 {@code business} 分组下根本找不到 —— 实测被问过一次。
+     * 放在下拉框第一个，进文档就能看到完整流程。
+     */
+    @Bean
+    public GroupedOpenApi authApi() {
+        return GroupedOpenApi.builder()
+                .group("auth")
+                .addOpenApiCustomizer(api -> api.setInfo(new Info()
+                        .title("鉴权与会话")
+                        .version(version)
+                        .description("""
+                                对接流程：
+                                1. `POST /api/v1/login`（body：`{"username":"...","password":"<MD5 32 位小写>"}`）
+                                2. 从响应的 `data.token` 取值
+                                3. 点本页右上角 **Authorize** 填入该 token（或在请求头带 `Authorization: <token>`）
+                                4. 之后即可在其它分组里直接「调试」
+
+                                token 有效期 7 天、服务重启不失效；`/api/v1/logout` 会主动作废当前 token。
+                                """)))
+                .pathsToMatch(
+                        "/api/v1/login",
+                        "/api/v1/logout",
+                        "/api/v1/userinfo",
+                        "/api/v1/modifypassword")
+                .build();
+    }
+
+    /**
      * 业务对接接口：设备、通道、实时点播、录像、报警、云台。
      *
      * <p>业务平台 90% 的调用都落在这组里，所以单独成组——
@@ -105,7 +137,9 @@ public class OpenApiConfiguration {
                 .addOpenApiCustomizer(api -> api.setInfo(new Info()
                         .title("业务对接接口")
                         .version(version)
-                        .description("设备 / 通道 / 实时点播 / 录像 / 报警 / 云台控制")))
+                        .description("设备 / 通道 / 实时点播 / 录像 / 报警 / 云台控制。"
+                                + "\n\n> 本组所有接口都要带 `Authorization` 请求头，"
+                                + "token 的获取方式见 **auth** 分组。")))
                 .pathsToMatch(
                         "/api/v1/device/**",
                         "/api/v1/stream/**",
@@ -159,11 +193,8 @@ public class OpenApiConfiguration {
                         .version(version)
                         .description("登录与会话、用户、角色权限、菜单、运行时配置、黑白名单、证书、审计、指标")))
                 .pathsToMatch(
-                        "/api/v1/login",
-                        "/api/v1/logout",
-                        "/api/v1/userinfo",
+                        // 登录/登出/当前用户/改密码在 auth 分组，这里不重复
                         "/api/v1/getserverinfo",
-                        "/api/v1/modifypassword",
                         "/api/v1/system/**",
                         "/api/v1/user/**",
                         "/api/v1/role/**",
