@@ -233,6 +233,40 @@ function unwrapComponent(mod) {
 }
 
 /**
+ * 给 flv 源处理器补上 {@code canPlayType}。
+ *
+ * <p>videojs-flvjs 注册到 {@code Html5} 技术上的处理器只有
+ * {@code canHandleSource}/{@code handleSource}，而 video.js 9 的
+ * {@code Html5.canPlayType()} 会逐个处理器调 {@code canPlayType} ——
+ * 缺这个方法就抛 {@code r[n].canPlayType is not a function}，
+ * 于是 {@code <source type="video/x-flv">} 被判成「不支持的源」，
+ * 播放器只显示一句「无法找到此视频兼容的源」，画面永远不出来。
+ *
+ * <p>补上之后 {@code canPlayType('video/x-flv')} 正常返回
+ * {@code probably}，源选择与后续 {@code handleSource} 都恢复正常。
+ * 幂等：已经有的处理器不会被覆盖。
+ */
+function patchFlvSourceHandler() {
+  try {
+    const vjs = window.videojs
+    if (!vjs || typeof vjs.getTech !== 'function') return
+    const tech = vjs.getTech('Html5')
+    const list = (tech && tech.sourceHandlers) || []
+    for (let i = 0; i < list.length; i++) {
+      const h = list[i]
+      // 原生处理器本来就有 canPlayType，这里只补缺的那一个（flvjs）
+      if (!h || typeof h.canPlayType === 'function') continue
+      h.canPlayType = (src) => {
+        const type = typeof src === 'string' ? src : (src && src.type) || ''
+        return /flv/i.test(type) ? 'probably' : ''
+      }
+    }
+  } catch (e) {
+    // 兼容层失败不该拖垮起播流程
+  }
+}
+
+/**
  * 确保 LivePlayer 组件可用（幂等）。
  *
  * <p>顺序关键：<b>先</b>把 Vue 挂到 window，<b>再</b>注入组件脚本 ——
@@ -243,7 +277,10 @@ function unwrapComponent(mod) {
 export function ensureLivePlayerComponent() {
   if (typeof window === 'undefined') return Promise.reject(new Error('非浏览器环境'))
   const cached = unwrapComponent(window.LivePlayer)
-  if (cached) return Promise.resolve(cached)
+  if (cached) {
+    patchFlvSourceHandler()
+    return Promise.resolve(cached)
+  }
   if (componentPromise) return componentPromise
 
   componentPromise = new Promise((resolve, reject) => {
@@ -252,10 +289,12 @@ export function ensureLivePlayerComponent() {
       reject(new Error('缺少 /js/liveplayer-lib.min.js（videojs 未就绪）'))
       return
     }
+    patchFlvSourceHandler()
     const s = document.createElement('script')
     s.src = COMPONENT_SRC
     s.async = true
     s.onload = () => {
+      patchFlvSourceHandler()
       const comp = unwrapComponent(window.LivePlayer)
       if (comp) resolve(comp)
       else reject(new Error('组件脚本加载后未暴露可用的 LivePlayer 组件'))

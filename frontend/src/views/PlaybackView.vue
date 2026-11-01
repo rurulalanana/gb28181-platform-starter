@@ -51,6 +51,11 @@
               <el-option :value="2" label="2 倍速" />
               <el-option :value="4" label="4 倍速" />
             </el-select>
+            <span
+              v-if="speedMode === 'jump'"
+              class="pb-speed-hint"
+              title="该设备不支持信令变速，正在用「连续跳播」模拟快放"
+            >跳播快进</span>
             <span class="cms-gap" />
             <button
               v-if="canDownload"
@@ -103,6 +108,7 @@
         <div ref="playStage" class="pb-player">
           <div ref="videoContainer" class="pb-video" />
           <div v-if="!current" class="pb-no-video">No Video</div>
+          <div v-if="seeking && current" class="pb-seeking">定位中…</div>
         </div>
 
         <!--
@@ -925,6 +931,10 @@ async function play(row, opts = {}) {
     seekTimer = null
   }
   pendingSeek = null
+  clearSeeking()
+  // 新会话设备从 1 倍速起推，本地记录的「已下发倍速」也要同步归位
+  deviceRate = 1
+  speedMode.value = 'device'
   if (playRate.value !== 1) {
     playRate.value = 1
   }
@@ -1000,7 +1010,19 @@ async function play(row, opts = {}) {
       onSeek: (sec) => seekTo(sec),
       onPause: () => control('pause'),
       onResume: () => resumePlayback(),
-      onRate: (rate) => control('scale', { scale: rate })
+      onRate: (rate) => control('scale', { scale: rate }),
+      /*
+       * 媒体时间轴突变（设备跳转后 PTS 整段前移）。
+       *
+       * <p>段内位置 = {@code positionOffset + 媒体时间}。媒体时间自己跳了
+       * N 秒，就必须把 offset 反向退掉 N 秒，否则「设备跳了 350 秒」会被
+       * 计入两次，进度条与画面立刻对不上。
+       */
+      onJump: (delta) => {
+        positionOffset.value = (positionOffset.value || 0) - delta
+        // 媒体时间轴已经跳到新位置，说明设备执行完了
+        clearSeeking()
+      }
     }
   })
 }
@@ -1064,6 +1086,18 @@ function seekTo(sec) {
   }, 200)
 }
 
+/** 正在等设备执行定位（画面上盖一层提示，避免「卡住了」的错觉）。 */
+const seeking = ref(false)
+let seekingTimer = null
+
+function clearSeeking() {
+  if (seekingTimer) {
+    clearTimeout(seekingTimer)
+    seekingTimer = null
+  }
+  seeking.value = false
+}
+
 /** 真正发出定位指令，并把本地进度条挪到目标位置。 */
 async function flushSeek(offset) {
   pendingSeek = null
@@ -1084,7 +1118,15 @@ async function flushSeek(offset) {
      * 会以为没生效（其实画面已经跳了）。
      */
     positionOffset.value = Math.max(0, offset - (player.position.value || 0))
+    /*
+     * 设备侧跳转有 1~2 秒的处理时间，期间画面停在旧位置。
+     * 盖一层「定位中…」比让用户以为卡死要好；媒体时间轴一跳就撤掉。
+     */
+    clearSeeking()
+    seeking.value = true
+    seekingTimer = setTimeout(clearSeeking, 3000)
   } catch (e) {
+    clearSeeking()
     ElMessage.warning(e.message || '定位失败：该设备可能不支持 npt 跳转')
   }
 }
@@ -1346,33 +1388,154 @@ const playhead = computed(() => {
 })
 
 /**
- * 倍速切换：设备侧 {@code Scale} + 本地 {@code playbackRate} 同时改。
+ * 倍速切换。
  *
- * <p>只有两边同速才对得上：设备按 2 倍速推、客户端按 1 倍速播，
- * 缓冲区会一路涨（延迟越来越大）；反过来设备不加速而客户端加速，
- * 缓冲几秒就被抽干，画面一顿一顿。
+ * <h3>为什么不能只改本地 {@code playbackRate}</h3>
+ * 国标回放拿到的是设备<b>按实时速率推上来</b>的流：本地调到 2 倍速，
+ * 几秒内就把缓冲抽干，画面一顿一顿。真正的倍速只能让设备加速推
+ * （{@code Scale}）。
  *
- * <p>{@code setPlaybackRate} 会触发 {@code ratechange}，由播放器把速率
- * 转成 SIP {@code Scale}（见 {@code useLivePlayer#bindVodControls}），
- * 所以这里不再重复发指令。播放器没就绪时才直接发一次。
+ * <h3>为什么设备那半必须确认</h3>
+ * {@code Scale} 是「请求」不是「保证」。实测南坑水库（下级平台）收到
+ * {@code Scale: 2.0} 之后<b>直接停推</b>，媒体源随即被注销、播放器 404。
+ * 而上一版用「媒体时间走了多少」当判据本身就是错的 ——
+ * 缓冲富余时媒体时间无论如何都按本地速率走，看不出设备有没有加速。
  *
- * <p><b>设备不支持时自动退回 1 倍速</b>：Scale 发出去但设备照旧 1 倍速推，
- * 本地 2 倍速几秒内就会把缓冲抽干。3 秒后抽样对比「实际走了多少秒」，
- * 低于期望的六成就判定不支持，退回 1 倍速并说明 —— 比让画面一直卡着好。
+ * <p>所以现在：先只发指令、本地保持 1 倍速，4 秒后看<b>已缓冲末尾</b>
+ * 前进了多少秒（它只随收到的数据量走，是设备推送速率唯一可靠的判据）。
+ * 达标才把本地也切过去；不达标就记下「该通道不支持信令变速」
+ * （存本地，下次不再白试一次把流打死），改用<b>跳播快进</b>。
  */
 async function onRateChange(rate) {
+  clearRateWatch()
   playRate.value = rate
-  const localApplied = player.setPlaybackRate(rate)
-  if (!localApplied) {
-    // 播放器还没起（没画面/没媒体元素）：直接发指令，效果在设备侧
-    await control('scale', { scale: rate })
+  if (!current.value) return
+
+  if (rate === 1) {
+    player.setPlaybackRate(1)
+    speedMode.value = 'device'
+    // 只有确实让设备加速过才需要复位，否则又是一条可能把流打死的指令
+    if (deviceRate !== 1) {
+      deviceRate = 1
+      await control('scale', { scale: 1 })
+    }
     return
   }
-  if (rate <= 1) {
-    clearRateWatch()
+
+  if (speedUnsupported.has(speedKey())) {
+    startJumpSpeed()
     return
   }
-  watchRateEffect(rate)
+
+  await control('scale', { scale: rate })
+  const startBuffer = player.bufferEnd()
+  const startAt = Date.now()
+  rateWatchTimer = setTimeout(() => {
+    rateWatchTimer = null
+    if (playRate.value !== rate) return
+    const elapsed = (Date.now() - startAt) / 1000
+    const advanced = player.bufferEnd() - startBuffer
+    if (advanced >= elapsed * rate * 0.6) {
+      deviceRate = rate
+      player.setPlaybackRate(rate)
+      speedMode.value = 'device'
+      return
+    }
+    markSpeedUnsupported()
+    deviceRate = 1
+    ElMessage.warning('该设备不支持信令变速，改用跳播快进（画面按段向前跳）')
+    startJumpSpeed()
+  }, 4000)
+}
+
+/** 当前倍速的实现方式：{@code device} = 设备侧 Scale，{@code jump} = 本地跳播。 */
+const speedMode = ref('device')
+
+/** 最近一次成功下发给设备的倍速，用于判断要不要发复位指令。 */
+let deviceRate = 1
+
+/** 变速失败过的通道，按「设备/通道」记在本地，避免每次重试都把流打死。 */
+const SPEED_UNSUPPORTED_KEY = 'gb.playback.speedUnsupported'
+
+function loadSpeedUnsupported() {
+  try {
+    const raw = localStorage.getItem(SPEED_UNSUPPORTED_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch (e) {
+    return []
+  }
+}
+
+const speedUnsupported = new Set(loadSpeedUnsupported())
+
+function speedKey() {
+  return `${serial.value}/${code.value}`
+}
+
+function markSpeedUnsupported() {
+  speedUnsupported.add(speedKey())
+  try {
+    localStorage.setItem(SPEED_UNSUPPORTED_KEY, JSON.stringify([...speedUnsupported]))
+  } catch (e) {
+    // 隐私模式禁写：本次会话内记住就够了
+  }
+}
+
+/** 跳播快进的定时器句柄。 */
+let jumpTimer = null
+
+/**
+ * 跳播快进：用<b>已验证可用</b>的 npt 定位，每隔一会儿把播放点往前推一段。
+ *
+ * <p>这台设备支持原地 npt 跳转却不支持 {@code Scale}，
+ * 于是「快放」只能用「连续跳播」模拟：2 倍速 = 每 2 秒墙钟跳 +4 秒。
+ * 跳完那一小段停顿由播放器的空洞跨越吃掉，观感接近快速翻看。
+ */
+function startJumpSpeed() {
+  clearJumpTimer()
+  speedMode.value = 'jump'
+  player.setPlaybackRate(1)
+  const STEP_MS = 2000
+  jumpTimer = setInterval(async () => {
+    if (!current.value) return
+    if (playRate.value === 1) {
+      clearJumpTimer()
+      speedMode.value = 'device'
+      return
+    }
+    const next = Math.floor((player.position.value || 0) + (playRate.value * STEP_MS) / 1000)
+    const duration = Number(segmentSeconds.value) || 0
+    if (duration > 0 && next >= duration - 2) {
+      // 到段尾：交回正常播放/切段逻辑，别把设备跳到越界位置
+      clearJumpTimer()
+      playRate.value = 1
+      speedMode.value = 'device'
+      ElMessage.info('已到本段末尾')
+      return
+    }
+    try {
+      await playbackApi.control({
+        streamid: playbackKey.value,
+        serial: serial.value,
+        code: code.value,
+        command: 'seek',
+        range: next
+      })
+      positionOffset.value = Math.max(0, next - (player.position.value || 0))
+    } catch (e) {
+      clearJumpTimer()
+      playRate.value = 1
+      speedMode.value = 'device'
+      ElMessage.warning(e.message || '跳播快进失败，已恢复 1 倍速')
+    }
+  }, STEP_MS)
+}
+
+function clearJumpTimer() {
+  if (jumpTimer) {
+    clearInterval(jumpTimer)
+    jumpTimer = null
+  }
 }
 
 /** 倍速生效性检查的定时器。 */
@@ -1383,29 +1546,7 @@ function clearRateWatch() {
     clearTimeout(rateWatchTimer)
     rateWatchTimer = null
   }
-}
-
-/**
- * 3 秒后抽样：本地 2 倍速下媒体时间应走 ~2×3=6 秒。
- * 不足期望的 60% 说明数据供不上（设备没跟着加速），退回 1 倍速。
- */
-function watchRateEffect(rate) {
-  clearRateWatch()
-  const startPos = player.position.value || 0
-  const startAt = Date.now()
-  rateWatchTimer = setTimeout(() => {
-    rateWatchTimer = null
-    const elapsed = (Date.now() - startAt) / 1000
-    const advanced = (player.position.value || 0) - startPos
-    if (elapsed <= 0) return
-    if (advanced < elapsed * rate * 0.6) {
-      playRate.value = 1
-      // setPlaybackRate 会触发 ratechange → vod.onRate → 发一次 Scale(1)，
-      // 不再单独补发，否则同一条指令会发两遍
-      player.setPlaybackRate(1)
-      ElMessage.warning('该设备不支持回放倍速，已恢复 1 倍速（画面会继续正常播放）')
-    }
-  }, 3000)
+  clearJumpTimer()
 }
 
 /**
@@ -1545,6 +1686,7 @@ onUnmounted(() => {
     seekTimer = null
   }
   pendingSeek = null
+  clearSeeking()
   /*
    * 离开页面必须释放设备侧的会话。
    *
@@ -1800,6 +1942,39 @@ onUnmounted(() => {
   color: #fff;
   font-size: 14px;
   pointer-events: none;
+}
+
+/*
+ * 「定位中…」提示。
+ *
+ * <p>国标定位是发指令让<b>设备</b>跳，平台这边只是等新数据 ——
+ * 那 1~2 秒画面纹丝不动，不解释一下就会被当成「卡死/要重连」。
+ */
+.pb-seeking {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 10px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
+}
+
+/* 倍速降级提示：只占文字宽度，别把工具栏撑开 */
+.pb-speed-hint {
+  margin-left: 6px;
+  padding: 0 6px;
+  height: 22px;
+  line-height: 22px;
+  border: 1px solid #e6a23c;
+  border-radius: 3px;
+  color: #b88230;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* ==================== 时间轴（1:1 对齐 CMS） ==================== */

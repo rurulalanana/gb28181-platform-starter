@@ -529,10 +529,23 @@ export function useLivePlayer(containerRef, hooks = {}) {
   function bindMediaEvents(opts) {
     clearUnsubs()
     if (!engine) return
+    /** 用于识别媒体时间轴的突变（设备 npt 跳转后 PTS 会整段前移）。 */
+    let lastPos = null
     unsubs.push(
       engine.on('timeupdate', () => {
         if (disposed) return
-        position.value = engine.currentTime()
+        const cur = engine.currentTime()
+        const prev = lastPos
+        lastPos = cur
+        /*
+         * 时间轴突变：设备跳转后新数据的 PTS 从另一处开始，媒体时间轴会
+         * 「瞬移」。此时进度显示必须跟着重新对齐，否则段内位置会被算两次
+         * （一次是本地乐观挪动，一次是媒体时间自己跳）。
+         */
+        if (prev !== null && Number.isFinite(cur) && Math.abs(cur - prev) > 3) {
+          if (opts.vod && typeof opts.vod.onJump === 'function') opts.vod.onJump(cur - prev)
+        }
+        position.value = cur
       })
     )
     unsubs.push(
@@ -581,9 +594,16 @@ export function useLivePlayer(containerRef, hooks = {}) {
      * {@code seeking} 事件 —— 所以监听事件，而不是覆写方法。
      */
     let seekTarget = null
+    /**
+     * 抑制窗口：本文件自己改 {@code currentTime} 时会触发 {@code seeking}，
+     * 不拦下来就会把它当成用户拖动、再给设备发一条 npt 指令 ——
+     * 设备又跳一次，形成「自己拖自己」的死循环。
+     */
+    let suppressUntil = 0
     unsubs.push(
       engine.on('seeking', () => {
         if (disposed) return
+        if (Date.now() < suppressUntil) return
         const p = engine.vjsPlayer()
         const t = p && typeof p.currentTime === 'function' ? p.currentTime() : 0
         const target = Math.max(0, Math.min(Number(vod.duration) || 0, Number(t) || 0))
@@ -599,6 +619,48 @@ export function useLivePlayer(containerRef, hooks = {}) {
       engine.on('seeked', () => {
         if (disposed || seekTarget === null) return
         seekTarget = null
+      })
+    )
+
+    /*
+     * 跨过定位造成的「缓冲空洞」。
+     *
+     * <p>设备执行 npt 跳转后，新推上来的 RTP 里 PTS 落在另一处 —— FLV 的
+     * 时间戳跟着跳，MSE 里就<b>不会再是一段连续缓冲</b>：旧位置那段画完就
+     * 断档，新数据从远端开始。播放点停在旧数据末尾，浏览器<b>不会自己跨过
+     * 空洞</b>，只会一直 waiting，看起来就是「拖完进度条画面卡死」，
+     * 进而被上层判成需要重连拉流 —— 用户看到的正是「重新播流」。
+     *
+     * <p>这里在停滞时把播放点挪到下一段已缓冲数据的起点：等价于播放器自己
+     * 跨过空洞，WebSocket 与媒体源全程不重建。
+     */
+    const GAP_TOLERANCE = 0.4
+    const skipBufferGap = () => {
+      const media = engine && engine.videoEl
+      if (!media || disposed) return false
+      const b = media.buffered
+      if (!b || b.length === 0) return false
+      const ct = media.currentTime
+      for (let i = 0; i < b.length; i++) {
+        const start = b.start(i)
+        if (ct + GAP_TOLERANCE < start) {
+          suppressUntil = Date.now() + 200
+          try {
+            media.currentTime = start + 0.05
+          } catch (e) {
+            return false
+          }
+          return true
+        }
+        if (ct <= b.end(i) + GAP_TOLERANCE) return false
+      }
+      return false
+    }
+    const gapTimer = setInterval(skipBufferGap, 500)
+    unsubs.push(() => clearInterval(gapTimer))
+    unsubs.push(
+      engine.on('waiting', () => {
+        if (!disposed) skipBufferGap()
       })
     )
 
@@ -688,6 +750,21 @@ export function useLivePlayer(containerRef, hooks = {}) {
     } catch (e) {
       return false
     }
+  }
+
+  /**
+   * 已缓冲数据的末尾（媒体时间轴上的秒数）。
+   *
+   * <p><b>它是设备真实推送速率的唯一可靠判据</b>：{@code position}（媒体当前
+   * 时间）在缓冲富余时总是按本地速率走，设备加没加速都看不出来；
+   * 而缓冲末尾只随「收到的数据量」前进。
+   *
+   * @returns {number} 无缓冲时返回 0
+   */
+  function bufferEnd() {
+    const media = engine && engine.videoEl
+    const b = media && media.buffered
+    return b && b.length ? b.end(b.length - 1) : 0
   }
 
   /** 用户是否已经开始看（起播后才有资格上报暂停/继续）。 */
@@ -826,6 +903,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     videoInfo,
     position,
     setPlaybackRate,
+    bufferEnd,
     play,
     playFile,
     stop,
