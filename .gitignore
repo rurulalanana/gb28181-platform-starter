@@ -31,6 +31,13 @@ src/main/resources/application-*.local.yaml
 # Playwright 排障脚本（本地临时目录，不入库）
 .tmp-*/
 
+# ============ 本地临时草稿（严禁入库） ============
+# 提交信息草稿（.cm3~.cm7、.commitmsg、.commitmsg2 等）曾被 git add -A 误带进
+# 仓库根目录。写提交信息请落到仓库外的临时路径（$env:TEMP），不要放在工作区：
+#   PowerShell 的 --amend、git status 都会被这些文件干扰。
+/.cm*
+/.commitmsg*
+
 # AI 工具配置（skill 包，随工具版本变化，不是项目代码）
 .agents/
 
