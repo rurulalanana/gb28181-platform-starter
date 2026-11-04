@@ -44,12 +44,32 @@ public class DahuaConfiguration {
         return new DahuaDeviceAccessProvider(props.getRtspPort(), props.getChannelTotal());
     }
 
-    /** 设备主动注册表（SERVER 模式的会话地址表），只在开启 SERVER 模式时创建。 */
+    /**
+     * 设备主动注册表（SERVER 模式的会话地址表）。
+     *
+     * <h3>⚠️ 这个 bean 必须无条件创建，不能加 {@code @ConditionalOnProperty}</h3>
+     * 早期它跟着 {@code server-mode.enabled} 一起是条件的，结果
+     * {@code DahuaController} 的构造参数里有它 —— <b>关掉 SERVER 模式的部署直接启动失败</b>：
+     * <pre>
+     * UnsatisfiedDependencyException: Error creating bean with name 'dahuaController'
+     *   ... No qualifying bean of type 'DahuaRegisterTable' available
+     * </pre>
+     * 本地一直带 {@code --dahua.server-mode.enabled=true} 启动，所以开发期完全看不到；
+     * 线上（server profile，未开 SERVER 模式）一部署就起不来。实测踩过。
+     *
+     * <p>它本身只是一个内存 {@code ConcurrentHashMap}：不开端口、不起线程、
+     * 不碰数据库，无条件创建的成本是零。反过来，无条件创建能让
+     * {@code /dahua/register/*} 这几个接口在未开 SERVER 模式时返回空列表，
+     * 而不是 500 或让整个应用起不来。
+     *
+     * <p>需要跟着条件走的只有真正有副作用的两个：
+     * {@link #dahuaRegisterListener}（占端口）和 {@link #dahuaAutoProvisionRunner}（写库）。
+     */
     @Bean
-    @ConditionalOnProperty(prefix = "dahua.server-mode", name = "enabled", havingValue = "true")
     public DahuaRegisterTable dahuaRegisterTable(DahuaProperties props) {
         long expireMs = props.getServerMode().getExpireSeconds() * 1000L;
-        log.info("大华主动注册表: 失效阈值 {} 秒", expireMs / 1000);
+        log.info("大华主动注册表: 失效阈值 {} 秒（SERVER 模式{}）", expireMs / 1000,
+                props.getServerMode().isEnabled() ? "已启用" : "未启用，仅登记内存不监听端口");
         return new DahuaRegisterTable(expireMs);
     }
 
