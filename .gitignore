@@ -7,6 +7,19 @@ record/
 hs_err_pid*.log
 replay_pid*.log
 
+# 本地运行日志：体积大、含设备 IP 与调试细节，一律不入库。
+# start-local.bat 写 local-run.log，start-platform.bat 写 ../gb28181-local.log（在仓库外）。
+local-run*.log
+local-run.err
+local-run.err.log
+gb28181-local.log
+
+# 大华设备联调草稿：抓包转储、配置项 dump、一次性探测脚本。
+# 这些是排障过程产物，不是项目代码。
+/_*.txt
+/_*.py
+/a[0-9].py
+
 # 前端：依赖与构建中间产物（构建产物进 src/main/resources/static，需要入库）
 frontend/node_modules/
 frontend/dist/

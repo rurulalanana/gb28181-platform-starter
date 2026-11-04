@@ -68,6 +68,13 @@ def is_placeholder(value: str, quoted: bool = False) -> bool:
     # ${ENV_VAR} 占位
     if v.startswith("${") or v.startswith("$"):
         return True
+    # cmd/bat 的 %ENV_VAR% 引用
+    #
+    # 少了这条，`--spring.datasource.password=%GB_DB_PASSWORD%` 会被当成明文：
+    # 去掉 % 之后的 GB_DB_PASSWORD 本来就命中下面的全大写规则，但带 % 就对不上
+    # 任何一条，于是报成硬编码 —— 而这恰恰是「改对了」的写法。
+    if re.fullmatch(r"%[A-Za-z_][A-Za-z0-9_]*%", v):
+        return True
     # *** / xxx 之类的掩码
     if set(v) <= {"*", "x", "X", "#"}:
         return True
