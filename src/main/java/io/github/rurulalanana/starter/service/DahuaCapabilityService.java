@@ -61,7 +61,13 @@ public class DahuaCapabilityService {
     /**
      * 取一台大华设备已登录的会话。
      *
-     * @param deviceId 设备编号（{@code gb_device.device_id}）
+     * <h3>优先用主动注册会话</h3>
+     * 设备主动注册上来时，平台已经在<b>那条连接</b>上登录过
+     * （{@code DahuaConfiguration#serverLoginHandler}），会话就在内存里。
+     * 必须先查它，原因见 {@link #sessionOrDirect} 的注释：
+     * NAT 之后的设备用建档地址（服务端口 37777）直连是<b>不可达</b>的。
+     *
+     * @param deviceId 设备编号（{@code gb_device.device_id}，大华即序列号）
      * @return 会话；设备不是大华、或登录失败时为空
      */
     public Optional<DahuaSdk.Session> session(String deviceId) {
@@ -69,27 +75,38 @@ public class DahuaCapabilityService {
         if (d == null) {
             return Optional.empty();
         }
-        String host = d.getRemoteIp();
-        int port = d.getRemotePort() == null ? 0 : d.getRemotePort();
-        if (host == null || host.isBlank() || port <= 0) {
-            return Optional.empty();
-        }
         DahuaSdk sdk = DahuaSdk.get();
         if (!sdk.init()) {
             log.debug("大华 SDK 不可用: {}", sdk.loadError());
             return Optional.empty();
         }
-        /*
-         * 用 CLIENT 模式登录，与云台链路完全一致。
-         *
-         * 主动注册设备虽然当初是设备连上来的，但平台侧已经把它当时的 IP
-         * 与 SDK 端口写进了 gb_device（见 DahuaAutoProvisionRunner）。
-         * 有明确地址时 CLIENT 模式最直接；换成 SERVER 模式反而要依赖
-         * 内存注册表，进程重启后那份表是空的，接口会全挂。
-         */
-        DahuaSdk.Session s = sdk.session(host, port, d.getUsername(), d.getPassword(),
+        // 主动注册会话优先：只查内存 map，不发起网络请求
+        DahuaSdk.Session live = sdk.sessionBySerial(d.getDeviceId());
+        if (live != null && live.valid()) {
+            return Optional.of(live);
+        }
+        return Optional.ofNullable(sessionOrDirect(sdk, d));
+    }
+
+    /**
+     * 没有主动注册会话时的退路：按建档地址直连。
+     *
+     * <p>适用于局域网直连部署（设备地址从平台可达），以及主动注册暂时掉线
+     * 但设备本身仍在线的情况。
+     *
+     * <p><b>为什么不做成默认路径</b>：{@code gb_device.remote_port} 存的是
+     * 纳管时按配置写的<b>设备服务端口</b>（大华默认 37777）。设备在 NAT/4G 之后时
+     * 这个端口从平台侧不可达，直连必然以错误码 9 失败 ——
+     * 实测线上表现是「主动注册成功、也纳管了，但没有通道，随后离线」。
+     */
+    private DahuaSdk.Session sessionOrDirect(DahuaSdk sdk, GbDevice d) {
+        String host = d.getRemoteIp();
+        int port = d.getRemotePort() == null ? 0 : d.getRemotePort();
+        if (host == null || host.isBlank() || port <= 0) {
+            return null;
+        }
+        return sdk.session(host, port, d.getUsername(), d.getPassword(),
                 ConnectMode.CLIENT, null);
-        return Optional.ofNullable(s);
     }
 
     /** 查设备记录，并确认它确实是大华接入。 */

@@ -229,15 +229,55 @@ public class DeviceProvisionService {
         return online;
     }
 
-    /** 设备记录 → 接入上下文。 */
+    /**
+     * 设备记录 → 接入上下文。
+     *
+     * <h3>大华设备：此刻有主动注册会话时，必须走 SERVER 模式</h3>
+     * {@code gb_device.remote_ip/remote_port} 存的是纳管时按配置写的
+     * <b>设备服务端口</b>（大华默认 37777）。设备位于 NAT / 4G 之后时，
+     * 这个端口从平台侧<b>不可达</b>，直连必然失败 —— 实测线上表现就是
+     * 「主动注册上来了、也纳管了，但没有通道，随后变离线」：
+     * <pre>
+     *   00:00:23  大华设备登录成功: 111.198.60.180:15178（主动注册 SN=10001）  ← 真正可用的连接
+     *   00:01:42  大华设备登录失败: 111.198.60.180:37777 错误码=9              ← 拿建档地址直连
+     * </pre>
+     *
+     * <p>而设备主动注册时，平台已经在<b>那条连接</b>上登录过
+     * （见 {@code DahuaConfiguration#serverLoginHandler}），会话就在内存里。
+     * 所以这里只要判断「该 SN 当前是否有会话」：
+     * <ul>
+     *   <li>有 → SERVER 模式，让 {@code DahuaSdk.serverSession} 复用那条连接；</li>
+     *   <li>没有（局域网直连部署，或主动注册已断开）→ CLIENT 模式，按配置地址直连。</li>
+     * </ul>
+     *
+     * <p>不在 {@code gb_device} 上加 {@code connectMode} 列：那样只能记下
+     * 「纳管时的方式」，而设备换网、主动注册掉线重连之后这个静态值会过期。
+     * 用<b>实时会话</b>判断永远反映当下，且不需要迁移表结构。
+     */
     private static DeviceContext contextOf(GbDevice d) {
-        return new DeviceContext(
-                d.getDeviceId(),
+        int channelTotal = d.getChannelCount() == null ? 0 : d.getChannelCount();
+        if (DeviceKind.of(d.getSource()) == DeviceKind.DAHUA) {
+            /*
+             * sessionBySerial 只查内存 map，不触发 SDK 初始化、不发起网络请求，
+             * 因此在巡检线程里调用是安全的（不会拉长探测周期）。
+             */
+            io.github.rurulalanana.dahua.internal.DahuaSdk.Session live =
+                    io.github.rurulalanana.dahua.internal.DahuaSdk.get()
+                            .sessionBySerial(d.getDeviceId());
+            if (live != null && live.valid()) {
+                return new DeviceContext(d.getDeviceId(),
+                        live.host(), live.port(),
+                        d.getUsername(), d.getPassword(),
+                        io.github.rurulalanana.deviceaccess.ConnectMode.SERVER,
+                        d.getDeviceId(), channelTotal);
+            }
+        }
+        return new DeviceContext(d.getDeviceId(),
                 d.getRemoteIp(),
                 d.getRemotePort() == null ? 0 : d.getRemotePort(),
                 d.getUsername(),
                 d.getPassword(),
-                d.getChannelCount() == null ? 0 : d.getChannelCount());
+                channelTotal);
     }
 
     private static String trimToNull(String s) {
