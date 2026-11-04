@@ -19,6 +19,17 @@ gb28181-local.log
 /_*.txt
 /_*.py
 /a[0-9].py
+diag.ps1
+
+# Python 字节码（scripts/ 下跑过 py 就会生成）
+__pycache__/
+*.pyc
+
+# ============ 标准正文（严禁入库） ============
+# GB/T 28181 是国家标准正文，受版权保护，公开仓库不得分发。
+# 需要时请自行从标准发布渠道获取，放在本目录下仅供本地查阅。
+docs/GBT*.pdf
+docs/GB*28181*.pdf
 
 # 前端：依赖与构建中间产物（构建产物进 src/main/resources/static，需要入库）
 frontend/node_modules/

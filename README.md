@@ -123,6 +123,10 @@ npm run build   # 构建产物输出到 src/main/resources/static/，随 jar 一
 
 - **鉴权**：`POST /api/v1/login` 拿 token，之后所有请求带 `Authorization: <token>`。
   在文档页右上角 **Authorize** 填一次即可试调。
+- **登录验证码**：浏览器登录要拖一次滑块（tianai-captcha）；**机器调用拖不了滑块**，
+  所以每个账号可自己生成一把 **API 密钥**（「设置 → 账号安全 → API 密钥」），
+  登录时把它放进请求头 `X-Api-Key` 即可免密码、免验证码。
+  密钥明文只在生成时显示一次（库里只存 SHA-256），可随时重新生成或撤销，撤销后立即失效。
 - **分组**：`business` 是业务平台常用的 120 个接口（设备/通道/点播/录像/报警/云台）；
   `public` 是免登录的分享与鉴权接口；`system` 是账号/权限/配置等管理接口。
 - **注解来源**：接口摘要取自每个 Controller 方法的 Javadoc 首句
@@ -156,7 +160,7 @@ gb28181:
 
 | 分类 | 路径 | 说明 |
 |---|---|---|
-| **系统** | `POST /api/v1/login` | 登录（body：`username`/`password`/`urlTokenOnly`），返回 `token` |
+| **系统** | `POST /api/v1/login` | 登录（body：`username`/`password`/`captchaId`/`urlTokenOnly`）；机器调用改带 `X-Api-Key` 头（免密码免验证码），返回 `token` |
 | | `GET /api/v1/logout` | 注销 |
 | | `GET /api/v1/userinfo` | 当前用户 |
 | | `POST /api/v1/modifypassword` | 改密（改后旧 token 失效） |
@@ -193,7 +197,7 @@ gb28181:
 | | `POST /api/v1/cloudrecord/remove` `/removechannel` `/removedaily` `/setimportant` | 管理 |
 | **实时录像** | `POST /api/v1/record/start` `/stop`，`GET /api/v1/record/list` | 平台侧录像 |
 | **设备控制** | `POST /api/v1/control/ptz` `/fi` `/preset` `/homeposition` `/navigate` | 云台 |
-| | `POST /api/v1/control/dragzoomin` `/dragzoomout` `/ptzprecise` | 云台扩展 |
+| | `POST /api/v1/control/dragzoomin` `/dragzoomout` `/ptzprecise` | 云台扩展（拉框为 2022 版独立 XML 元素） |
 | | `POST /api/v1/control/wiper` `/filllight` `/teleboot` `/record` `/guard` `/iframe` | 设备动作 |
 | | `POST /api/v1/control/alarmnotify` `/alarmreset` | 报警 |
 | | `POST /api/v1/control/deviceconfig` `/devicesubscribe` `/talk` | 配置/订阅/喊话 |
