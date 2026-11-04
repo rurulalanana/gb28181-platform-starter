@@ -29,28 +29,11 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * 菜单结构（目录 / 菜单 / 按钮三层，对应表 {@code gb_menu}）。
- *
- * <h3>数据来源</h3>
- *
- * <ul>
- *   <li><b>目录与菜单行</b>由前端 {@code router/routes.js} 在种子版本变化时经
- *       {@link #sync} 补写 —— 组件是构建产物（{@code views/Xxx.vue}），
- *       清单只有前端知道，后端内置一份必然漂移；</li>
- *   <li><b>按钮行</b>由 {@link #seedButtons} 按 {@link Permissions} 清单补写，
- *       权限标识是后端常量，前端无从得知。</li>
- * </ul>
- *
- * <p>两边都用 {@code gb_menu_seed} 记版本：<b>只有版本变了才补写</b>。
- * 这是「运维删掉的菜单不会每次重启又冒出来」的关键 ——
- * 若改成无条件补写，删除功能就等于装饰。
- *
- * <h3>权限边界</h3>
- *
- * <p>本表决定「显示什么」，但<b>不决定「谁有权看」之外的东西</b>：
- * 路由守卫与后端 {@code WritePermissionInterceptor} 仍然按菜单行上的
- * {@code perms} 做事，接口是否放行永远由后端 Redis/DB 里的角色权限决定。
- * 也就是说，把菜单停用只是「藏起来」，不能当成授权手段。
+ * 菜单结构（目录 / 菜单 / 按钮三层，表 {@code gb_menu}）。
+ * 目录与菜单行由前端 {@code router/routes.js} 经 {@link #sync} 补写，按钮行由 {@link #seedButtons}
+ * 按 {@link Permissions} 补写（权限标识是后端常量）；两边都用 {@code gb_menu_seed} 记版本，
+ * 只版本变了才补写，否则运维删掉的菜单每次重启又冒出来。
+ * 本表只决定显示什么，不是授权手段。
  */
 @Slf4j
 @Service
@@ -70,23 +53,13 @@ public class MenuService {
     private static final String SEED_STRUCTURE = "structure";
     private static final String SEED_BUTTONS = "buttons";
 
-    /**
-     * 权限标识 → 菜单键的精确映射（覆盖「模块同名菜单管不到」的少数情况）。
-     *
-     * <p>默认规则依次是：{@code 模块名 == 菜单键} → {@code 模块名 + s}（device → devices）
-     * → {@link #MODULE_MENU} 显式覆盖 → 「菜单行 perms 的模块前缀」。
-     */
+    /** 权限标识 → 菜单键的精确映射（默认规则：模块名 == 菜单键 → 模块名 + s → {@link #MODULE_MENU} → perms 前缀）。 */
     private static final Map<String, String> CODE_MENU = Map.of(
             // 设备录像挂在 playback 页，实时点播在 live 页 —— 两者同属 play 模块
             "play:record", "playback"
     );
 
-    /**
-     * 模块 → 菜单键的显式覆盖（优先于「按 perms 前缀猜」）。
-     *
-     * <p>按前缀猜会命中「排序更靠前」的同前缀菜单，容易挂错页面，
-     * 语义明确的几个直接写死。
-     */
+    /** 模块 → 菜单键的显式覆盖：按前缀猜会命中排序更靠前的同前缀菜单，容易挂错页面。 */
     private static final Map<String, String> MODULE_MENU = Map.of(
             // 系统类权限属于「系统设置」，而不是排序更靠前的「菜单管理」
             "system", "settings",
@@ -117,11 +90,8 @@ public class MenuService {
     }
 
     /**
-     * 补齐缺失的目录/菜单行（版本一致时是空操作）。
-     *
-     * <p>已有行<b>只补空列</b>，绝不覆盖：运维改过的名称、图标、排序、
-     * 甚至挪过的分组都要保留；老版本库里的行缺 {@code path/component/perms}
-     * 这几列，正好由这次补写完成升级。
+     * 补齐缺失的目录 / 菜单行（版本一致时是空操作）。已有行只补空列，绝不覆盖：
+     * 运维改过的名称、图标、排序都要保留；老库缺 {@code path/component/perms} 正好由这次补写升级。
      *
      * @return 新插入的行数
      */
@@ -166,15 +136,10 @@ public class MenuService {
     }
 
     /**
-     * 启动时补齐按钮行。
-     *
-     * <p>按钮是<b>后端权限清单的投影</b>，不能依赖前端来触发同步：
-     * 前端只在「菜单结构版本变化」时才 POST {@code /menu/sync}，
-     * 而新增一个权限点时菜单结构并没有变，按钮就永远不会出现。
-     *
-     * <p>监听 {@code ApplicationReadyEvent} 而不是 {@code @PostConstruct}：
-     * 表结构由 {@code SchemaInitializer} 的 ApplicationRunner 建，
-     * 那个时点之后表才一定存在。
+     * 启动时补齐按钮行。按钮是后端权限清单的投影，不能靠前端触发：前端只在菜单结构版本变化时
+     * POST {@code /menu/sync}，而新增权限点并不改变菜单结构。
+     * 监听 {@code ApplicationReadyEvent} 而非 {@code @PostConstruct}：表由
+     * {@code SchemaInitializer} 的 ApplicationRunner 建，之后才一定存在。
      */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
@@ -266,7 +231,7 @@ public class MenuService {
     /**
      * 删除一个节点。
      *
-     * @param cascade 是否连同全部下级一起删除（目录连带菜单、菜单连带按钮）
+     * @param cascade 是否连同全部下级一起删除
      * @return 实际删除的行数
      */
     @Transactional
@@ -307,11 +272,8 @@ public class MenuService {
     }
 
     /**
-     * 按 {@link Permissions} 清单补齐按钮行。
-     *
-     * <p>权限标识是后端常量，前端无从得知，所以按钮只能在后端种。
-     * 版本号取「条目数 + 全部编码的哈希」：增删权限点或改名都会触发一次补写，
-     * 但平时重启不会把运维删掉的按钮种回来。
+     * 按 {@link Permissions} 清单补齐按钮行。版本号取「条目数 + 全部编码的哈希」，
+     * 增删权限点或改名会触发补写，平时重启不会把运维删掉的按钮种回来。
      */
     @Transactional
     public int seedButtons() {
@@ -415,10 +377,8 @@ public class MenuService {
     }
 
     /**
-     * 用种子补齐已存在行的空列。
-     *
-     * <p>只填 {@code null}：老版本库里存的是运维改过的名称/图标/排序，
-     * 被种子覆盖一次就等于把他们的配置全抹了。
+     * 用种子补齐已存在行的空列。只填 {@code null}：老库里存的是运维改过的名称 / 图标 / 排序，
+     * 被种子覆盖一次等于把他们的配置全抹了。
      *
      * @return 是否需要写回
      */

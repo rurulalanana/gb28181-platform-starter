@@ -20,6 +20,9 @@ import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.mapper.GbStreamMapper;
 import io.github.rurulalanana.starter.vo.StreamListVo;
 import io.github.rurulalanana.starter.vo.StreamVo;
+import io.github.rurulalanana.deviceaccess.DeviceAccessProvider;
+import io.github.rurulalanana.deviceaccess.DeviceContext;
+import io.github.rurulalanana.deviceaccess.DeviceKind;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,14 +32,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 直播流与回放流的生命周期管理。
- *
- * <p>把 ZLM 的 {@link RtpSession} 与数据库 {@code gb_stream} 表双向同步：
- * <ul>
- *   <li>发起点播 / 回放时落库（状态 {@code NEGOTIATING}）</li>
- *   <li>ZLM 流上线回调时置 {@code ONLINE}</li>
- *   <li>停止 / BYE / 流下线时置 {@code CLOSED}</li>
- * </ul>
+ * 直播流与回放流的生命周期管理：把 ZLM 的 {@link RtpSession} 与 {@code gb_stream} 表双向同步。
+ * 点播 / 回放时落库（{@code NEGOTIATING}），流上线置 {@code ONLINE}，停止 / BYE / 流下线置 {@code CLOSED}。
  */
 @Slf4j
 @Service
@@ -51,21 +48,40 @@ public class StreamService {
 
     /**
      * 「此刻是否应该录」的权威判定（用户开关 ∪ 录像计划）。
-     *
-     * <p>空闲流回收必须用它而不是直接读 {@code gb_channel.cloud_record}：
-     * 录像计划不再写库，只读库会看不到计划生效的通道，导致计划刚开录、
-     * 流就被当成「无读者」回收掉。
+     * 空闲流回收不能直接读 {@code gb_channel.cloud_record}：录像计划不写库，
+     * 只读库会把「计划刚开录」的流当成无读者回收掉。
      */
     private final ChannelRecordPolicy recordPolicy;
+
+    /**
+     * 各通道上一次点播用的码流编号。
+     *
+     * <p><b>为什么需要单独记</b>：码流编号是 INVITE 时写进 SSRC 后 4 位的，
+     * 而 {@code AUTO} 模式下这 4 位是域内自增序号 —— 光看会话的 SSRC
+     * 无法反推出「用户当时要的是哪一路码流」。不记的话，
+     * 从子码流切回主码流会命中复用分支，画面还是子码流，且不报任何错。
+     *
+     * <p>只存内存：会话本身也在内存（{@code RtpSessionManager}），
+     * 进程重启后两者一起丢，不存在不一致。
+     */
+    private final java.util.Map<String, Integer> requestedStreams =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 码流记录的键：与 {@code gb_stream.stream_key} 同构。 */
+    private static String streamKey(String deviceId, String channel) {
+        return deviceId + "/" + channel;
+    }
+
+    /** 非国标设备的接入实现（大华 SDK 等）：点播要拿它的 RTSP 地址。 */
+    private final DeviceAccessRegistry accessRegistry;
 
     // ==================== 点播 ====================
 
     /**
      * 开始实时直播（标准 9.2）。
      *
-     * @param deviceId  设备编码（SIP 目标，全局唯一）
+     * @param deviceId  设备编码（SIP 目标）
      * @param channelId 通道编码（= ZLM 流名）；{@code null} 或与设备编码相同表示设备自身
-     * @return 流信息
      */
     public GbStream startLive(String deviceId, String channelId) {
         return startLive(deviceId, channelId, null);
@@ -74,14 +90,36 @@ public class StreamService {
     /**
      * 平台主动点播。
      *
-     * @param deviceId  设备编码
-     * @param channelId 通道编码
      * @param streamNumber 码流编号（GB/T 28181—2022 附录 G：SSRC 后 4 位）；
-     *                     {@code null} 表示按设备配置的「码流索引」取值
+     *                     {@code null} 表示按设备配置的码流索引取值
      */
     public GbStream startLive(String deviceId, String channelId, Integer streamNumber) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+
+        /*
+         * SDK 直连设备（大华等）没有 SIP 点播：它不接 INVITE、不会向平台推 RTP。
+         * 以前这里不做区分，一律走 platform.mediaService().play(...)，
+         * 结果在编码校验那一步就抛「非法的 20 位设备编码: 10001-1」——
+         * 因为大华的通道号 {@code 10001-1} 本来就不是国标 20 位编码。
+         * 这类设备必须由平台给出 RTSP 地址、让 ZLM 反向去拉（见 startSdkLive）。
+         */
+        DeviceKind kind = kindOf(deviceId);
+        if (kind != DeviceKind.GB28181) {
+            return startSdkLive(deviceId, channel, kind, streamNumber);
+        }
+
         RtpSession existing = platform.sessionManager().getByChannel(deviceId, channel);
+        if (existing != null && !streamMatches(deviceId, channel, streamNumber)) {
+            /*
+             * 用户换了码流：SSRC 后 4 位在 INVITE 时就定死了，改不了，
+             * 必须停掉旧会话重新点播。不停的话复用分支会把上一路码流的会话直接返回，
+             * 界面表现为「切了子码流但画面/带宽完全没变」，而且没有任何报错。
+             */
+            log.info("码流切换，重建点播会话: channel={} {} -> {}", channel,
+                    requestedStreams.get(streamKey(deviceId, channel)), streamNumber);
+            stop(deviceId, channel);
+            existing = platform.sessionManager().getByChannel(deviceId, channel);
+        }
         if (existing != null && isReusable(existing)) {
             // 已有点播：直接复用，避免重复 INVITE 造成设备侧抖动
             return toStream(existing, GbStream.TYPE_LIVE);
@@ -90,10 +128,9 @@ public class StreamService {
         if (ch != null && !ch.isOnline()) {
             throw BizException.badRequest("通道不在线：" + channel);
         }
-        // 没有活会话，但设备侧可能仍在推上一轮的流（下级平台收不到 BYE 会一直推）。
-        // 此时若直接发 INVITE，设备会为同一通道开第二路推流 —— 实测 LiveGBS 真的会
-        // 推第二路（每路约 3 Mbps），同一通道多点几次就攒成多路，用户看到的就是
-        // 「级联那边显示还有 N 个视频正在推送」。先把已在推的那路认领回来即可。
+        // 无活会话但设备侧可能仍在推上一轮的流（下级平台收 BYE 不停止）。
+        // 此时直接发 INVITE 会让设备为同一通道开第二路推流 —— 实测 LiveGBS 每路约 3 Mbps，
+        // 多点几次就攒成多路。先把已在推的那路认领回来。
         RtpSession adopted = platform.sessionManager().reclaimOrphanForChannel(deviceId, channel);
         if (adopted != null) {
             GbStream stream = toStream(adopted, GbStream.TYPE_LIVE);
@@ -101,11 +138,13 @@ public class StreamService {
             deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
             return stream;
         }
-        // 平台重启后 SIP 注册表为空（纯内存），而设备要到下次心跳才自愈，
-        // 空窗期内点播会报「设备未注册或会话已失效」。这里按库里的地址先补一次，
-        // 让重启后立刻点播也能成功。
+        // 平台重启后 SIP 注册表为空（纯内存），设备要到下次心跳才自愈，
+        // 空窗内点播会报「设备未注册或会话已失效」；按库里地址先补一次。
         healRegistryIfNeeded(ch);
-        RtpSession session = platform.mediaService().play(deviceId, channel, resolveStreamNumber(deviceId, streamNumber));
+        int resolvedStreamNumber = resolveStreamNumber(deviceId, streamNumber);
+        RtpSession session = platform.mediaService().play(deviceId, channel, resolvedStreamNumber);
+        // 记下本次用的码流，供下次复用判断（见 requestedStreams 注释）
+        requestedStreams.put(streamKey(deviceId, channel), resolvedStreamNumber);
         GbStream stream = toStream(session, GbStream.TYPE_LIVE);
         save(stream);
         deviceService.setChannelStream(deviceId, channel, stream.getStreamKey());
@@ -113,9 +152,23 @@ public class StreamService {
     }
 
     /**
-     * 决定本次点播用的码流编号。
+     * 已有点播会话是否就是用户这次要的码流。
      *
-     * <p>优先级：请求显式指定的 {@code streamnumber} &gt; 设备配置的「码流索引」&gt; 自动。
+     * <p>没显式指定（{@code null}/{@code <0}，即「自动」）时一律视为匹配：
+     * 「自动」不改变码流，不该因为用户重新点了同一个通道就拆会话。
+     * 没有历史记录时也返回 {@code true} —— 那意味着会话是上次进程遗留的，
+     * 按可复用处理比每次重建更安全（重建会多发一次 INVITE）。
+     */
+    private boolean streamMatches(String deviceId, String channel, Integer requested) {
+        if (requested == null || requested < 0) {
+            return true;
+        }
+        Integer last = requestedStreams.get(streamKey(deviceId, channel));
+        return last == null || last.equals(requested);
+    }
+
+    /**
+     * 决定本次点播用的码流编号：请求显式值 &gt; 设备配置的码流索引 &gt; 自动。
      * 「自动」返回 {@code -1}，由 SIP 层用域内自增序号填 SSRC 后 4 位（2016 行为）。
      */
     private int resolveStreamNumber(String deviceId, Integer requested) {
@@ -130,22 +183,187 @@ public class StreamService {
     }
 
     /**
-     * 既有会话能否直接复用给新的点播请求。
+     * SDK 直连设备的码流编号。
      *
-     * <p>判据有三条，缺一不可：
-     * <ol>
-     *   <li><b>类型必须是直播</b>：回放/下载与直播是不同会话（键带类型后缀），
-     *       但若键上残留着历史会话（如旧版本数据），复用会让「点直播」拿到回放的流。
-     *       实测过：重试点播后返回的 {@code filePath} 指向录像文件。</li>
-     *   <li><b>状态不能是 CLOSED</b>：已关闭的会话其端口与媒体源都已释放。</li>
-     *   <li><b>流必须真的在推</b>：流下线只把状态置为 {@code NEGOTIATING}
-     *       （不是 CLOSED，端口保留等待设备恢复），此时复用会拿到一个
-     *       播不出画面的死会话 —— 用户看到「点了播放没反应」。
-     *       必须问 ZLM 是否真的在收 RTP 包。</li>
-     * </ol>
+     * <p>与国标路径保持同一口径：<b>请求显式值 &gt; 设备配置的码流索引 &gt; 主码流</b>。
      *
-     * <p>不可复用时返回 false，调用方会走完整点播流程（重建会话 + INVITE），
-     * 这是恢复死会话的唯一手段。
+     * <p>区别在于「自动」的落地：国标「自动」是 SSRC 后 4 位用域内自增序号（{@code -1}），
+     * 而 RTSP 的 {@code subtype} 必须是确定值，所以「自动」回退到<b>主码流</b>（0）——
+     * 与子码流相比，主码流清晰度优先，符合「没有明确要求时给最好的画面」。
+     *
+     * <p>早期这里写死 0，导致设备上配了「子码流」也不生效，
+     * 弱网现场仍然拉主码流，白白占带宽。
+     */
+    private int resolveSdkStreamNumber(GbDevice device, Integer requested) {
+        if (requested != null && requested >= 0) {
+            return requested;
+        }
+        int configured = StreamIndex.of(device.getStreamIndex()).getStreamNumber();
+        return configured < 0 ? 0 : configured;
+    }
+
+    /**
+     * SDK 直连设备（大华等）的实时点播：由 ZLM 反向拉设备的 RTSP 流。
+     *
+     * <p><b>为什么走 RTSP 而不是 NetSDK 取码流</b>：SDK 取回来的是 PS/裸流，
+     * 平台侧得自己解封装再喂给 ZLM；而 RTSP 由 ZLM 直接拉、直接解，
+     * FLV/HLS/WebRTC 输出链路与国标设备完全一致，前端一行都不用改。
+     * 代价是设备必须开着 RTSP（大华默认开启）。
+     *
+     * <p>返回的 {@link GbStream} 不来自 {@code RtpSession}（这类设备根本没有 RTP 会话），
+     * 因此控制器会走 {@code describeStream} 分支 —— 播放地址与状态都从实体里取。
+     */
+    private GbStream startSdkLive(String deviceId, String channel,
+                                  DeviceKind kind, Integer streamNumber) {
+        GbChannel ch = deviceService.findChannel(deviceId, channel);
+        if (ch != null && !ch.isOnline()) {
+            throw BizException.badRequest("通道不在线：" + channel);
+        }
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            throw BizException.notFound("设备不存在：" + deviceId);
+        }
+        DeviceAccessProvider provider = accessRegistry.require(kind);
+        DeviceContext ctx = new DeviceContext(
+                device.getDeviceId(), device.getRemoteIp(),
+                device.getRemotePort() == null ? 0 : device.getRemotePort(),
+                device.getUsername(), device.getPassword(),
+                device.getChannelCount() == null ? 0 : device.getChannelCount());
+        if (!ctx.connectable()) {
+            throw BizException.badRequest("设备连接信息不完整（host/port/账号）：" + deviceId);
+        }
+        // 0 = 主码流；未指定时看设备配置的码流索引，与国标路径口径一致
+        int sdkStream = resolveSdkStreamNumber(device, streamNumber);
+        String url = provider.liveStreamUri(ctx, channel, sdkStream);
+        if (url == null || url.isBlank()) {
+            throw BizException.badRequest(
+                    "设备未提供拉流地址（检查 dahua.rtsp-port 与通道号）：" + channel);
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            throw BizException.badRequest("媒体服务未启动");
+        }
+        String app = deviceId;
+        if (!media.startProxy(app, channel, url, false)) {
+            throw BizException.badRequest("媒体服务拉流失败（检查设备 RTSP 是否开启）：" + url);
+        }
+
+        GbStream s = new GbStream();
+        s.setStreamKey(deviceId + "/" + channel);
+        s.setDeviceId(deviceId);
+        s.setChannelId(channel);
+        s.setStreamName(channel);
+        s.setApp(app);
+        s.setStreamType(GbStream.TYPE_LIVE);
+        // 代理拉流没有 RTP 握手，ZLM 会立刻去连设备；状态先记 NEGOTIATING，
+        // 由流上线事件改成 ONLINE（与国标路径同样的状态机）
+        s.setState(RtpSession.NEGOTIATING);
+        s.setTransport("TCP");
+        s.setStartTime(LocalDateTime.now());
+        s.setUpdateTime(LocalDateTime.now());
+        PlayUrls urls = media.playUrls(app, channel);
+        s.setHttpFlv(urls.getHttpFlv());
+        s.setWsFlv(urls.getWsFlv());
+        s.setHls(urls.getHls());
+        s.setWebrtc(urls.getWebrtc());
+        s.setRtsp(urls.getRtsp());
+        s.setRtmp(urls.getRtmp());
+        save(s);
+        deviceService.setChannelStream(deviceId, channel, s.getStreamKey());
+        log.info("SDK 设备点播已发起: {}/{} <- {}", app, channel, url.replaceAll("//[^@]*@", "//***@"));
+        return s;
+    }
+
+    /**
+     * 判定设备的接入方式。
+     *
+     * <p>查不到设备记录时按国标处理：历史上所有设备都是国标，
+     * 未知值一律保守归类（与 {@code DeviceKind.of} 的默认值一致）。
+     */
+    private DeviceKind kindOf(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return DeviceKind.GB28181;
+        }
+        GbDevice d = deviceService.findDevice(deviceId);
+        return d == null ? DeviceKind.GB28181 : DeviceKind.of(d.getSource());
+    }
+
+    /**
+     * SDK 直连设备的回放：由 ZLM 反向拉设备的 RTSP 回放流。
+     *
+     * <p>大华的 RTSP 回放地址与实时地址是**同一套语法但不同路径**：
+     * <pre>
+     *   实时  rtsp://user:pass@ip:554/cam/realmonitor?channel=1&subtype=0
+     *   回放  rtsp://user:pass@ip:554/cam/playback?channel=1&subtype=0&starttime=2026_11_02_00_00_00&endtime=2026_11_02_01_00_00
+     * </pre>
+     * 注意时间是下划线分隔且**不能带 T 与冒号**；写成国标的 ISO 格式设备会直接 401/404。
+     *
+     * <p>回放流名带 {@code _playback} 后缀：与直播共存时两者是独立媒体源，
+     * 共用流名会让后拉的那路覆盖前一路（实测表现为「点回放，实时画面被顶掉」）。
+     */
+    private GbStream startSdkPlayback(String deviceId, String channel, RecordItem item,
+                                      DeviceKind kind) {
+        if (item == null || item.getStartTime() == null || item.getEndTime() == null) {
+            throw BizException.badRequest("回放需要录像段的起止时间");
+        }
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            throw BizException.notFound("设备不存在：" + deviceId);
+        }
+        DeviceAccessProvider provider = accessRegistry.require(kind);
+        DeviceContext ctx = new DeviceContext(
+                device.getDeviceId(), device.getRemoteIp(),
+                device.getRemotePort() == null ? 0 : device.getRemotePort(),
+                device.getUsername(), device.getPassword(),
+                device.getChannelCount() == null ? 0 : device.getChannelCount());
+        if (!ctx.connectable()) {
+            throw BizException.badRequest("设备连接信息不完整（host/port/账号）：" + deviceId);
+        }
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        String url = provider.playbackStreamUri(ctx, channel,
+                sdf.format(item.getStartTime()), sdf.format(item.getEndTime()));
+        if (url == null || url.isBlank()) {
+            throw BizException.badRequest("设备未提供回放地址（检查时间格式与通道号）：" + channel);
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            throw BizException.badRequest("媒体服务未启动");
+        }
+        String app = deviceId;
+        String streamName = channel + "_playback";
+        if (!media.startProxy(app, streamName, url, false)) {
+            throw BizException.badRequest("媒体服务拉取回放流失败（检查设备是否开启 RTSP）：" + url);
+        }
+
+        GbStream s = new GbStream();
+        s.setStreamKey(deviceId + "/" + streamName);
+        s.setDeviceId(deviceId);
+        s.setChannelId(channel);
+        s.setStreamName(streamName);
+        s.setApp(app);
+        s.setStreamType(GbStream.TYPE_PLAYBACK);
+        s.setState(RtpSession.NEGOTIATING);
+        s.setTransport("TCP");
+        s.setStartTime(LocalDateTime.now());
+        s.setUpdateTime(LocalDateTime.now());
+        PlayUrls urls = media.playUrls(app, streamName);
+        s.setHttpFlv(urls.getHttpFlv());
+        s.setWsFlv(urls.getWsFlv());
+        s.setHls(urls.getHls());
+        s.setWebrtc(urls.getWebrtc());
+        s.setRtsp(urls.getRtsp());
+        s.setRtmp(urls.getRtmp());
+        save(s);
+        log.info("SDK 设备回放已发起: {}/{} <- {}", app, streamName,
+                url.replaceAll("//[^@]*@", "//***@"));
+        return s;
+    }
+
+    /**
+     * 既有会话能否直接复用给新的点播请求，三条缺一不可：
+     * 类型必须是直播（键上可能残留历史会话，实测复用后返回的 {@code filePath} 指向录像文件）；
+     * 状态不能是 CLOSED；流必须真的在推（流下线只置 NEGOTIATING 不置 CLOSED，
+     * 复用会拿到播不出画面的死会话，需问 ZLM 是否真的在收 RTP）。
      */
     private boolean isReusable(RtpSession session) {
         if (session == null || RtpSession.CLOSED.equals(session.getState())) {
@@ -163,12 +381,8 @@ public class StreamService {
     }
 
     /**
-     * 取该通道当前的实时会话（没有则返回 {@code null}）。
+     * 取该通道当前的实时会话（没有则返回 {@code null}），供云端录像保活判断是否需再点播。
      *
-     * <p>供云端录像保活判断「该不该再点播一次」用：已有会话时不必重复建流。
-     *
-     * @param deviceId  设备编码
-     * @param channelId 通道编码
      * @return 会话；不存在或已 CLOSED 时返回 {@code null}
      */
     public RtpSession liveSession(String deviceId, String channelId) {
@@ -178,10 +392,7 @@ public class StreamService {
     }
 
     /**
-     * 开始实时直播（设备直连：设备编码即通道编码）。
-     *
-     * <p>适用于直连摄像机或设备自身就是一路通道的场景；
-     * 下挂子通道请用 {@link #startLive(String, String)}。
+     * 开始实时直播（设备直连：设备编码即通道编码）。下挂子通道请用 {@link #startLive(String, String)}。
      */
     public GbStream startLive(String deviceId) {
         return startLive(deviceId, deviceId);
@@ -206,19 +417,10 @@ public class StreamService {
 
     /**
      * 开始历史回放（标准 9.8）。
-     *
-     * <p><b>必须与直播隔离</b>：回放与直播是独立会话（会话键带 {@code _playback} 后缀，
-     * ZLM 侧流名也带后缀），因此「有人看直播时另一个人点回放」不会互相顶替。
-     * 早先两者共用同一会话键，回放会走 {@code open()} 的「先关闭旧会话」分支，
-     * 把正在观看的直播踢掉（实测日志：{@code 已有会话，先关闭旧会话: type=REALTIME,
-     * state=ONLINE} 紧跟 {@code 打开收流会话: type=PLAYBACK}，观看端画面直接中断）。
-     *
-     * <p><b>同一通道的重复回放</b>：复用已在播的回放会话，避免重复 INVITE
-     * 造成设备侧抖动与重复推流。
-     *
-     * @param deviceId  设备编码（SIP 目标）
-     * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
-     * @param item      录像段（{@link RecordItem#ofFilePath} 可只带 filePath）
+     * 必须与直播隔离：两者会话键与 ZLM 流名都带 {@code _playback} 后缀，否则回放会走
+     * {@code open()} 的「先关闭旧会话」分支把正在看的直播踢掉（实测日志：
+     * {@code 已有会话，先关闭旧会话: type=REALTIME, state=ONLINE} 后画面直接中断）。
+     * 同一通道重复回放复用已在播的会话，避免重复 INVITE 造成设备抖动与重复推流。
      */
     public GbStream startPlayback(String deviceId, String channelId, RecordItem item) {
         return startPlayback(deviceId, channelId, item, 1);
@@ -226,64 +428,53 @@ public class StreamService {
 
     /**
      * 开始历史回放，可指定下载倍速。
+     * 倍速走回放：标准 9.9 的 {@code s=Download} 设备支持度很差，本平台下载复用回放链路 + 本地录制，
+     * 而 9.9.1 b) 规定倍速由 SDP 的 {@code a=downloadspeed:N} 携带，与 {@code s=} 无关。
+     * 倍速大于 1 时不能复用会话：推流速率由上一次 INVITE 的 SDP 决定，
+     * 复用会让 8 倍速静默退化成 1 倍速。
      *
-     * <p><b>倍速为什么走回放</b>：标准 9.9 的 {@code s=Download} 设备支持度很差，
-     * 本平台的「下载」复用回放链路 + 本地录制；而 9.9.1 b) 规定倍速由请求方
-     * 在 SDP 里携带（{@code a=downloadspeed:N}），与 {@code s=} 取值无关。
-     *
-     * <p><b>倍速大于 1 时不复用已有会话</b>：会话的推流速率由<b>上一次 INVITE
-     * 的 SDP</b> 决定，复用会让 8 倍速静默退化成 1 倍速 ——
-     * 用户等满一小时后才发觉得到的文件更慢，且无从判断是设备不支持还是代码没生效。
-     * 因此明确停掉旧会话后重建，并在日志里留下倍速值。
-     *
-     * @param downloadSpeed 倍速档位（设备 {@code Info/DownloadSpeed} 声明的值）；
-     *                      {@code 1} 表示按实时速度推流
+     * @param downloadSpeed 倍速档位（设备 {@code Info/DownloadSpeed} 声明的值）；{@code 1} 表示实时速度
      */
     public GbStream startPlayback(String deviceId, String channelId, RecordItem item,
                                   int downloadSpeed) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+
+        /*
+         * SDK 直连设备（大华等）的回放同样是「让 ZLM 去拉」而不是「让设备推」。
+         * 不在这里分流的话会一路走到 platform.mediaService().playback(...)，
+         * 在国标编码校验处抛「非法的 20 位设备编码」——
+         * 与实时点播踩的是同一个坑，只是回放这条更晚才发现。
+         */
+        DeviceKind playbackKind = kindOf(deviceId);
+        if (playbackKind != DeviceKind.GB28181) {
+            return startSdkPlayback(deviceId, channel, item, playbackKind);
+        }
+
         RtpSession existing = platform.sessionManager()
                 .getByChannel(deviceId, channel, MediaType.PLAYBACK);
         if (existing != null && !RtpSession.CLOSED.equals(existing.getState())) {
             /*
-             * 判断「是不是同一段录像」必须比较**会话身份**而不是 filePath：
-             * 大量设备（实测 LiveGBS、多数国产摄像机）不提供 FilePath，
-             * 只按时间段管理录像。改造前 want=null 时无条件复用，
-             * 于是点不同时间段都命中同一个卡在 NEGOTIATING 的会话 ——
-             * 界面上表现为「换时间点播毫无反应，也不报错」。
+             * 判断「是不是同一段录像」必须比较会话身份（mediaUri）而非 filePath：
+             * 大量设备（实测 LiveGBS、多数国产摄像机）不提供 FilePath，只按时间段管理录像。
+             * 无条件复用会让点不同时间段都命中同一个卡在 NEGOTIATING 的会话，界面「换时间点播毫无反应」。
              */
             String want = recordIdentity(item);
             String have = existing.getMediaUri();
             boolean same = want != null && want.equals(have);
             /*
-             * 只有**正在推流**的会话才值得复用。
-             *
-             * <p>会话对象在设备停推后仍会留在表里（状态变 OFFLINE），而它对应的
-             * ZLM 媒体源已经被摘除。此时若按「同一段就复用」返回这个僵尸会话，
-             * 播放器拿到的流永远没有数据 —— 用户看到的是「继续播放后画面不动」，
-             * 而日志里一切正常。
-             *
-             * <p>典型触发路径：暂停（发 SIP PAUSE 让设备停推）超过 ZLM 的
-             * RTP 超时（{@code RtpProcess timeout}，约 15~20 秒）后媒体源被注销，
-             * 用户再点「继续」。
+             * 只有正在推流的会话才值得复用：设备停推后会话仍在（状态 OFFLINE），但 ZLM 媒体源已被摘除，
+             * 复用这个僵尸会话会让播放器永远拿不到数据。
+             * 典型触发：暂停超过 ZLM 的 RTP 超时（{@code RtpProcess timeout}，约 15~20 秒）后再点继续。
              */
             if (same && downloadSpeed <= 1 && RtpSession.ONLINE.equals(existing.getState())) {
                 return toStream(existing, GbStream.TYPE_PLAYBACK);
             }
             /*
-             * 走到这里只剩两种意图：换一段录像，或同一段要求更高倍速。
-             * 两者都必须**销毁旧会话**（推流速率由上一次 INVITE 的 SDP 决定，
-             * 不复用就只能重建），所以把下载锁的检查放在这两条路的<b>共同入口</b>。
-             *
-             * <p><b>不能漏掉「提速」那条路</b>：它同样会 stop 掉下载中的会话。
-             * 早先只在「换段」分支里检查，前端靠按钮禁用挡住了，
-             * 但接口层不该指望调用方守规矩 —— 一个直接构造的请求就能打断下载。
-             *
-             * <p><b>键必须取自会话本身</b>（{@code existing.getSessionKey()}）
-             * 而不是在这里拼一份副本：真实规则在
-             * {@code RtpSessionManager#sessionKey}，设备编码或通道编码缺失时
-             * app 与 stream 会互相回退。自己拼的第二份实现迟早会与它算得不一样，
-             * 而算错的结果是一个永远锁不住的锁（比没有锁更糟：看着有防护）。
+             * 走到这里只剩两种意图：换一段录像，或同一段要求更高倍速，两者都必须销毁旧会话，
+             * 所以下载锁检查放在共同入口 —— 提速那条路同样会 stop 掉下载中的会话。
+             * 键必须取自 {@code existing.getSessionKey()} 而不是自己拼：真实规则在
+             * {@code RtpSessionManager#sessionKey}（编码缺失时 app/stream 会互相回退），
+             * 拼错的锁永远锁不住，比没有锁更糟。
              */
             if (isDownloadLocked(existing.getSessionKey())) {
                 throw BizException.badRequest(
@@ -294,12 +485,9 @@ public class StreamService {
                 log.info("回放需提速到 {}x，重建会话: {} {}", downloadSpeed, deviceId, channel);
             } else {
                 /*
-                 * 请求的是**另一段**录像 → 显式停掉旧会话。
-                 *
-                 * <p>不显式停会让 {@code sessionManager.open} 用新会话顶掉旧的，
-                 * 旧会话对应的 ZLM 媒体源与录制随之重置，正在跑的下载只
-                 * 得到一段只有开头几十秒的文件。用户看到的现象是
-                 * 「下载时长严重不足」，而日志里一点异常都没有。
+                 * 请求的是另一段录像 → 显式停掉旧会话。
+                 * 不显式停会让 {@code sessionManager.open} 用新会话顶掉旧的，
+                 * 旧会话对应的媒体源与录制随之重置，正在跑的下载只得到开头几十秒（实测）。
                  */
                 log.info("回放切换录像段，关闭旧会话: {} {} → {}", deviceId, channel, want);
             }
@@ -314,29 +502,16 @@ public class StreamService {
 
     /**
      * 被后台下载占用的回放会话键。
-     *
-     * <p>下载与回放共用一路回放流，而回放会话同通道只有一个。若允许
-     * 用户此时点开另一段回放，那个会话会被顶掉、下载随之断流，
-     * 产物只有开头一小段（这是「下载时长不够」最主要的原因）。
-     * 因此下载期间锁定该通道的回放会话，从源头拒绝而不是事后补救。
+     * 下载与回放共用一路回放流，而回放会话同通道只有一个：允许另开回放会把会话顶掉、下载断流，
+     * 产物只有开头一小段（这是「下载时长不够」最主要的原因），所以从源头拒绝。
      */
     private final java.util.Set<String> downloadLocks = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
      * 各会话「最近一次确认有观众」的时刻（毫秒）。
-     *
-     * <p><b>为什么不能只看一次采样</b>：{@code readerCount()} 是<b>瞬时</b>值。
-     * 实测（真机 + ws-flv 稳定观看）会出现读者数为 0 的时刻 ——
-     * 播放器重连的几百毫秒间隙、{@code SourceBuffer} 写入阻塞期间
-     * 浏览器暂停读取、以及 ZLM 多个协议源之间的状态瞬时不一致，
-     * 任何一次采样为 0 就直接关流，用户看到的是
-     * 「画面好好的，服务端把流关了」→ 前端重连 → 重新缓冲 → 反复 loop。
-     *
-     * <p>所以改成：读者数 &gt; 0 时记录时间戳；只有「连续 {@code grace} 毫秒
-     * 都看不到观众」才关。这样单次抖动会被下一次采样自动抹平，
-     * 而真正没人看的流最迟 {@code 2 × grace} 后仍会被回收。
-     *
-     * <p>会话结束时清理对应条目（见 {@link #forgetViewers}），避免长期占用内存。
+     * {@code readerCount()} 是瞬时值：播放器重连的几百毫秒间隙、SourceBuffer 写入阻塞、
+     * ZLM 多协议源瞬时不一致都会读到 0，只看一次采样就会把正在看的流关掉（前端反复重连、重新缓冲）。
+     * 因此只在读者数 &gt; 0 时记时间戳，连续 {@code grace} 毫秒都看不到观众才关。
      */
     private final java.util.Map<String, Long> lastViewerAt = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -373,9 +548,8 @@ public class StreamService {
 
     /**
      * 录像段的「会话身份」：有 FilePath 用它，否则用起止时间。
-     *
-     * <p>与 {@code Gb28181MediaService#playback} 写入 {@code mediaUri} 的规则
-     * <b>必须完全一致</b>，否则复用判断永远不成立、每点一次都重开会话。
+     * 必须与 {@code Gb28181MediaService#playback} 写 {@code mediaUri} 的规则完全一致，
+     * 否则复用判断永远不成立、每点一次都重开会话。
      */
     private static String recordIdentity(RecordItem item) {
         if (item == null) {
@@ -394,19 +568,31 @@ public class StreamService {
 
     /**
      * 停止某通道的流（发 BYE 释放设备带宽 + 关闭收流端口）。
+     * BYE 与本地释放统一由 {@link Gb28181MediaService#stop(String, String)} 负责，避免两条停止路径
+     * 行为不一致（早先 {@code /api/stop} 只释放本地资源不发 BYE，设备会继续推流）。
+     * 库状态由 {@code StreamEventBridge.onSessionClosed} 回写，此处不重复处理。
      *
-     * <p>BYE 与本地释放统一由 {@link Gb28181MediaService#stop(String, String)}
-     * 负责，避免两条停止路径（原生接口 / 业务接口）行为不一致——
-     * 早先 {@code /api/stop} 只释放本地资源不发 BYE，设备会继续推流。
-     *
-     * <p>数据库状态由 {@code StreamEventBridge.onSessionClosed} 回写
-     * （{@code gb_stream} 置 CLOSED、通道 stream_id 清空），此处不重复处理。
-     *
-     * @param deviceId  设备编码
-     * @param channelId 通道编码；{@code null} 或与设备编码相同表示设备自身
      * @return 是否找到并关闭了会话
      */
     public boolean stop(String deviceId, String channelId) {
+        String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
+        /*
+         * SDK 直连设备没有 RTP 会话，走不到 mediaService().stop()。
+         * 不单独处理的话，停止点播会「接口回成功但流一直在」——
+         * ZLM 的代理玩家还拉着设备，设备侧多一路 RTSP 连接，直到进程退出。
+         */
+        if (kindOf(deviceId) != DeviceKind.GB28181) {
+            ZlmMediaServer media = platform.mediaServer();
+            if (media == null) {
+                return false;
+            }
+            media.stopProxy(deviceId, channel);
+            media.closeMediaSource(deviceId, channel);
+            requestedStreams.remove(streamKey(deviceId, channel));
+            markClosed(deviceId + "/" + channel);
+            return true;
+        }
+        requestedStreams.remove(streamKey(deviceId, channel));
         return platform.mediaService().stop(deviceId, channelId);
     }
 
@@ -416,32 +602,21 @@ public class StreamService {
     }
 
     /**
-     * 停止某通道指定类型的流。
+     * 停止某通道指定类型的流：回放 / 下载与直播是独立会话（键带类型后缀），
+     * 停回放必须走本方法，否则会关掉直播会话或关不到任何会话。
      *
-     * <p>回放/下载与直播是独立会话（键带类型后缀），停回放必须走本方法，
-     * 否则会去关直播会话或关不到任何会话。
-     *
-     * @param type {@code null} 或 {@link MediaType#REALTIME} 等价于
-     *             {@link #stop(String, String)}
+     * @param type {@code null} 或 {@link MediaType#REALTIME} 等价于 {@link #stop(String, String)}
      */
     public boolean stop(String deviceId, String channelId, MediaType type) {
         return platform.mediaService().stop(deviceId, channelId, type);
     }
 
     /**
-     * 某通道的<b>回放</b>会话。
+     * 某通道的回放会话。
+     * 必须按类型查：同一通道通常同时有直播（云端录像保活让它长期在线）与回放两路会话，
+     * 按「设备 + 通道」查只能拿到直播，于是定位 / 暂停 / 倍速会发到直播对话框里，
+     * 设备回 200 却不执行，严重的还会把直播打断（「拖动像重新播流、倍速没用」的根因）。
      *
-     * <p><b>为什么必须按类型查</b>：同一通道上通常同时存在两路会话 ——
-     * 一路直播（云端录像保活会让它长期在线）和一路回放，键分别是
-     * {@code 设备/通道} 与 {@code 设备/通道_playback}。
-     * 用 {@link #session(String, String)} 按「设备+通道」查只能拿到<b>直播</b>会话，
-     * 于是回放控制（定位/暂停/倍速）会发到直播的对话框里：
-     * 设备回 200 却不执行，回放原地不动；严重的还会把直播打断。
-     *
-     * <p>这就是「拖动进度条像重新播流、倍速完全没用」的根因。
-     *
-     * @param deviceId  设备编码
-     * @param channelId 通道编码
      * @return 回放会话；该通道没有回放时返回 {@code null}
      */
     public RtpSession playbackSession(String deviceId, String channelId) {
@@ -453,13 +628,7 @@ public class StreamService {
         if (session != null) {
             return session;
         }
-        /*
-         * 兜底：按通道编码在所有会话里找「回放类型」的那一个。
-         *
-         * <p>调用方可能只给了通道编码（设备直连场景 serial == code），
-         * 也可能会话是用旧规则建的。这里只认 {@link MediaType#PLAYBACK}，
-         * 绝不能退化成「任意类型」—— 那就又抓回直播会话了。
-         */
+        /* 兜底：按通道编码找回放类型的会话。只认 PLAYBACK，绝不能退化成任意类型（那就又抓回直播了）。 */
         for (RtpSession s : sessions()) {
             if (channelId.equals(s.getChannelId())
                     && s.getType() == MediaType.PLAYBACK
@@ -501,43 +670,24 @@ public class StreamService {
 
     /**
      * 某通道当前会话（设备直连：设备编码即通道编码）。
-     *
-     * <p><b>注意</b>：通道编码跨设备可能重复，多设备环境请用
-     * {@link #session(String, String)} 精确指定。
+     * 通道编码跨设备可能重复，多设备环境请用 {@link #session(String, String)}。
      */
     public RtpSession session(String channelId) {
         return platform.sessionManager().getByChannel(channelId);
     }
 
-    /**
-     * 按会话键取会话（{@code <设备编码>/<通道编码>}）。
-     *
-     * <p>与 ZLM 的 {@code app/stream} 一致，是会话的唯一标识。
-     */
+    /** 按会话键（{@code <设备编码>/<通道编码>}，与 ZLM 的 {@code app/stream} 一致）取会话。 */
     public RtpSession sessionByKey(String sessionKey) {
         return platform.sessionManager().getByKey(sessionKey);
     }
 
     /**
-     * 按<b>任意一种</b>外部标识定位会话。
+     * 按任意一种外部标识定位会话，顺序不能变：
+     * 会话键 {@code <设备编码>/<通道编码>}（列表 / 启动接口返回的形态）&gt;
+     * 裸通道编码（直连摄像机）&gt; ZLM 流名（早期版本返回过，外部脚本仍在用）。
+     * 三种形态集中在一处：原本 StreamController / PlaybackController / DecodeController
+     * 各有一份拷贝，分别只认其中几种，导致拿列表接口返回的 {@code streamId} 回查恒 404。
      *
-     * <p>接口对外的 {@code streamId} 有三种历史形态，调用方会原样传回来：
-     * <ol>
-     *   <li>会话键 {@code <设备编码>/<通道编码>} —— 列表/启动接口返回的就是它；</li>
-     *   <li>裸通道编码 —— 直连摄像机场景，设备编码即通道编码；</li>
-     *   <li>ZLM 流名 —— 早期版本返回过，外部脚本仍在用。</li>
-     * </ol>
-     * 三种都要认，且<b>顺序不能变</b>：会话键最精确，其次是通道编码，最后才遍历流名。
-     *
-     * <p><b>为什么必须集中在一处</b>：这个方法原本在 {@code StreamController}、
-     * {@code PlaybackController}、{@code DecodeController} 里各有一份拷贝
-     * （分别叫 {@code findSessionByStreamId} / {@code findSession}），
-     * 三份的实现悄悄走偏了 —— {@code /stream/info} 那两份只认后两种形态，
-     * 于是拿列表接口自己返回的 {@code streamId} 回查恒 404
-     * （{@code 直播流不存在：3402…/3402…}），而回放侧因为多写了一步
-     * {@code sessionByKey} 所以正常。同一件事写三遍，就一定会有一遍是错的。
-     *
-     * @param streamId 会话键 / 通道编码 / 流名
      * @return 会话；找不到或入参为空时返回 {@code null}
      */
     public RtpSession findSession(String streamId) {
@@ -567,10 +717,8 @@ public class StreamService {
 
     /**
      * ZLM 是否已真正收到该会话的 RTP。
-     *
-     * <p>「会话存在」不等于「媒体源就绪」：会话在 INVITE 发出后立刻创建，
-     * 而 ZLM 要等设备推来第一个 RTP 包才注册媒体源。
-     * 录制、抓拍等依赖媒体源的操作必须用本方法判断就绪。
+     * 「会话存在」不等于「媒体源就绪」：会话在 INVITE 发出后立刻创建，
+     * ZLM 要等第一个 RTP 包才注册媒体源，录制 / 抓拍必须用本方法判就绪。
      */
     public boolean isReceiving(String sessionKey) {
         RtpSession session = platform.sessionManager().getByKey(sessionKey);
@@ -607,15 +755,7 @@ public class StreamService {
         vo.setSsrc(session.getSsrc());
         vo.setRtpPort(session.getPort());
         vo.setState(session.getState());
-        /*
-         * 观众数（来自 ZLM 的读者计数，含录制器）。
-         *
-         * <p>运维排障时最常问的就是「这路到底有没有人在看」与「能不能关」——
-         * 把它暴露出来，看列表就知道，不必去翻日志。
-         *
-         * <p>ZLM 的计数对 ws-flv 是准确的（实测：连着时 1、断开后 0），
-         * 因此它就是「有没有人看」的权威来源。
-         */
+        /* 观众数（ZLM 读者计数，含录制器）。ZLM 对 ws-flv 的计数准确（实测连着 1、断开 0），是「有没有人看」的权威来源。 */
         if (platform.mediaServer() != null) {
             vo.setReaders(platform.mediaServer()
                     .readerCount(session.getZlmApp(), session.getStream()));
@@ -677,11 +817,8 @@ public class StreamService {
     }
 
     /**
-     * 插入或更新流记录。
-     *
-     * <p>{@code gb_stream.stream_key} 上有唯一约束，而 ZLM 的「流注册」事件
-     * 可能重复投递（重新点播、转协议重连等），并发下「先查再插」会撞唯一键。
-     * 因此这里捕获冲突后改为按 stream_key 更新，保证幂等。
+     * 插入或更新流记录。{@code stream_key} 有唯一约束，而 ZLM 的流注册事件可能重复投递，
+     * 并发下「先查再插」会撞唯一键，因此捕获冲突后改为按 stream_key 更新，保证幂等。
      */
     public void save(GbStream stream) {
         if (stream == null || stream.getStreamKey() == null) {
@@ -708,11 +845,7 @@ public class StreamService {
         }
     }
 
-    /**
-     * 流上线。
-     *
-     * @param streamKey 复合流标识 {@code <设备编码>/<通道编码>}
-     */
+    /** 流上线。{@code streamKey} 为复合流标识 {@code <设备编码>/<通道编码>}。 */
     public void markOnline(String streamKey) {
         if (streamKey == null || streamKey.isBlank()) {
             return;
@@ -744,11 +877,7 @@ public class StreamService {
         }
     }
 
-    /**
-     * 标记流已关闭。
-     *
-     * @param streamKey 复合流标识 {@code <设备编码>/<通道编码>}
-     */
+    /** 标记流已关闭。{@code streamKey} 为复合流标识 {@code <设备编码>/<通道编码>}。 */
     public void markClosed(String streamKey) {
         if (streamKey == null || streamKey.isBlank()) {
             return;
@@ -763,15 +892,8 @@ public class StreamService {
 
     /**
      * 平台启动时把库里残留的「非 CLOSED」流记录收敛为 CLOSED。
-     *
-     * <p><b>为什么必须做</b>：{@code gb_stream.state} 反映的是「平台内存里的会话状态」，
-     * 而会话是纯内存对象 —— 平台一重启就全没了，可库里还留着上次运行的
-     * {@code ONLINE} / {@code NEGOTIATING}。这些残留会误导用户（界面显示「推流中」
-     * 但实际一路都没有），也会干扰按状态做的统计与判断。
-     *
-     * <p>重启后内存为空是既成事实，所以统一置 CLOSED 是准确的：
-     * 平台此刻确实没有任何会话。之后设备重新推流或被点播时，会话重建会
-     * 把状态改回 ONLINE。
+     * 会话是纯内存对象，重启即全没，而库里还留着 {@code ONLINE} / {@code NEGOTIATING}，
+     * 界面会显示「推流中」但实际一路都没有；重启后内存为空是既成事实，统一置 CLOSED 是准确的。
      *
      * @return 收敛的记录条数
      */
@@ -803,17 +925,10 @@ public class StreamService {
 
     /**
      * 为上一轮运行遗留的对话补发 BYE，释放设备侧仍在进行的推流。
+     * 进程被强杀时来不及发 BYE，设备 / 下级平台会一直推 —— 实测 LiveGBS 每路约 3 Mbps 且从不超时，
+     * 多重启几次就攒成多路重复推流。平台侧已无对话信息，只能靠库里持久化的 Call-ID 补发；
+     * 实测 LiveGBS 按 Call-ID 匹配、不带原 tag 也回 200 OK，严格实现回 481 无害。
      *
-     * <p><b>为什么必须补</b>：进程被强杀（{@code gb.sh} 优雅停止超时后会强制 kill）
-     * 时来不及发 BYE，设备/下级平台不知道我方已退出，会一直推下去 ——
-     * 实测 LiveGBS 每路约 3 Mbps 且从不超时，多重启几次就攒成多路重复推流，
-     * 用户看到的就是「级联那边显示还有 N 个视频正在推送」，只能人工清理。
-     *
-     * <p>平台侧已无对话信息（内存会话随进程消失），只能靠库里持久化的 Call-ID 补发。
-     * 实测 LiveGBS 按 Call-ID 匹配，不带原 tag 也会回 200 OK 并停止推流；
-     * 对严格实现的设备，已结束的对话会回 481 —— 无害。
-     *
-     * @param stale 上一轮遗留（未 CLOSED）的流记录
      * @return 成功发出的 BYE 数
      */
     private int releaseStaleRemoteSessions(List<GbStream> stale) {
@@ -853,11 +968,8 @@ public class StreamService {
 
     /**
      * 补发 BYE 前先把设备的 SIP 会话补回来。
-     *
-     * <p><b>为什么必须补</b>：平台刚启动时 SIP 注册表是空的（纯内存），设备要到
-     * 下一次心跳才回来 —— 实测启动瞬间补发 BYE 直接报「设备未注册或会话已失效」，
-     * 于是回收动作全部失效，残余推流继续跑。用库里存的 {@code remote_ip/remote_port}
-     * 先把会话建起来即可（与点播路径的 {@code healRegistryIfNeeded} 同一套机制）。
+     * 平台刚启动时注册表为空（纯内存），实测启动瞬间补发直接报「设备未注册或会话已失效」，
+     * 回收动作全部失效；用库里存的 {@code remote_ip/remote_port} 先建会话即可。
      */
     private void healRegistryForRelease(String deviceId) {
         if (deviceId == null || deviceId.isBlank() || registryHealer.inRegistry(deviceId)) {
@@ -873,18 +985,9 @@ public class StreamService {
 
     /**
      * 把「设备仍在推、平台却没有会话」的孤儿流重新纳管。
-     *
-     * <p><b>为什么需要</b>：{@code on_mk_media_publish} 回调只在流<b>首次注册</b>
-     * 时触发一次，而设备（下级平台，实测 LiveGBS）收 BYE 回 200 OK 却不停止推流，
-     * 且我方重启对它毫无影响。于是存在这样的时序竞争：平台启动时设备已经在推，
-     * 回调先到、SSRC 映射后恢复 —— 实测两者相差 1.4 秒，这路流就永久停在
-     * 「未匹配到会话」，表现为「级联那边还在推流、平台这边一路都看不到」，
-     * 白白占用带宽直到设备自己超时。
-     *
-     * <p>做法：枚举 ZLM 里流名仍是 SSRC 十六进制串的媒体源（= 未被纳管的标志），
-     * 逐个交给会话管理器按 SSRC 墓碑重建会话。重建后 ZLM 侧的流名不会变
-     * （{@code stream_replace} 只在注册时生效），但平台已有会话、能出播放地址，
-     * 用户重新点播时也会因会话已存在而直接复用。
+     * {@code on_mk_media_publish} 只在流首次注册时触发一次，而设备（实测 LiveGBS）收 BYE 回 200 却不停止推流，
+     * 平台启动时又存在「回调先到、SSRC 映射后恢复」的竞争（实测相差 1.4 秒），这路流就永久停在未匹配状态。
+     * 重建后 ZLM 侧流名不变（{@code stream_replace} 只在注册时生效），但平台已有会话、能出播放地址。
      *
      * @return 成功纳管的流数
      */
@@ -897,10 +1000,8 @@ public class StreamService {
         int adopted = 0;
         for (String name : mediaServer.orphanStreamNames()) {
             try {
-                // 先看是否已被纳管：认领后的会话其 zlmStream 正是这个十六进制名
-                // （stream_replace 改不动已注册的流），所以「流名是十六进制」
-                // 不再等价于「未纳管」。不排除的话每轮巡检都会把已纳管的流
-                // 再报一次「已重新纳管」，日志与实际不符。
+                // 认领后的会话其 zlmStream 正是这个十六进制名（stream_replace 改不动已注册的流），
+                // 所以「流名是十六进制」不再等价于「未纳管」，不排除会每轮重复报「已重新纳管」。
                 RtpSession known = sessions.resolveBySsrcName(name);
                 if (known != null && !RtpSession.CLOSED.equals(known.getState())) {
                     continue;
@@ -916,32 +1017,13 @@ public class StreamService {
     }
 
     /**
-     * 空闲流巡检：关掉「没有任何观看者」的会话。
-     *
-     * <p><b>为什么不能只靠 ZLM 的无人观看回调</b>：{@code on_mk_media_no_reader}
-     * <b>每个媒体源只触发一次</b>（ZLM 内部 {@code _none_reader} 标志位），
-     * 且只在读者数由非零降为零的那一刻触发。于是存在一段无法覆盖的空窗：
-     * <ol>
-     *   <li>平台重启后设备仍在推流，回调在会话重建<b>之前</b>就已触发过
-     *       （实测相差 2 秒），之后永不重来；</li>
-     *   <li>{@link #adoptOrphanStreams()} 重新纳管时流早已注册，回调不会补发。</li>
-     * </ol>
-     * 结果就是这些流既不会被关掉、也永远不会再触发回调 —— 一直占着带宽和收流端口，
-     * 直到设备自己超时（而实测 LiveGBS 根本不会超时）。必须由平台自己定期主动检测。
-     *
-     * <p><b>判据是 ZLM 的读者数而不是平台自己的观看计数</b>：ZLM 才知道真相 ——
-     * 它把 MP4 录制器也算作读者（{@code protocol.mp4_as_player=1}），
-     * 所以「只开录像没人看」的通道不会被误关；而正在被播放的流读者数必然大于 0。
-     *
-     * <p><b>宽限期</b>：刚建立的会话读者数天然是 0（还没人来得及播放），
-     * 故只处理「已 ONLINE 超过宽限期」的会话。
-     *
-     * <p><b>宽限期必须用「运行时配置的当前值」</b>：该时长可在界面上热更新
-     * （存库 + 推给 ZLM）。若这里读 {@code mediaServer.noneReaderDelayMs()}，
-     * 拿到的是<b>启动时的 yml 快照</b> —— 用户把时长调到 120 秒后，
-     * ZLM 确实晚关了，但平台巡检仍按旧的 45 秒提前关，
-     * 界面看起来「改了没生效」。故由调用方传入（{@link PlatformScheduler}
-     * 从 {@link RuntimeConfigService} 实时读取）。
+     * 空闲流巡检：关掉没有任何观看者的会话。
+     * 不能只靠 ZLM 的 {@code on_mk_media_no_reader}：它每个媒体源只触发一次，且只在读者数由非零降为零时触发。
+     * 平台重启后设备仍在推流时，回调在会话重建前就触发过（实测相差 2 秒）；
+     * {@link #adoptOrphanStreams()} 纳管时流早已注册，回调也不会补发 —— 这些流会一直占带宽与端口。
+     * 判据用 ZLM 读者数：它把 MP4 录制器也算作读者（{@code protocol.mp4_as_player=1}），「只录不看」不会被误关。
+     * 宽限期必须由调用方传入运行时配置值：读 {@code noneReaderDelayMs()} 拿到的是启动时 yml 快照，
+     * 用户热更新后界面看起来「改了没生效」。
      *
      * @param graceMs 宽限期（毫秒）；{@code <= 0} 时回落到启动配置值
      * @return 关闭的会话数
@@ -973,22 +1055,15 @@ public class StreamService {
                 if (now - session.getCreatedAt() < grace) {
                     continue;
                 }
-                // 【必须尊重通道的「常开」设置，否则按需/常开开关形同虚设】
-                //
-                // 原实现只按 ZLM 读者数判断，等于「所有通道都按需」——
-                // 用户把 onDemand 关掉（期望常开）也照样被关流，
-                // 表现为「设了常开还是过一会儿就断」。
+                // 必须尊重通道的「常开」设置：原本只按 ZLM 读者数判断，等于「所有通道都按需」，
+                // 用户关掉 onDemand（期望常开）也照样被关流，表现为「设了常开还是过一会儿就断」。
                 if (keepAlive.contains(session.getChannelId())) {
                     continue;
                 }
                 int readers = mediaServer.readerCount(session.getZlmApp(), session.getStream());
                 /*
-                 * 诊断日志：排查「没人看却一直不回收」时必须能看到每路的真实读者数。
-                 *
-                 * <p>只打 DEBUG，避免每 20 秒 × N 路刷屏；出问题时把日志级别调到
-                 * DEBUG 即可看到「巡检认为有人在看」的具体数值，从而区分
-                 * ① 确实有播放器连着（读者数 > 0，不该关）；
-                 * ② 读者数恒为 0 但会话没被关（判定逻辑有 bug）。
+                 * 诊断日志（仅 DEBUG）：排查「没人看却一直不回收」时需看到每路真实读者数，
+                 * 以区分「确实有播放器连着」与「读者数恒为 0 但判定逻辑有 bug」。
                  */
                 if (log.isDebugEnabled()) {
                     long seenAgo = now - lastViewerAt.getOrDefault(
@@ -1004,26 +1079,16 @@ public class StreamService {
                     continue;
                 }
                 /*
-                 * 读者数为 0 —— <b>不能据此立刻关流</b>。
-                 *
-                 * <p>这是瞬时采样，重连间隙、浏览器因 SourceBuffer 写入阻塞而
-                 * 暂停读取、ZLM 多协议源之间的状态瞬时不一致，都会让它读到 0。
-                 * 实测后果：用户正在看，服务端却判定「45 秒内无观看者」并关流，
-                 * 前端 WebSocket 断开 → 重连 → 重新缓冲，表现为
-                 * 「画面好好的突然 loading 一下」。
-                 *
-                 * <p>只有当「连续 {@code grace} 毫秒都没见过观众」时才真正关闭。
-                 * 这时长与宽限期同源，语义是「无人观看持续时长」。
+                 * 读者数为 0 不能据此立刻关流：这是瞬时采样，实测会让用户正在看时被判「无观看者」并关流，
+                 * 前端 WebSocket 断开 → 重连 → 重新缓冲。只在连续 {@code grace} 毫秒都没见过观众时才真关。
                  */
                 long lastSeen = lastViewerAt.getOrDefault(session.getSessionKey(), session.getCreatedAt());
                 if (now - lastSeen < grace) {
                     continue;
                 }
                 log.info("空闲流巡检：{} 秒内无观看者，关闭会话 {}", grace / 1000, session.getSessionKey());
-                // 先记冷却再关流：设备不认 BYE 时它会继续推，
-                // 不记冷却就会被孤儿流巡检立刻认领回来，形成无限循环。
-                // 按会话键记（不是 SSRC —— 会话的 ssrc 是 SDP 通告值，
-                // 与设备实际推流用的 RTP SSRC 不同，实测关流 11 秒后又被认领回来）。
+                // 先记冷却再关流：设备不认 BYE 时会继续推，不记冷却会被孤儿流巡检立刻认领回来。
+                // 按会话键记而不是 SSRC：会话的 ssrc 是 SDP 通告值，与设备实际推流的 SSRC 不同（实测 11 秒后又被认领）。
                 sessions.markReaped(session.getSessionKey());
                 sessions.closeByKey(session.getSessionKey());
                 // 会话已销毁：观看记录一并清掉，避免键位长期堆积
@@ -1037,27 +1102,11 @@ public class StreamService {
     }
 
     /**
-     * 找出「要求流常开、不能被空闲回收」的通道编码集合。
-     *
-     * <p>两类通道必须常开：
-     * <ol>
-     *   <li><b>此刻应该录云端录像</b> —— 用户手动开关 <b>或</b> 录像计划生效，
-     *       判定统一走 {@link ChannelRecordPolicy#enabledChannels()}。
-     *       虽然 ZLM 侧 {@code protocol.mp4_as_player=1} 让录制器算作「读者」，
-     *       但录制尚未开始的那一瞬间读者数仍是 0，存在被误关的竞态；</li>
-     *   <li><b>用户显式设置常开</b>（{@code on_demand=false}）—— 用户的明确意图。</li>
-     * </ol>
-     *
-     * <p><b>为什么录像判定要走 recordPolicy 而不是直接读 {@code cloud_record}</b>：
-     * 录像计划不再写数据库（见 {@link ChannelRecordPolicy} 的说明），
-     * 只读库会看不到计划生效的通道 —— 于是计划刚开录、流就因「无读者」被回收，
-     * 表现为「计划里配了却录不起来」。
-     *
-     * <p>返回 {@code Set} 而不是逐个查：本方法被空闲流巡检每 20 秒调用一次，
-     * 一次全量查库（几千行以内）远优于循环里 N 次单条查询。
-     *
-     * <p>查库失败返回空集合：此时退化为「全部按需」，与旧行为一致，
-     * 不会因为一次查询异常就把流全留着不关。
+     * 找出「要求流常开、不能被空闲回收」的通道编码集合：
+     * 应录云端录像（用户开关 ∪ 录像计划，判定走 {@link ChannelRecordPolicy#enabledChannels()}）
+     * 与用户显式设成常开（{@code on_demand=false}）两类。
+     * 录像判定必须走 recordPolicy：录像计划不写库，只读库会让计划刚开录的流被回收。
+     * 一次全量查库优于循环里 N 次单条查询（每 20 秒调用一次）；查库失败返回空集合，退化为全部按需。
      */
     private java.util.Set<String> channelsRequiringStream() {
         try {
@@ -1083,13 +1132,10 @@ public class StreamService {
     }
 
     /**
-     * 按类型查某通道的当前流记录。
+     * 按类型查某通道的当前流记录。用「设备编码 + 通道编码」精确定位：
+     * 通道编码跨设备可重复，只按通道编码查会拿到别的设备的同号通道记录。
      *
-     * <p>用「设备编码 + 通道编码」精确定位：通道编码跨设备可重复，
-     * 只按通道编码查会拿到别的设备的同号通道记录。
-     *
-     * @param deviceId  设备编码；{@code null} 时退化为只按通道编码查
-     * @param channelId 通道编码
+     * @param deviceId 设备编码；{@code null} 时退化为只按通道编码查
      */
     public GbStream findByChannel(String deviceId, String channelId, String type) {
         return streamMapper.selectOne(Wrappers.<GbStream>lambdaQuery()
@@ -1102,10 +1148,8 @@ public class StreamService {
     }
 
     /**
-     * 按类型查某通道的当前流记录（设备直连：设备编码即通道编码）。
-     *
-     * <p><b>注意</b>：通道编码跨设备可能重复，多设备环境请用
-     * {@link #findByChannel(String, String, String)}。
+     * 按类型查某通道的当前流记录（设备直连，多设备环境请用
+     * {@link #findByChannel(String, String, String)}）。
      */
     public GbStream findByChannel(String channelId, String type) {
         return findByChannel(null, channelId, type);
@@ -1141,19 +1185,9 @@ public class StreamService {
 
     /**
      * 按 {@code serial} / {@code code} / {@code q} 过滤流列表并按游标切片。
+     * 直播与回放的过滤原本各写一份，已在 {@code limit=0}（不分页）处理上走偏，故集中于此。
      *
-     * <p><b>为什么抽出来</b>：直播 {@code /stream/list} 与回放
-     * {@code /playback/streamlist} 的这段过滤原本各写了一份，除了列表来源
-     * （{@code liveList} / {@code playbackList}）外逐行相同。两份拷贝不会永远
-     * 保持同步 —— 本次筛查时就发现它们在 {@code limit=0}（不分页）的处理上已经
-     * 不一致了：一边特判、另一边直接切片。
-     *
-     * @param all    源列表
-     * @param start  偏移量
-     * @param limit  每页条数；{@code <= 0} 表示不分页
-     * @param serial 设备编码过滤，可为空
-     * @param code   通道编码过滤，可为空
-     * @param q      关键字（通道编码 / 通道名），可为空
+     * @param limit 每页条数；{@code <= 0} 表示不分页
      */
     public static StreamListVo filterStreams(List<StreamVo> all, int start, int limit,
                                              String serial, String code, String q) {

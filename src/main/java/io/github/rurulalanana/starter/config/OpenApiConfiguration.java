@@ -2,59 +2,74 @@ package io.github.rurulalanana.starter.config;
 
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
+import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
+import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springdoc.core.models.GroupedOpenApi;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.List;
+
 /**
  * 接口文档（OpenAPI 3 + Knife4j）。
  *
- * <h3>为什么要做</h3>
+ * <p>{@code /doc.html} 中文界面，{@code /v3/api-docs} 原始 JSON（可导入 Postman/Apifox）。
  *
- * <p>平台的最终形态是「被业务平台调用」：上层 CMS / 指挥调度 / 行业应用按接口拿设备树、
- * 取流地址、查录像、订阅报警。手写 Markdown 一定会与代码脱节，
- * 所以接口清单必须是<b>从 Controller 反射出来的活文档</b>——
- * 改了参数签名，文档自动跟着变，试调也能直接打真接口。
+ * <p><b>鉴权两个坑</b>（改这里之前必读，都是实测踩过的）：
+ * <ol>
+ *   <li>安全方案必须是 {@code apiKey}，不能是 {@code http+bearer} —— Knife4j 会自动补
+ *       {@code Bearer } 前缀，而 Sa-Token 没配 {@code token-prefix}，读整条头原文，
+ *       于是 {@code Bearer xxx} 被判未登录（实测裸 token 200、带前缀 401）。</li>
+ *   <li>{@code security} 必须挂在每个 operation 上 —— Knife4j 只读
+ *       {@code readApiSecurity(api, operation)}，写根节点等于没写，表现为
+ *       「界面能填 token，调试却不带 Authorization 头」。</li>
+ * </ol>
  *
- * <h3>访问地址</h3>
+ * <p><b>两个安全方案</b>：{@code Authorization}（会话 token）与 {@code X-Api-Key}（机器通行证）。
+ * 后者<b>必须</b>声明，否则接口文档自己无法调通登录：浏览器登录要拖滑块，
+ * 文档调试面板做不了，只能用 API 密钥。实测前没声明时，Knife4j 的 Authorize 里没有这个字段，
+ * login 的调试请求发出去永远回「请先完成验证码」。
  *
- * <ul>
- *   <li>{@code /doc.html} —— Knife4j 中文界面（推荐）</li>
- *   <li>{@code /swagger-ui.html} —— 原生 Swagger UI</li>
- *   <li>{@code /v3/api-docs} —— 原始 OpenAPI JSON（可导入 Postman / Apifox / 生成 SDK）</li>
- * </ul>
- *
- * <h3>鉴权</h3>
- *
- * <p>除 {@code /api/v1/login} 与分享类接口外，全部要求把登录拿到的 token
- * 放进 {@code Authorization} 请求头（Sa-Token 的 {@code token-name}）。
- * 界面上点右上角 <b>Authorize</b> 填一次即可，之后的「调试」会带上它。
- *
- * <p><b>开关</b>：{@code gb28181.api-docs.enabled=false} 时整个文档端点不注册
- * （纯内网生产可以彻底关掉）；{@code gb28181.api-docs.protect=true} 时
- * 文档本身要 HTTP Basic 口令（接口清单会暴露全部路径与参数，公网建议开启）。
+ * <p>开关：{@code api-docs.enabled=false} 不注册端点；{@code api-docs.protect=true} 文档要 HTTP Basic 口令。
  */
 @Configuration
 @ConditionalOnProperty(name = "gb28181.api-docs.enabled", havingValue = "true", matchIfMissing = true)
 public class OpenApiConfiguration {
 
-    /** 安全方案名：在 {@code components} 里注册一次，全局引用。 */
+    /** 会话 token 方案：在 {@code components} 里注册一次，operation 上按名引用。 */
     private static final String TOKEN_SCHEME = "Authorization";
+
+    /** 机器通行证方案：登录接口用它（拖不了滑块）。 */
+    private static final String API_KEY_SCHEME = "X-Api-Key";
+
+    /**
+     * 真正不需要任何凭据的路径：由播放器 / {@code <img>} / nginx 子请求发起，或凭签名令牌访问。
+     *
+     * <p><b>注意 login 不在这里</b>：它对浏览器是「密码 + 验证码」、对机器是 {@code X-Api-Key}，
+     * 两者都是凭据，必须标上 security，否则调试面板发不出头。
+     */
+    private static final String[] NO_AUTH_PREFIXES = {
+            "/api/v1/share/",
+            "/api/v1/cloudrecord/share/",
+            "/api/v1/record/auth",
+            "/api/v1/webrtc/"
+    };
+
+    /** 用 {@code X-Api-Key} 而不是会话 token 的路径（目前只有登录）。 */
+    private static final String[] API_KEY_PATHS = {
+            "/api/v1/login"
+    };
 
     @Value("${info.app.version:1.0.2}")
     private String version;
 
-    /**
-     * 全局文档：标题、说明与鉴权方式。
-     *
-     * <p>这里写的「怎么调」比接口本身更重要——对接方第一个问题永远是
-     * 「token 放哪、怎么续期、失败长什么样」，所以三条都写进描述里。
-     */
+    /** 全局文档：标题、描述（对接方最关心的信封/鉴权/分页约定）与安全方案。 */
     @Bean
     public OpenAPI platformOpenAPI() {
         return new OpenAPI()
@@ -81,25 +96,73 @@ public class OpenApiConfiguration {
                         .contact(new io.swagger.v3.oas.models.info.Contact()
                                 .name("GB28181 平台接口支持")))
                 .components(new Components()
+                        // apiKey 而非 http+bearer：后者会被 Knife4j 自动补 "Bearer "，
+                        // 与 Sa-Token 读裸 token 的行为冲突，详见类注释第 1 条
                         .addSecuritySchemes(TOKEN_SCHEME, new SecurityScheme()
-                                .type(SecurityScheme.Type.HTTP)
-                                .scheme("bearer")
+                                .type(SecurityScheme.Type.APIKEY)
                                 .in(SecurityScheme.In.HEADER)
                                 .name("Authorization")
-                                .description("登录接口返回的 token，直接作为 Authorization 头的值（不带 Bearer 前缀）")))
-                // 全局要求鉴权：登录与分享接口在文档里仍会显示锁图标，
-                // 这是刻意的（宁可多提示一次），实际是否放行由后端拦截器决定
-                .addSecurityItem(new SecurityRequirement().addList(TOKEN_SCHEME));
+                                .description("登录接口返回的 data.token，"
+                                        + "原样作为 Authorization 头的值，不要加 Bearer 前缀"))
+                        // 机器通行证：登录接口用。密钥在「设置 → 账号安全 → API 密钥」里生成
+                        .addSecuritySchemes(API_KEY_SCHEME, new SecurityScheme()
+                                .type(SecurityScheme.Type.APIKEY)
+                                .in(SecurityScheme.In.HEADER)
+                                .name("X-Api-Key")
+                                .description("账号自己生成的 API 密钥（设置 → 账号安全 → API 密钥）。"
+                                        + "只能用于登录接口，作用是替代「密码 + 滑块验证码」")));
+        // 不调 addSecurityItem：根节点 security 被 Knife4j 忽略，
+        // 且会让免登录接口错误地显示成需要鉴权。改为 stampSecurity() 逐 operation 标注。
     }
 
     /**
-     * 鉴权与会话：登录换 token、登出、当前用户、改密码。
+     * 给每个 operation 补 {@code security} 标记（原因见类注释第 2 条）。
      *
-     * <p><b>单独成组的原因</b>：对接方第一件事就是「怎么拿 token」，
-     * 而它原本混在 {@code system}（账号/权限/配置共 38 个接口）里，
-     * 在 {@code business} 分组下根本找不到 —— 实测被问过一次。
-     * 放在下拉框第一个，进文档就能看到完整流程。
+     * <p>三类分法：
+     * <ul>
+     *   <li>{@link #API_KEY_PATHS} —— 标 {@code X-Api-Key}（登录：机器客户端只能靠它）；</li>
+     *   <li>{@link #NO_AUTH_PREFIXES} —— 不标（分享 / WebRTC / 录像鉴权子请求）；</li>
+     *   <li>其余 —— 标 {@code Authorization}（会话 token）。</li>
+     * </ul>
      */
+    private OpenApiCustomizer stampSecurity() {
+        return openApi -> {
+            Paths paths = openApi.getPaths();
+            if (paths == null) {
+                return;
+            }
+            paths.forEach((path, item) -> {
+                if (isNoAuth(path)) {
+                    return;
+                }
+                String scheme = isApiKeyPath(path) ? API_KEY_SCHEME : TOKEN_SCHEME;
+                for (Operation operation : item.readOperations()) {
+                    operation.setSecurity(List.of(
+                            new SecurityRequirement().addList(scheme)));
+                }
+            });
+        };
+    }
+
+    private static boolean isNoAuth(String path) {
+        for (String prefix : NO_AUTH_PREFIXES) {
+            if (path.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isApiKeyPath(String path) {
+        for (String p : API_KEY_PATHS) {
+            if (path.equals(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 鉴权与会话。单独成组是因为「怎么拿 token」是对接方第一件事，混在 system 里找不到。 */
     @Bean
     public GroupedOpenApi authApi() {
         return GroupedOpenApi.builder()
@@ -108,14 +171,28 @@ public class OpenApiConfiguration {
                         .title("鉴权与会话")
                         .version(version)
                         .description("""
-                                对接流程：
-                                1. `POST /api/v1/login`（body：`{"username":"...","password":"<MD5 32 位小写>"}`）
-                                2. 从响应的 `data.token` 取值
-                                3. 点本页右上角 **Authorize** 填入该 token（或在请求头带 `Authorization: <token>`）
-                                4. 之后即可在其它分组里直接「调试」
+                                **接口文档调试登录（推荐）**
+
+                                1. 在平台「设置 → 账号安全 → API 密钥」点「生成密钥」，复制那把明文；
+                                2. 点本页右上角 **Authorize**，在 `X-Api-Key` 一栏填入该密钥；
+                                3. 调 `POST /api/v1/login`，**请求体留空即可** —— 密钥已标识账号；
+                                4. 从响应 `data.token` 取值，回到 **Authorize** 填进 `Authorization` 一栏；
+                                5. 之后别的分组就能直接「调试」。
+
+                                **为什么不用账号密码调这里**：浏览器登录要求拖滑块验证码，
+                                而文档调试面板是脚本行为、拿不到验证码凭证（会一直回「请先完成验证码」）。
+                                API 密钥就是为机器调用准备的，作用等同「账号密码 + 验证码」，
+                                可随时在页面上重新生成或撤销，撤销后立即失效。
+
+                                **用 curl / 业务平台对接**：
+
+                                1. `POST /api/v1/login`，请求头 `X-Api-Key: <密钥>`，body 可省略；
+                                2. 从响应的 `data.token` 取值；
+                                3. 之后所有请求带 `Authorization: <token>`（**不要**加 `Bearer ` 前缀）。
 
                                 token 有效期 7 天、服务重启不失效；`/api/v1/logout` 会主动作废当前 token。
                                 """)))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch(
                         "/api/v1/login",
                         "/api/v1/logout",
@@ -124,12 +201,7 @@ public class OpenApiConfiguration {
                 .build();
     }
 
-    /**
-     * 业务对接接口：设备、通道、实时点播、录像、报警、云台。
-     *
-     * <p>业务平台 90% 的调用都落在这组里，所以单独成组——
-     * 让对接方不用在 170 多个接口里翻管理类接口。
-     */
+    /** 业务对接接口：业务平台 90% 的调用落在这里，单独成组以免在 170 多个接口里翻管理类。 */
     @Bean
     public GroupedOpenApi businessApi() {
         return GroupedOpenApi.builder()
@@ -140,6 +212,7 @@ public class OpenApiConfiguration {
                         .description("设备 / 通道 / 实时点播 / 录像 / 报警 / 云台控制。"
                                 + "\n\n> 本组所有接口都要带 `Authorization` 请求头，"
                                 + "token 的获取方式见 **auth** 分组。")))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch(
                         "/api/v1/device/**",
                         "/api/v1/stream/**",
@@ -161,16 +234,12 @@ public class OpenApiConfiguration {
                         .title("级联对接接口")
                         .version(version)
                         .description("上级/下级平台配置、目录推送、级联控制")))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch("/api/v1/cascade/**")
                 .build();
     }
 
-    /**
-     * 免登录接口：分享播放、分享录像、录像地址鉴权。
-     *
-     * <p>单独成组是为了让对接方一眼看到「哪些接口不用带 token」——
-     * 这决定了他们能不能把播放地址直接塞进 iframe 或 `<img>`。
-     */
+    /** 免登录接口：单独成组，让对接方一眼看到哪些地址能直接塞进 iframe / {@code <img>}。 */
     @Bean
     public GroupedOpenApi publicApi() {
         return GroupedOpenApi.builder()
@@ -179,6 +248,7 @@ public class OpenApiConfiguration {
                         .title("免登录接口")
                         .version(version)
                         .description("分享播放页、分享录像、录像地址鉴权（凭签名令牌，不需要登录态）")))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch("/api/v1/share/**", "/api/v1/cloudrecord/share/**", "/api/v1/record/auth")
                 .build();
     }
@@ -192,8 +262,9 @@ public class OpenApiConfiguration {
                         .title("平台管理接口")
                         .version(version)
                         .description("登录与会话、用户、角色权限、菜单、运行时配置、黑白名单、证书、审计、指标")))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch(
-                        // 登录/登出/当前用户/改密码在 auth 分组，这里不重复
+                        // 登录/登出/当前用户/改密码归 auth 组
                         "/api/v1/getserverinfo",
                         "/api/v1/system/**",
                         "/api/v1/user/**",
@@ -216,6 +287,7 @@ public class OpenApiConfiguration {
                         .title("WebRTC 协商接口")
                         .version(version)
                         .description("SDP 交换（播放器无法携带登录态，故免登录，凭会话标识约束）")))
+                .addOpenApiCustomizer(stampSecurity())
                 .pathsToMatch("/api/v1/webrtc/**")
                 .build();
     }

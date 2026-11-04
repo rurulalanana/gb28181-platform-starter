@@ -45,29 +45,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 云端服务器录像接口。
- *
- * <p>「云端录像」指平台用 ZLMediaKit 把收到的实时流录成 MP4，
- * 文件保存在平台磁盘（{@code gb28181.record-root}），与设备侧录像无关。
- * 启用对象存储（{@code gb28181.oss.enabled=true}）时，停止录制后自动归档到
- * 对象存储，下载接口返回签名/外链地址。
- *
+ * 云端服务器录像接口。云端录像指平台用 ZLMediaKit 把实时流录成 MP4，存在平台磁盘
+ * （{@code gb28181.record-root}），与设备侧录像无关；启用对象存储时停录后自动归档，
+ * 下载接口返回签名/外链地址。主要路由：
  * <pre>
- * GET  /api/v1/cloudrecord/querychannels   有录像的通道
- * GET  /api/v1/cloudrecord/queryflags      按月统计有录像的日子
- * GET  /api/v1/cloudrecord/querymonthly    按月查询
- * GET  /api/v1/cloudrecord/querydaily      按日查询
- * POST /api/v1/cloudrecord/play            录像点播（拉入 ZLM 转协议）
- * POST /api/v1/cloudrecord/stopplay        停止录像点播
- * POST /api/v1/cloudrecord/remove          删除单条
- * POST /api/v1/cloudrecord/removechannel   删除通道全部
- * POST /api/v1/cloudrecord/removedaily     按天删除
- * POST /api/v1/cloudrecord/setimportant    重要标记
- * GET  /api/v1/cloudrecord/download/...    下载录像文件
- * GET  /api/v1/cloudrecord/file/{recordId} 本地录像文件流
- * GET  /api/v1/cloudrecord/video/...       指定时间段合成播放/下载
- * POST /api/v1/cloudrecord/snap/grab       服务端抓拍（拉流 + ffmpeg 解码，唯一来源）
- * GET  /api/v1/cloudrecord/snap/...        读取通道快照（免登录）
+ * GET  /api/v1/cloudrecord/querychannels / queryflags / querymonthly / querydaily
+ * POST /api/v1/cloudrecord/play / stopplay / remove / removechannel / removedaily / setimportant
+ * GET  /api/v1/cloudrecord/download/...  file/{recordId}  video/...
+ * POST /api/v1/cloudrecord/snap/grab     服务端抓拍（拉流 + ffmpeg 解码，唯一来源）
+ * GET  /api/v1/cloudrecord/snap/...      读取通道快照（免登录）
  * </pre>
  */
 @Slf4j
@@ -85,7 +71,6 @@ public class CloudRecordController {
     /** 用于把录像文件路径换算成 {@code /record/...} 静态地址。 */
     private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
-    /** 有云端录像的通道。 */
     @Operation(summary = "有云端录像的通道")
     @GetMapping("/querychannels")
     public ApiResponse<CloudChannelListVo> queryChannels(
@@ -119,8 +104,7 @@ public class CloudRecordController {
             row.setDeviceOnline(device != null && Boolean.TRUE.equals(device.getOnline()));
             row.setUpdatedAt(TimeFormats.toDisplay(channel.getUpdateTime()));
             row.setCreatedAt(TimeFormats.toDisplay(channel.getCreateTime()));
-            // 快照：已抓到过才给地址，没抓到时为 null（前端显示占位图）。
-            // 快照由前端抓帧后回传，故此处只是「有没有」的探测。
+            // 已抓到过才给地址，没抓到时为 null（前端显示占位图）
             if (snapService.exists(channel.getDeviceId(), channel.getChannelId())) {
                 row.setSnapUrl("/api/v1/cloudrecord/snap/" + channel.getDeviceId()
                         + "/" + channel.getChannelId() + ".jpg");
@@ -133,7 +117,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 按通道统计有录像的月份。 */
     @Operation(summary = "按通道统计有录像的月份")
     @GetMapping("/queryflags")
     public ApiResponse<CloudFlagsVo> queryFlags(
@@ -158,7 +141,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 按月查询。 */
     @Operation(summary = "按月查询")
     @GetMapping("/querymonthly")
     public ApiResponse<CloudMonthVo> queryMonthly(@RequestParam String serial,
@@ -171,7 +153,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 按日查询。 */
     @Operation(summary = "按日查询")
     @GetMapping("/querydaily")
     public ApiResponse<CloudDailyVo> queryDaily(@RequestParam String serial,
@@ -186,17 +167,8 @@ public class CloudRecordController {
         List<GbRecord> records = recordService.cloudRecords(channelId, day, day.plusDays(1));
         List<CloudRecordVo> list = new ArrayList<>();
         for (GbRecord r : records) {
-            /*
-             * 要下载地址。
-             *
-             * <p>早先这里传 false，理由是「列表页不必查文件是否存在」。
-             * 但前端的下载按钮判据就是 {@code downloadUrl} 非空 ——
-             * 不填就等于把下载功能整体关掉，界面上每个「下载」都是灰的
-             * （用户看到的就是「为啥下载按钮都是灰的」）。
-             *
-             * <p>代价只有一次 {@code Files.exists}（几十条记录，微秒级），
-             * 换来「文件真没了就不给下载按钮」的正确提示。
-             */
+            // 要下载地址：前端下载按钮的判据就是 downloadUrl 非空，传 false 会让所有「下载」变灰。
+            // 代价只有一次 Files.exists（几十条记录，微秒级），换来文件真没了就不给下载按钮。
             list.add(toItem(r, true));
         }
         var channel = deviceService.findChannel(channelId);
@@ -206,7 +178,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 删除单条录像（仅管理员：录像文件不可恢复）。 */
     @Operation(summary = "删除单条录像（仅管理员：录像文件不可恢复）")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String serial,
@@ -223,7 +194,6 @@ public class CloudRecordController {
         return ApiResponse.ok();
     }
 
-    /** 删除通道所有录像（仅管理员）。 */
     @Operation(summary = "删除通道所有录像（仅管理员）")
     @PostMapping("/removechannel")
     public ApiResponse<DeletedVo> removeChannel(@RequestParam String serial,
@@ -241,7 +211,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 按天删除（仅管理员）。 */
     @Operation(summary = "按天删除（仅管理员）")
     @PostMapping("/removedaily")
     public ApiResponse<DeletedVo> removeDaily(@RequestParam String serial,
@@ -262,7 +231,6 @@ public class CloudRecordController {
         return ApiResponse.ok(vo);
     }
 
-    /** 重要标记。 */
     @Operation(summary = "重要标记")
     @PostMapping("/setimportant")
     public ApiResponse<Void> setImportant(@RequestParam String serial,
@@ -279,7 +247,6 @@ public class CloudRecordController {
         return ApiResponse.ok();
     }
 
-    /** 录像点播：把 MP4 拉入 ZLM 转协议输出（返回 WebRTC/FLV/HLS 等播放地址）。 */
     @Operation(summary = "录像点播：把 MP4 拉入 ZLM 转协议输出（返回 WebRTC/FLV/HLS 等播放地址）")
     @PostMapping("/play")
     public ApiResponse<CloudPlayVo> play(@RequestParam String recordId) {
@@ -292,17 +259,8 @@ public class CloudRecordController {
     }
 
     /**
-     * 组装点播响应体。
-     *
-     * <p><b>为什么要单独抽出来</b>：分享页（{@code /share/{token}}）是<b>免登录</b>接口，
-     * 但它也要返回播放地址。若直接调用 {@link #play(String)}，
-     * 那个方法第一行是 {@code StpUtil.checkLogin()} —— 免登录访客必然 401
-     * （实测踩过：令牌校验都过了，却在拼播放地址时抛「未登录」）。
-     * 故把「查记录 + 起播 + 拼地址」拆到这里，由登录接口与免登录接口各自调用。
-     *
-     * @param record   录像记录
-     * @param recordId 录像 ID
-     * @return 播放地址
+     * 组装点播响应体。抽出来是因为分享页 {@code /share/{token}} 免登录，
+     * 直接调 {@link #play(String)} 会撞上它的 {@code StpUtil.checkLogin()}（令牌校验已过，却在拼地址时 401）。
      */
     private CloudPlayVo playVo(GbRecord record, String recordId) {
         PlayUrls urls = recordService.playCloudRecord(recordId);
@@ -324,7 +282,6 @@ public class CloudRecordController {
         return vo;
     }
 
-    /** 停止录像点播。 */
     @Operation(summary = "停止录像点播")
     @PostMapping("/stopplay")
     public ApiResponse<Void> stopPlay(@RequestParam String recordId) {
@@ -333,7 +290,6 @@ public class CloudRecordController {
         return ApiResponse.ok();
     }
 
-    /** 下载录像文件。 */
     @Operation(summary = "下载录像文件")
     @GetMapping("/download/{serial}/{code}/{period}")
     public ApiResponse<DownloadVo> download(@PathVariable String serial,
@@ -357,27 +313,11 @@ public class CloudRecordController {
     }
 
     /**
-     * 录像文件流：浏览器 {@code <video>} 直接播放，也用于下载。
-     *
-     * <p><b>为什么用原生 {@code <video>} 而不是 jessibuca</b>：
-     * 原生 video 天然支持 <b>HTTP Range → 拖动进度条直接定位</b>，
-     * 不需要服务端做 seek。实测 357MB / 1 小时 / moov 在文件尾的录像，
-     * {@code canplay} 5.3 秒就绪、{@code readyState=4}，没有任何问题。
-     *
-     * <p><b>三处处理</b>：
-     * <ul>
-     *   <li>{@code Content-Disposition: inline} —— 默认的 attachment 会让浏览器
-     *       直接下载而不是播放；下载时加 {@code ?download=1} 换回 attachment；</li>
-     *   <li><b>支持 Range</b> —— 拖动进度条时浏览器会发 {@code Range} 请求，
-     *       不支持的话每次定位都要重下整个文件；</li>
-     *   <li><b>token 走 query</b> —— {@code <video src>} 请求带不了自定义头，
-     *       Sa-Token 默认会从 query 参数里读 token（{@code is-read-body}），
-     *       前端把 token 拼在 URL 上即可。</li>
-     * </ul>
-     *
-     * <p><b>对象存储里的录像直接 302 到签名地址</b>：文件在 OSS 上，
-     * 再经平台转发一遍纯属浪费（还多一跳延迟）。签名地址自带有效期，
-     * 浏览器拿到后自己直连 OSS。
+     * 录像文件流：浏览器 {@code <video>} 直接播放，也用于下载。用原生 video 而非 jessibuca，
+     * 它天然支持 HTTP Range 拖动定位（实测 357MB / 1 小时 / moov 在文件尾，canplay 5.3 秒就绪）。
+     * 三处关键：{@code inline} 而非默认 attachment；必须支持 Range（否则每次定位重下整文件）；
+     * token 走 query（{@code <video src>} 带不了自定义头，Sa-Token 会读 query）。
+     * 对象存储里的录像直接 302 到签名地址，不经平台转发。
      */
     @Operation(summary = "录像文件流：浏览器  直接播放，也用于下载")
     @GetMapping("/file/{recordId}")
@@ -399,11 +339,8 @@ public class CloudRecordController {
             response.sendRedirect(url);
             return;
         }
-        // filePath 可能为 null：库里的条目来自两处 —— ZLM 回调回填的（有路径）、
-        // 以及定期对账按磁盘文件补登记的（也有路径）。但「录制中途被停、回调未到」
-        // 的条目会以 filePath=null 入库（见 RecordingService#stopRecording）。
-        // 直接 Path.of(null) 会抛 NPE → 全局异常处理器返回 500，
-        // 前端看到的是「服务器错误」而不是「录像文件不存在」，无从排查。
+        // filePath 可能为 null：录制中途被停、回调未到时以 filePath=null 入库。
+        // 直接 Path.of(null) 会抛 NPE → 500，前端只看到「服务器错误」，无从排查。
         String filePath = record.getFilePath();
         if (filePath == null || filePath.isBlank()) {
             throw BizException.notFound("该录像尚未生成文件（可能录制中断）：" + recordId);
@@ -434,17 +371,9 @@ public class CloudRecordController {
                 start = bounds[0];
                 long end = bounds[1];
                 len = end - start + 1;
-                /*
-                 * 按 RFC 9110 §14.4 返回 206 + Content-Range。
-                 *
-                 * <p><b>早先这里是「起点为 0 就回 200 全量」</b>，实测反而更慢：
-                 * 回 200 等于告诉浏览器「这就是完整内容」，它没法再发 Range，
-                 * 只能从头到尾把整个文件拉下来才肯播 ——
-                 * 对 1 小时、357MB 的录像就是「必须下完才能看」。
-                 *
-                 * <p>回 206 之后，浏览器可以先取文件尾（找 moov），
-                 * 再按需取 mdat 区间，秒开。
-                 */
+                // 按 RFC 9110 §14.4 返回 206 + Content-Range。早先「起点为 0 就回 200 全量」
+                // 反而更慢：200 表示这是完整内容，浏览器无法再发 Range，只能下完整个文件才肯播。
+                // 回 206 后可先取文件尾（找 moov），再按需取 mdat，秒开。
                 response.setStatus(jakarta.servlet.http.HttpServletResponse.SC_PARTIAL_CONTENT);
                 response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + size);
             }
@@ -454,21 +383,10 @@ public class CloudRecordController {
     }
 
     /**
-     * 把文件的 {@code [start, start+len)} 区间写到响应流。
-     *
-     * <p><b>为什么自己写而不用 Resource / ResourceRegion</b>：
-     * 本项目里这两个都踩了坑 ——
-     * <ul>
-     *   <li>{@code InputStreamResource}：流从文件开头读，请求 {@code bytes=3244032-}
-     *       会返回<b>文件开头</b>的字节，Chrome 拿到错位数据后 FFmpegDemuxer 报
-     *       {@code DEMUXER_ERROR_COULD_NOT_OPEN}，表现为「播不出来」；</li>
-     *   <li>{@code ResourceRegion}：没有对应的 converter 接手
-     *       （{@code No converter for ResourceRegion} / Jackson 报
-     *       {@code Type definition error: ChannelInputStream}）；
-     *       {@code StreamingResponseBody} 的 lambda 同样不被识别
-     *       （{@code No converter for ...$$Lambda}）。</li>
-     * </ul>
-     * 直接操作 HttpServletResponse 最稳：字节完全可控，也不把整段读进内存。
+     * 把文件的 {@code [start, start+len)} 区间写到响应流。不用 Resource / ResourceRegion：
+     * InputStreamResource 从文件头读，请求 {@code bytes=3244032-} 会返回开头的字节，
+     * Chrome 拿到错位数据后报 {@code DEMUXER_ERROR_COULD_NOT_OPEN}；ResourceRegion 与
+     * StreamingResponseBody 都报 {@code No converter}。直接操作 HttpServletResponse 最稳。
      */
     private void writeRange(Path path, long start, long len,
                             java.io.OutputStream out) throws java.io.IOException {
@@ -490,13 +408,7 @@ public class CloudRecordController {
         }
     }
 
-    /**
-     * 解析 Range 头（只支持单区间）。
-     *
-     * @param spec 形如 {@code 0-1023} 或 {@code 1024-}
-     * @param size 文件总长
-     * @return {start, end}；格式非法或越界返回 {@code null}
-     */
+    /** 解析 Range 头（只支持单区间）。格式非法或越界返回 {@code null}。 */
     private long[] parseRange(String spec, long size) {
         try {
             int dash = spec.indexOf('-');
@@ -529,11 +441,8 @@ public class CloudRecordController {
     }
 
     /**
-     * 指定时间段录像播放 / 下载。
-     *
-     * <p>GBS 会把区间内的多段录像用 ffmpeg 合成一个 MP4。本实现不引入 ffmpeg 依赖，
-     * 改为返回区间内的录像段列表，由前端按顺序播放；如需真正的单文件合成，
-     * 可在部署环境额外接入 ffmpeg。
+     * 指定时间段录像播放 / 下载。GBS 用 ffmpeg 把区间内多段合成一个 MP4；本实现不引入 ffmpeg 依赖，
+     * 返回区间内的录像段列表由前端按序播放，需要单文件合成时再接入 ffmpeg。
      */
     @Operation(summary = "指定时间段录像播放 / 下载")
     @GetMapping("/video/{operate}/{serial}/{code}/{starttime}/{endtime}/video.mp4")
@@ -570,7 +479,6 @@ public class CloudRecordController {
 
     // ==================== 内部 ====================
 
-    /** 把录像实体组装为出参。 */
     private CloudRecordVo toItem(GbRecord r, boolean withDownloadUrl) {
         CloudRecordVo item = new CloudRecordVo();
         item.setRecordId(r.getRecordId());
@@ -588,20 +496,9 @@ public class CloudRecordController {
         if (ObjectStorageService.TYPE_LOCAL.equals(r.getStorageType()) && r.getEndTime() != null) {
             item.setPlayUrl(spaWebConfiguration.toStaticUrl(r.getFilePath()));
         }
-        /*
-         * 下载地址：与播放地址<b>尽量是同一个 URL</b>。
-         *
-         * <p>同一个文件本来就该用同一个地址取 —— 前端拿到它就能直接
-         * {@code <a download>} 让浏览器原生下载（有进度、可续传、不占内存）。
-         *
-         * <p>早先本地录像走 {@code /api/v1/cloudrecord/file/{recordId}}：
-         * 那个接口由本进程转发文件流，协议上没问题，但前端为了带登录头
-         * 只能 {@code fetch + blob} 把整个文件读进内存 —— 136MB 的录像
-         * 直接吃掉 136MB+ 内存，且全程没有任何进度反馈，用户以为卡死了。
-         * 有了 nginx sendfile 就直接给静态路径。
-         *
-         * <p>对象存储（OSS）仍是签名/外链 URL，跨域，交给浏览器新窗口下载。
-         */
+        // 下载地址尽量与播放地址用同一个 URL：前端可直接 <a download> 让浏览器原生下载
+        // （有进度、可续传、不占内存）。早先本地录像走 /file/{recordId}，前端只能 fetch+blob
+        // 把整个文件读进内存（136MB 录像吃 136MB+，无进度）。对象存储仍是签名外链。
         if (withDownloadUrl && r.getEndTime() != null && recordService.fileAvailable(r)) {
             String playUrl = item.getPlayUrl();
             item.setDownloadUrl(playUrl != null ? playUrl : recordService.downloadUrl(r));
@@ -612,14 +509,8 @@ public class CloudRecordController {
     // ==================== 通道快照 ====================
 
     /**
-     * 服务端抓拍：拉流 → ffmpeg 解码 → 存盘。
-     *
-     * <p>这是<b>唯一</b>的快照来源：现场是 H265，只有真正解码才能出图。
-     * 服务端用外部 ffmpeg 进程完成（jar 增量 0，理由见 {@link FfmpegSnapService}）。
-     *
-     * @param serial 设备编码
-     * @param code   通道编码
-     * @return 快照访问路径
+     * 服务端抓拍：拉流 → ffmpeg 解码 → 存盘。这是唯一的快照来源：现场是 H265，
+     * 只有真正解码才能出图；用外部 ffmpeg 进程完成（jar 增量 0，理由见 {@link FfmpegSnapService}）。
      */
     @Operation(summary = "服务端抓拍：拉流 → ffmpeg 解码 → 存盘")
     @PostMapping("/snap/grab")
@@ -635,11 +526,8 @@ public class CloudRecordController {
     }
 
     /**
-     * 读取通道快照。
-     *
-     * <p><b>不校验登录态</b>：快照是「公开的通道缩略图」，会被直接放进
-     * {@code <img src>} 里加载 —— {@code <img>} 请求不带自定义头，
-     * 带鉴权就永远加载不出来。故按公开静态资源处理。
+     * 读取通道快照。<b>不校验登录态</b>：快照直接放进 {@code <img src>}，
+     * {@code <img>} 不带自定义头，带鉴权就永远加载不出来。
      */
     @Operation(summary = "读取通道快照")
     @GetMapping("/snap/{serial}/{code}.jpg")
@@ -659,10 +547,8 @@ public class CloudRecordController {
     // ==================== 分享页 ====================
 
     /**
-     * 生成某段录像的分享链接。
-     *
-     * <p>对齐 LiveGBS 的「分享页」：详情页点分享 → 拿到一个免登录链接 →
-     * 别人直接打开就能看这一段录像。
+     * 生成某段录像的分享链接。对齐 LiveGBS 的分享页：详情页点分享 → 免登录链接，
+     * 打开就能看这一段录像。
      */
     @Operation(summary = "生成某段录像的分享链接")
     @PostMapping("/share")
@@ -683,10 +569,7 @@ public class CloudRecordController {
     }
 
     /**
-     * 按分享令牌取录像信息（<b>免登录</b>）。
-     *
-     * <p>路径在 {@code SaTokenConfiguration} 的放行名单里 —— 分享链接就是给
-     * 不登录的人用的。
+     * 按分享令牌取录像信息（<b>免登录</b>）。路径在 {@code SaTokenConfiguration} 的放行名单里。
      */
     @Operation(summary = "按分享令牌取录像信息（免登录）")
     @GetMapping("/share/{token}")
@@ -702,9 +585,7 @@ public class CloudRecordController {
         vo.put("startAt", TimeFormats.toCompact(record.getStartTime()));
         vo.put("duration", record.getDuration());
         vo.put("fileSize", record.getFileSize());
-        // 播放地址：与登录态下点播走同一条路径。
-        // 注意用 playVo(...) 而不是 play(...)：后者带 checkLogin()，
-        // 免登录访客会 401（令牌校验已过，却在拼地址时被鉴权拦下）。
+        // 用 playVo 而不是 play：后者带 checkLogin()，免登录访客会 401
         CloudPlayVo play = playVo(record, record.getRecordId());
         vo.put("webrtc", play.getWebrtc());
         vo.put("flv", play.getFlv());

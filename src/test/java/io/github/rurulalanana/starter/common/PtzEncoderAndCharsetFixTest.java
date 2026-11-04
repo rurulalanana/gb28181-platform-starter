@@ -124,6 +124,29 @@ class PtzEncoderAndCharsetFixTest {
         assertEquals("A50F018C01000042", PtzEncoder.auxiliary(1, 1, true));
     }
 
+    /**
+     * 拉框缩放<b>不能</b>走 PTZCmd。
+     *
+     * <p>2022 版把它定义成 A.2.3.1.8 的独立 XML 元素 {@code <DragZoomIn>}；
+     * A.3.2 的指令表（表 A.4/A.5）里没有拉框指令码。
+     *
+     * <p>曾经实现成 11 字节 {@code 0x81/0x82} 形式，与预置位的
+     * {@link PtzEncoder#PRESET_SET} / {@link PtzEncoder#PRESET_CALL} <b>同码</b>：
+     * 设备按报文长度区分，长度对不上就当预置位处理 ——
+     * 现场表现是「点拉框放大，预置位被覆盖了」。
+     *
+     * <p>这条断言的作用是防止有人再把 11 字节形式加回来。
+     */
+    @Test
+    @DisplayName("拉框缩放不走 PTZCmd（2022 版是独立 XML 元素）")
+    void dragZoomIsNotPtzCmd() {
+        for (java.lang.reflect.Method m : PtzEncoder.class.getDeclaredMethods()) {
+            org.junit.jupiter.api.Assertions.assertNotEquals("dragZoom", m.getName(),
+                    "PtzEncoder 不应提供 dragZoom：0x81/0x82 与预置位同码，"
+                            + "2022 版拉框应走 ManscdpBuilder.dragZoomIn/dragZoomOut");
+        }
+    }
+
     // ==================== GBK 乱码修复 ====================
 
     /** 模拟解码器首次尝试：把 GBK 字节按 UTF-8 解码。 */

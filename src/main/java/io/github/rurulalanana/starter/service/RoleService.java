@@ -24,21 +24,11 @@ import java.util.regex.Pattern;
 /**
  * 角色与权限解析。
  *
- * <h3>为什么带缓存</h3>
- *
- * <p>{@link #permissionsOf} 在<b>每个写请求</b>的信用校验里都会被调用
- * （{@code WritePermissionInterceptor}），如果每次都查库，
- * 一个「批量改通道」的操作会连带打出几十次角色查询。
- * 角色数据量极小（十几个）且只在管理页改动，因此整表缓存在内存里，
- * 写操作（保存/删除/启停）后整体失效，代价是「改完角色后下一次请求才生效」
- * —— 这本来就是期望行为。
- *
- * <h3>缓存失效为什么用整体重建而不是逐条更新</h3>
- *
- * <p>角色变更会同时影响「权限集合」和「该角色是否启用」，
- * 逐条更新的分支比直接丢弃整张表多得多，而重建一次的代价是
- * 一条 {@code SELECT} + 每个角色一条 {@code SELECT}（十几次往返，毫秒级）。
- * 宁可粗放也不要留一个「改了没生效」的隐蔽 bug。
+ * <p>整表缓存在内存：{@link #permissionsOf} 在每个写请求的权限校验里都会被调用
+ * （{@code WritePermissionInterceptor}），每次查库会让一个批量操作打出几十次角色查询；
+ * 角色数据十几条且只在管理页改动，写操作后整体失效即可（「改完下一次请求生效」本就是期望行为）。
+ * 重建而非逐条更新的理由：角色变更同时影响权限集合与启用状态，
+ * 一条 SELECT + 每角色一条 SELECT 是毫秒级，宁可粗放也不留「改了没生效」的隐蔽 bug。
  */
 @Slf4j
 @Service
@@ -51,9 +41,7 @@ public class RoleService {
     private final GbRoleMapper roleMapper;
 
     /**
-     * 权限缓存：角色编码 → 权限点集合。
-     *
-     * <p>{@code null} 表示尚未加载或已失效，下次读取时重建。
+     * 权限缓存（角色编码 → 权限点）：{@code null} 表示尚未加载或已失效，下次读取时重建。
      * 整体替换引用（不可变 Map），读路径无需加锁。
      */
     private volatile Map<String, Set<String>> grantCache;
@@ -85,11 +73,8 @@ public class RoleService {
     }
 
     /**
-     * 解析一组角色编码对应的<b>展开后</b>权限点集合。
-     *
-     * <p>停用的角色不贡献权限；不存在的角色编码直接忽略
-     * （用户表里可能残留被删角色的编码，这种情况应退化为「没有该角色的权限」，
-     * 而不是抛异常让整个请求失败）。
+     * 解析一组角色编码对应的展开后权限点。停用的角色不贡献权限；不存在的编码直接忽略
+     * （用户表里可能残留被删角色的编码，应退化为「没有该角色的权限」而不是报错）。
      */
     public Set<String> permissionsOf(Collection<String> roleCodes) {
         Set<String> out = new LinkedHashSet<>();
@@ -146,11 +131,8 @@ public class RoleService {
     // ==================== 写入 ====================
 
     /**
-     * 生效角色编码校验：返回去重后的合法编码列表，遇到不存在的角色直接报错。
-     *
-     * <p>给 {@code UserController#save} 用 —— 用户表里存的是角色编码，
-     * 一旦写入一个不存在的编码，这个人就会「什么权限都没有」且页面上查不出原因。
-     * 宁可在这里挡住。
+     * 生效角色编码校验：返回去重后的合法编码，遇到不存在的角色直接报错。
+     * 用户表存的是角色编码，写入一个不存在的编码会让该用户「什么权限都没有」且查不出原因。
      */
     public List<String> requireExistingRoles(Collection<String> roleCodes) {
         List<String> wanted = new ArrayList<>();
@@ -178,18 +160,10 @@ public class RoleService {
     }
 
     /**
-     * 新增 / 修改角色。
-     *
-     * <p>三条硬约束：
-     * <ol>
-     *   <li>{@code admin} 的权限恒为通配，传入值被忽略 —— 它是唯一保证
-     *       「永远有管理员」的锚点，允许改空就能把自己锁死；</li>
-     *   <li>权限点必须是已登记的编码，防止前端传错字面量把角色变成空壳；</li>
-     *   <li>至少要有一个权限点 —— 「零权限角色」在页面上无法与「角色配置出错」区分。</li>
-     * </ol>
-     *
-     * <p><b>没有「改编码」这个操作</b>：{@code code} 是主键，用户表里存的就是它。
-     * 想让角色换个编码，等于新建一个角色再把用户改过去。
+     * 新增 / 修改角色。三条硬约束：{@code admin} 的权限恒为通配（它是「永远有管理员」的锚点，
+     * 允许改空就能把自己锁死）；权限点必须是已登记的编码（防前端传错字面量把角色变成空壳）；
+     * 至少一个权限点（零权限角色在页面上无法与「配置出错」区分）。
+     * 没有「改编码」操作：{@code code} 是主键，用户表存的就是它。
      */
     @Transactional
     public GbRole save(String code, String name, String description, Collection<String> permissionCodes,

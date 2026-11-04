@@ -10,29 +10,33 @@ import java.math.BigDecimal;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ChannelVo {
 
-    /** 通道国标编号。 */
     private String id;
 
-    /** 所属设备编号。 */
     private String deviceId;
 
-    /** 所属设备名称。 */
     private String deviceName;
 
-    /** 所属设备自定义名称。 */
     private String deviceCustomName;
 
     /** 所属设备类型，固定 {@code GB}。 */
     private String deviceType;
 
-    /** 所属设备是否在线。 */
+    /**
+     * 所属设备的<b>接入方式</b>：{@code gb28181} / {@code dahua}。
+     *
+     * <p>{@code deviceType} 是历史字段（恒为 {@code GB}），不能用来判协议。
+     * 前端据此决定显不显示「相机参数」tab —— 那是 SDK 直连设备才有的能力。
+     */
+    private String source;
+
+    /** 所属设备是否在线（通道自身可用性看 status）。 */
     private Boolean deviceOnline;
 
-    /** 通道序号。 */
     private Integer channel;
 
     private String name;
     private String customName;
+    /** 自定义国标编号（级联时对外暴露）。 */
     private String customId;
     private String block;
     private String civilCode;
@@ -48,13 +52,11 @@ public class ChannelVo {
     /** 是否有子设备：0 无 / 1 有。 */
     private Integer parental;
 
-    /** 父节点编号。 */
     private String parentId;
 
     private Integer secrecy;
     private Integer registerWay;
 
-    /** 在线状态字面量。 */
     private String status;
 
     private BigDecimal longitude;
@@ -70,39 +72,37 @@ public class ChannelVo {
     private Integer signalLevel;
     private String resolution;
 
-    /**
-     * 码流编号列表（设备上报，如 {@code "0,1"}）。
-     *
-     * <p>据此可判断该通道是否支持子码流。
-     */
+    /** 码流编号列表（设备上报，如 {@code "0,1"}），据此判断是否支持子码流。 */
     private String streamNumberList;
+
+    /**
+     * 该通道能否切换码流（前端据此决定显不显示码流选择器）。
+     *
+     * <p>判据见 {@code DeviceController#streamSwitchable}：SDK 直连设备恒支持，
+     * 国标设备看目录里有没有上报两路以上的 {@code StreamNumberList}。
+     */
+    private Boolean streamSwitchable;
     private String downloadSpeed;
 
-    /** 按需直播开关。 */
+    /** 按需直播（与云端录像互斥）。 */
     private Boolean ondemand;
 
-    /** 音频开关。 */
     private Boolean audioEnable;
 
-    /** 云端录像开关。 */
+    /** 云端录像开关（与按需直播互斥）。 */
     private Boolean cloudRecord;
 
-    /** 分享开关。 */
     private Boolean shared;
 
-    /** 子节点数。 */
     private Integer subCount;
 
-    /** 最近更新时间（yyyy-MM-dd HH:mm:ss）。 */
     private String updatedAt;
 
-    /** 记录创建时间（yyyy-MM-dd HH:mm:ss）。 */
     private String createdAt;
 
     /** 当前流 ID，非空表示正在直播。 */
     private String streamId;
 
-    /** 输出路数。 */
     private Integer numOutputs;
 
     // ---- 直播中附带的播放地址 ----

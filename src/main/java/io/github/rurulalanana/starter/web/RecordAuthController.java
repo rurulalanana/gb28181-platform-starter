@@ -12,39 +12,19 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 录像地址鉴权端点——<b>供 nginx 的 {@code auth_request} 子请求调用</b>。
+ * 录像地址鉴权端点，<b>供 nginx 的 {@code auth_request} 子请求调用</b>。
  *
- * <p><b>它故意不遵守 starter 的接口约定</b>：
- * <ul>
- *   <li>不包 {@code ApiResponse}、不返回 JSON —— nginx 只看 HTTP 状态码；</li>
- *   <li>状态码<b>不</b>恒为 200 —— {@code 2xx} 放行、{@code 403} 拒绝，
- *       这正是子请求协议的语义。</li>
- * </ul>
- * 若按项目约定包成「HTTP 200 + body 里写错误码」，nginx 会把所有被拒绝的
- * 请求都当成放行，<b>鉴权形同虚设且没有任何报错</b>。这是唯一的例外，
- * 不要照抄到别处。
+ * <p><b>故意不遵守 starter 的接口约定</b>：不包 {@code ApiResponse}、不返回 JSON，状态码也不恒为 200
+ * —— nginx 只看状态码（2xx 放行、403 拒绝）。若包成「HTTP 200 + body 里写错误码」，
+ * nginx 会把所有被拒绝的请求当成放行，<b>鉴权形同虚设且无报错</b>。这是唯一例外，不要照抄到别处。
  *
- * <pre>
- * nginx 侧配置（deploy/nginx-record.conf）：
+ * <p>nginx 侧：{@code location /record/} 用 {@code auth_request /_record_auth}，
+ * 子请求 {@code proxy_pass http://127.0.0.1:48092/api/v1/record/auth}，并转发
+ * {@code X-Original-URI $request_uri}（完整配置见 deploy/nginx-record.conf）。
+ * 必须转发：子请求自身 URI 恒为 {@code /_record_auth}，不含待校验的路径与签名，不转发等于验空串。
  *
- *   location /record/ {
- *       auth_request /_record_auth;
- *       ...
- *   }
- *   location = /_record_auth {
- *       internal;
- *       proxy_pass http://127.0.0.1:48092/api/v1/record/auth;
- *       proxy_pass_request_body off;
- *       proxy_set_header Content-Length "";
- *       proxy_set_header X-Original-URI $request_uri;
- *   }
- * </pre>
- *
- * <p>为什么要转发 {@code X-Original-URI}：子请求自身的 URI 恒为
- * {@code /_record_auth}，不含待校验的录像路径与签名。不转发就等于在验一个空串。
- *
- * <p>本端点不参与登录校验（nginx 无法携带 Sa-Token 头），安全性完全由
- * 地址里的签名保证；签名关闭时它一律放行，与 {@link RecordUrlSigner#allow} 一致。
+ * <p>本端点不参与登录校验（nginx 无法携带 Sa-Token 头），安全性完全由地址签名保证；
+ * 签名关闭时一律放行，与 {@link RecordUrlSigner#allow} 一致。
  */
 @Slf4j
 @RestController
@@ -54,11 +34,7 @@ public class RecordAuthController {
 
     private final RecordUrlSigner signer;
 
-    /**
-     * 校验录像请求。
-     *
-     * @param originalUri nginx 转发的原始请求 URI（含 query）
-     */
+    /** 校验录像请求。{@code originalUri} 是 nginx 转发的原始 URI（含 query）。 */
     @Operation(summary = "校验录像请求")
     @GetMapping("/api/v1/record/auth")
     public void auth(@RequestHeader(value = "X-Original-URI", required = false) String originalUri,

@@ -19,10 +19,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 录像计划服务。
- *
- * <p>计划 = 「哪些通道、在每周哪几天、每天什么时段录云端录像」。
- * 数据结构与 LiveGBS 兼容（{@code plan} 存 JSON，7 个数组对应周一~周日）。
+ * 录像计划服务：哪些通道、每周哪几天、每天什么时段录云端录像。
+ * 与 LiveGBS 兼容（{@code plan} 存 JSON，7 个数组对应周一~周日）。
  */
 @Slf4j
 @Service
@@ -33,13 +31,11 @@ public class RecordPlanService {
     private final GbRecordPlanChannelMapper planChannelMapper;
     private final DeviceService deviceService;
 
-    /** 全部计划（按创建时间倒序）。 */
     public List<GbRecordPlan> listAll() {
         return planMapper.selectList(Wrappers.<GbRecordPlan>lambdaQuery()
                 .orderByDesc(GbRecordPlan::getCreateTime));
     }
 
-    /** 按 ID 取计划。 */
     public GbRecordPlan find(String planId) {
         if (planId == null || planId.isBlank()) {
             return null;
@@ -48,13 +44,9 @@ public class RecordPlanService {
                 .eq(GbRecordPlan::getPlanId, planId).last("limit 1"));
     }
 
-    /**
-     * 新增或更新计划。
+    /** 新增或更新计划（{@code planId} 为空则新建）。
      *
-     * @param planId 为空则新建
-     * @param name   计划名称
-     * @param plan   时段规则 JSON 字符串
-     * @param enable 是否启用
+     * @param plan 时段规则 JSON 字符串
      * @return 计划 ID
      */
     @Transactional
@@ -77,7 +69,6 @@ public class RecordPlanService {
         return p.getPlanId();
     }
 
-    /** 启用/停用计划。 */
     @Transactional
     public void setEnable(String planId, boolean enable) {
         GbRecordPlan p = find(planId);
@@ -89,7 +80,6 @@ public class RecordPlanService {
         planMapper.updateById(p);
     }
 
-    /** 删除计划（连同通道关联）。 */
     @Transactional
     public void remove(String planId) {
         planMapper.delete(Wrappers.<GbRecordPlan>lambdaQuery().eq(GbRecordPlan::getPlanId, planId));
@@ -97,7 +87,6 @@ public class RecordPlanService {
                 .eq(GbRecordPlanChannel::getPlanId, planId));
     }
 
-    /** 计划已关联的通道编码。 */
     public Set<String> channelIds(String planId) {
         Set<String> ids = new HashSet<>();
         for (GbRecordPlanChannel c : planChannelMapper.selectList(
@@ -107,11 +96,9 @@ public class RecordPlanService {
         return ids;
     }
 
-    /**
-     * 设置计划的关联通道（全量覆盖）。
+    /** 设置计划的关联通道（全量覆盖）。
      *
-     * @param planId 计划 ID
-     * @param refs   通道引用，元素形如 {@code <设备编码>/<通道编码>}
+     * @param refs 通道引用，元素形如 {@code <设备编码>/<通道编码>}
      */
     @Transactional
     public void setChannels(String planId, List<String> refs) {
@@ -180,44 +167,15 @@ public class RecordPlanService {
     }
 
     /**
-     * 计算此刻「计划判定应录」的通道集合。
-     *
-     * <p><b>为什么需要它</b>：本类原先只提供 CRUD，<b>没有任何地方真正执行计划</b>——
-     * 用户在界面上配好时段、关联通道后什么都不会发生。这是功能缺失，不是配置问题。
-     *
-     * <h3>语义：只产出一个信号，不控制用户配置</h3>
-     *
-     * <p>返回值只表示「此刻按时间表应该录」，<b>不表示「要把通道开关改成什么」</b>。
-     * 调用方（{@code PlatformScheduler#applyRecordPlans}）只把它写进内存
-     * （{@code ChannelRecordPolicy#replacePlanActive}），
-     * <b>不写数据库、不改 {@code cloud_record}、不改 {@code on_demand}</b>。
-     *
-     * <h3>与用户手动开关的关系</h3>
-     *
-     * <p>最终「是否录」= 用户手动开关 <b>∪</b> 本信号，等价于：
-     * <ul>
-     *   <li><b>手动开启 → 全天录制，完全忽略计划</b>（用户意图更强，短路判定）；</li>
-     *   <li><b>手动关闭 → 走计划时段</b>（本信号决定）；</li>
-     *   <li>计划退出时段后，通道的 {@code cloud_record}/{@code on_demand}
-     *       原样不动（除了手动开启的本来就在录，不受影响），
-     *       界面上不会出现「状态自己变」。</li>
-     * </ul>
-     * 所以「手动关掉某通道就能让它不录」是成立的 —— 除非该通道在计划时段内。
-     * 若用户希望彻底不录，应把该通道从所有计划里移除（或停用计划）。
-     *
-     * <h3>多个计划包含同一通道</h3>
-     *
-     * <p>取<b>并集</b>：任一计划处于时段内即应录制。
-     * 这符合直觉——给同一通道配「白班 8-18」和「夜班 20-6」两个计划，
-     * 期望是两段都录，而不是只在重叠时段录。本方法的实现天然是 union
-     * （{@code active} 是个 Set，任何计划命中就 add）。
-     *
-     * @param now 计算基准时刻（便于测试与「跨零点」判断）
+     * 计算此刻「计划判定应录」的通道集合：只表示「按时间表应该录」，不表示「要把通道开关改成什么」。
+     * 调用方只把它写进内存（{@code ChannelRecordPolicy#replacePlanActive}），不写库、不改
+     * {@code cloud_record}/{@code on_demand}；最终是否录 = 手动开关 ∪ 本信号。
+     * 多个计划含同一通道取并集（白班 + 夜班期望两段都录），实现天然是 union。
      */
     public PlanScope scopeAt(LocalDateTime now) {
         Set<String> active = new HashSet<>();
         Set<String> governed = new HashSet<>();
-        // 一次性取出「启用计划 → 通道」的映射，避免逐计划查库
+        // 一次性取出「启用计划 → 通道」，避免逐计划查库
         List<GbRecordPlan> plans = planMapper.selectList(Wrappers.<GbRecordPlan>lambdaQuery()
                 .eq(GbRecordPlan::getEnable, true));
         if (plans.isEmpty()) {
@@ -235,7 +193,7 @@ public class RecordPlanService {
                 continue;
             }
             governed.add(c.getChannelId());
-            // 并集：任一计划命中即 active。多个计划覆盖同一通道不会互相抵消。
+            // 并集：任一计划命中即 active，多个计划覆盖同一通道不会互相抵消
             if (inPlanWindow(plan.getPlan(), now)) {
                 active.add(c.getChannelId());
             }
@@ -244,18 +202,10 @@ public class RecordPlanService {
     }
 
     /**
-     * 判断某时刻是否落在计划时段内。
-     *
-     * <p>计划 JSON 结构（与 LiveGBS 兼容）：
-     * {@code [[{"s1":"00:00","e1":"24:00"}], [], ..., []]}，
-     * 外层 7 个数组依次为<b>周一 ~ 周日</b>，键名里的数字即「第几天」（1~7）。
-     *
-     * <p><b>跨零点时段的处理</b>（如 {@code 23:00 ~ 02:00}）：
-     * 国标/GBS 的语义是「从当天 23:00 到次日 02:00」，同一段里
-     * {@code s > e} 即表示跨天。因此判断时除了看今天的段，
-     * 还要看<b>昨天</b>是否有段跨到了今天凌晨。
-     *
-     * <p>解析失败按「不在时段内」处理（宁可少录也不要因为脏数据一直录）。
+     * 判断某时刻是否落在计划时段内。计划 JSON 与 LiveGBS 兼容：外层 7 个数组为周一~周日，
+     * 键名里的数字即「第几天」（1~7），例如 {@code [[{"s1":"00:00","e1":"24:00"}], [], ...]}。
+     * 跨零点段（如 23:00~02:00）语义是「当天 23:00 到次日 02:00」，同一段里 s &gt; e 即跨天，
+     * 所以要额外检查昨天是否有段延续到今天凌晨。解析失败按「不在时段内」处理。
      */
     boolean inPlanWindow(String planJson, LocalDateTime now) {
         if (planJson == null || planJson.isBlank()) {
@@ -276,7 +226,7 @@ public class RecordPlanService {
         int today = now.getDayOfWeek().getValue() - 1;
         int yesterday = (today + 6) % 7;
 
-        // 1) 今天的时段（正常段：start < end；或跨零点段的前半：start > end 且当前在 start 之后）
+        // 1) 今天的时段（正常段 start < end；跨零点段的前半 start > end 且当前在 start 之后）
         if (matchDay(days, today, minuteOfDay, true)) {
             return true;
         }
@@ -287,11 +237,8 @@ public class RecordPlanService {
     /**
      * 判断某一天的时段是否命中当前时刻。
      *
-     * @param dayIndex 数组下标（0=周一）
-     * @param minute   当天第几分钟
-     * @param primary  是否是「今天」这个数组。
-     *                 {@code true} 时处理「当天段」与「跨零点段的前半」；
-     *                 {@code false} 时只处理「昨天跨零点段延续到今天凌晨」的部分
+     * @param primary {@code true} 处理「当天段」与「跨零点段的前半」；
+     *                {@code false} 只处理「昨天跨零点段延续到今天凌晨」的部分
      */
     private boolean matchDay(com.fasterxml.jackson.databind.JsonNode days, int dayIndex,
                              int minute, boolean primary) {
@@ -302,9 +249,7 @@ public class RecordPlanService {
         if (segs == null || !segs.isArray()) {
             return false;
         }
-        // 键名里的数字是「第几天」（1~7），即数组下标 + 1。
-        // 历史数据里可能存在「键名与所在数组不匹配」的脏数据，
-        // 故同时尝试按当前数组下标推导的键名，两者取到哪个用哪个。
+        // 键名里的数字是「第几天」（1~7）即下标 + 1；历史数据里可能键名与数组不匹配，故两者都试
         String sKey = "s" + (dayIndex + 1);
         String eKey = "e" + (dayIndex + 1);
         for (com.fasterxml.jackson.databind.JsonNode seg : segs) {

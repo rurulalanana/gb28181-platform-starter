@@ -22,6 +22,16 @@ public class DeviceVo {
     /** 设备类型，固定 {@code GB}。 */
     private String type;
 
+    /**
+     * 接入方式（{@code gb28181} / {@code dahua}），来自 {@code gb_device.source}。
+     *
+     * <p>前端要区分「国标设备」和「SDK 直连设备」：
+     * 国标设备在线时不能删（它立刻会重新 REGISTER），
+     * 而 SDK 设备的连接是平台主动发起的，在线也能删（删之前把会话登出）。
+     * 没有这个字段前端只能靠猜。
+     */
+    private String source;
+
     private String manufacturer;
     private String model;
     private String firmware;
@@ -44,7 +54,6 @@ public class DeviceVo {
     /** 在线状态字面量：{@code ON} / {@code OFF}。 */
     private String status;
 
-    /** 是否在线。 */
     private Boolean online;
 
     /** 最近一次注册的对端地址。 */
@@ -52,32 +61,19 @@ public class DeviceVo {
     private Integer remotePort;
 
     /**
-     * 设备信令出口地址，形如 {@code udp://183.201.190.57:5060}。
-     *
-     * <p>把传输协议、IP、端口合成一个可直接复制粘贴的地址，
+     * 设备信令出口地址，形如 {@code udp://183.201.190.57:5060}。合成一个可复制粘贴的地址，
      * 排查跨网/NAT 问题时比拆成三列更省事。
      */
     private String endpoint;
 
-    /** 信令传输模式。 */
     private String commandTransport;
 
-    /** 流传输模式。 */
     private String mediaTransport;
 
-    /**
-     * TCP 流传输模式：{@code passive} 被动 / {@code active} 主动。
-     *
-     * <p>与 {@link #mediaTransport} 组合起来才是完整的流传输设置，
-     * 例如 {@code TCP + active} 表示主动推流。
-     */
+    /** TCP 流传输模式：{@code passive} / {@code active}，需与 {@link #mediaTransport} 组合看。 */
     private String mediaTransportMode;
 
-    /**
-     * 码流索引：点播时指定哪一路码流。
-     *
-     * <p>取值：{@code auto} 自动 / {@code streamnumber:0} 主码流 / {@code streamnumber:1} 子码流。
-     */
+    /** 码流索引：{@code auto} 自动 / {@code streamnumber:0} 主码流 / {@code streamnumber:1} 子码流。 */
     private String streamIndex;
 
     private String charset;
@@ -98,13 +94,10 @@ public class DeviceVo {
     private String updatedAt;
     private String createdAt;
 
-    /** 通道总数（仅树节点等场景填充）。 */
     private Integer subCount;
 
-    /** 设备子节点数（同 {@link #subCount}）。 */
     private Integer subCountDevice;
 
-    /** 在线子节点数。 */
     private Long onlineSubCount;
 
     /** 子节点列表（树形返回时填充）。 */

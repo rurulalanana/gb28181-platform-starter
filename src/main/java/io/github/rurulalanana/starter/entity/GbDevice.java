@@ -27,19 +27,15 @@ public class GbDevice implements Serializable {
     /** 设备国标编号（20 位）。 */
     private String deviceId;
 
-    /** 设备上报名称。 */
     private String name;
 
-    /** 本域自定义名称，优先展示。 */
     private String customName;
 
     private String manufacturer;
     private String model;
     private String firmware;
 
-    /** 通道数（目录查询后的统计值）。 */
     private Integer channelCount;
-
     private String civilCode;
     private String address;
     private String parentId;
@@ -59,40 +55,24 @@ public class GbDevice implements Serializable {
     private String remoteIp;
     private Integer remotePort;
 
-    /** 信令传输模式：{@code UDP} / {@code TCP}。 */
     private String transport;
 
-    /** 流传输模式：{@code UDP} / {@code TCP}。 */
     private String mediaTransport;
 
-    /**
-     * TCP 流传输模式：{@code passive} 被动收流 / {@code active} 主动推流。
-     *
-     * <p>仅在 {@code mediaTransport=TCP} 时有意义；UDP 固定被动。
-     */
+    /** TCP 流传输模式：{@code passive} 被动收流 / {@code active} 主动推流；仅 TCP 有意义，UDP 固定被动。 */
     private String mediaTransportMode;
 
     /**
-     * 码流索引：点播时指定要哪一路码流。
-     *
-     * <p>取值见 {@code StreamIndex} 枚举：
-     * {@code auto}（自动，域内自增序号）、
-     * {@code streamnumber:0}（主码流）、{@code streamnumber:1}（子码流）。
-     *
-     * <p>GB/T 28181—2022 附录 G：SSRC 的第 7~10 位是码流编号，
-     * 0 表示主码流、1 表示子码流。不指定时用域内自增序号（2016 行为）。
+     * 码流索引：{@code auto}（域内自增序号）/ {@code streamnumber:0}（主码流）/ {@code streamnumber:1}（子码流）。
+     * GB/T 28181—2022 附录 G 规定 SSRC 第 7~10 位为码流编号；不指定时用 2016 行为。
      */
     private String streamIndex;
 
     private String charset;
 
     /**
-     * 设备登录用户名。
-     *
-     * <p><b>为什么需要单独一列</b>：国标设备的 Digest 认证只校验密码
-     * （各厂商 username 填法不一，强制校验会误拦设备），所以这里一直是空的；
-     * 而 SDK 直连（大华 NetSDK）的登录是<b>用户名 + 密码</b>必填，
-     * 塞进 {@code name}/{@code extra} 都会让语义变浑。
+     * 设备登录用户名。国标 Digest 只校验密码（各厂商 username 填法不一，强制校验会误拦设备），
+     * 故这一列对国标设备通常为空；SDK 直连（大华 NetSDK）的用户名+密码必填，才单独成列。
      */
     private String username;
 
@@ -124,7 +104,6 @@ public class GbDevice implements Serializable {
     @TableField("extra")
     private String extra;
 
-    /** 展示名：自定义名称优先。 */
     public String displayName() {
         return customName != null && !customName.isBlank() ? customName : name;
     }

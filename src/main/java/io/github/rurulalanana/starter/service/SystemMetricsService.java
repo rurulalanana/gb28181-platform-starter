@@ -24,23 +24,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 系统运行指标采集（概览页数据源）。
- *
- * <p>数据来源：
- * <ul>
- *   <li>CPU / 内存：JDK {@code com.sun.management.OperatingSystemMXBean}；</li>
- *   <li>磁盘：Linux 解析 {@code /proc/mounts} 取物理分区，其他平台退化为
- *       {@code File.listRoots()}；</li>
- *   <li>网络速率：Linux 读 {@code /proc/net/dev} 求和后差分（请求驱动采样，
- *       两次调用之间计算平均速率；首次调用建立基线返回 null）；</li>
- *   <li>负载计数：按会话类型拆分 —— 直播 = {@code REALTIME} 会话数，
- *       播放 = PLAYBACK 会话数（含下载中的 {@code DOWNLOAD}），
- *       录像 = ZLM 内存索引中「会话仍在录」的通道数
- *       （用 {@code isRecording()} 判断，不能用 {@code endTime<=0}，
- *       原因见 {@link #countRecording()}）。</li>
- * </ul>
- *
- * <p>全部采集都做了兜底：单项失败只导致对应字段为 null，不影响其他指标。
+ * 系统运行指标采集（概览页数据源）：CPU / 内存用 JDK {@code OperatingSystemMXBean}；
+ * 磁盘解析 {@code /proc/mounts}（其他平台退化为 {@code File.listRoots()}）；
+ * 网络速率读 {@code /proc/net/dev} 差分（首次调用只建基线）；负载按会话类型拆分，
+ * 录像数用 {@code isRecording()} 而非 {@code endTime<=0}（见 {@link #countRecording()}）。
+ * 全部采集都有兜底：单项失败只让对应字段为 null。
  */
 @Slf4j
 @Service
@@ -54,19 +42,12 @@ public class SystemMetricsService {
     /** 磁盘最多展示的分区数（对齐参考站的展示密度）。 */
     private static final int MAX_DISKS = 4;
 
-    /**
-     * 服务端保留的采样点数。
-     *
-     * <p>与前端 {@code MAX_POINTS} 对齐：采样间隔 3 秒 × 60 点 ≈ 3 分钟视窗。
-     */
+    /** 服务端保留的采样点数：与前端 {@code MAX_POINTS} 对齐，3 秒 × 60 点 ≈ 3 分钟视窗。 */
     private static final int HISTORY_SIZE = 60;
 
     /**
-     * 采样间隔（毫秒）。
-     *
-     * <p>由 {@code PlatformScheduler} 定时驱动，与前端轮询间隔一致。
-     * 不靠请求触发是因为：没人开页面时也要积累历史，否则第一个打开页面的人
-     * 看到的仍是一个点。
+     * 采样间隔（毫秒），由 {@code PlatformScheduler} 驱动。不靠请求触发是因为没人开页面时
+     * 也要积累历史，否则第一个打开页面的人看到的仍是一个点。
      */
     private static final long SAMPLE_INTERVAL_MS = 3000;
 
@@ -80,10 +61,7 @@ public class SystemMetricsService {
 
     /**
      * 历史采样环形缓冲（固定容量，满了丢最旧的）。
-     *
-     * <p>每项是一条完整采样：时刻 + CPU + 内存占用率 + 收发速率。
-     * 用 {@link ArrayDeque} + {@code synchronized} 而非 {@code CopyOnWriteArrayList}：
-     * 写入频率固定且低（3 秒一次），读取（组装响应）也只在轮询时发生，
+     * 用 {@link ArrayDeque} + {@code synchronized} 而非 COW 列表：写入只 3 秒一次，
      * 锁开销可忽略，而 COW 每次写都要复制整个数组。
      */
     private final Deque<Sample> history = new ArrayDeque<>(HISTORY_SIZE + 1);
@@ -92,13 +70,9 @@ public class SystemMetricsService {
     private volatile long lastSampleAt;
 
     /**
-     * 最近一次采样结果（由 {@link #sample()} 写，读接口只读）。
-     *
-     * <p><b>为什么网络速率必须走这个缓存</b>：速率的算法是「与上次比差分」，
-     * 而基线（{@code lastRxBytes}）只有一个。若定时采样与请求处理都去调
-     * {@code fillNet}，两者会互相把对方的基线顶掉，各自的差分区间被截成
-     * 一半甚至更短，表现为速率为 null 或数值乱跳。
-     * 因此只允许采样线程推进基线，请求侧直接取最近一次结果。
+     * 最近一次采样结果（{@link #sample()} 写，读接口只读）。
+     * 网络速率必须走这个缓存：速率的基线只有一个，若定时采样与请求处理都调 {@code fillNet}，
+     * 两者会互相顶掉基线，差分区间被截短，表现为速率为 null 或乱跳。
      */
     private volatile Sample latest;
 
@@ -107,9 +81,7 @@ public class SystemMetricsService {
     }
 
     /**
-     * 采集一次全部指标（响应请求）。
-     *
-     * <p>CPU / 内存 / 磁盘是瞬时值，每次请求重新读；
+     * 采集全部指标（响应请求）：CPU / 内存 / 磁盘是瞬时值重新读，
      * 网络速率是区间均值，取最近一次采样结果（见 {@link #latest}）。
      */
     public SystemMetricsVo metrics() {
@@ -130,11 +102,8 @@ public class SystemMetricsService {
     }
 
     /**
-     * 定时采样入口（由 {@code PlatformScheduler} 调用）。
-     *
-     * <p>这是<b>唯一</b>推进网络基线与写历史缓冲的地方。
-     * 恒定频率运行，不依赖是否有人打开页面 —— 否则第一个进概览页的人
-     * 只能看到一个点，要等 3 分钟才成线。
+     * 定时采样入口（唯一推进网络基线与写历史缓冲的地方）：恒定频率运行，不依赖是否有人开页面，
+     * 否则第一个进概览页的人只能看到一个点。
      */
     public void sample() {
         try {
@@ -148,9 +117,7 @@ public class SystemMetricsService {
     }
 
     /**
-     * 把本次采样写入环形缓冲与 {@link #latest}。
-     *
-     * <p>带时间限流：限流是为了兼容手动触发（如启动后立即采一次），
+     * 把本次采样写入环形缓冲与 {@link #latest}。时间限流兼容手动触发，
      * 避免同一秒内写入多点把 3 分钟视窗压缩。
      */
     private void recordSample(SystemMetricsVo vo) {
@@ -191,23 +158,9 @@ public class SystemMetricsService {
     }
 
     /**
-     * 负载计数：直播 / 播放 / 录像。
-     *
-     * <p>三个数字的口径不同，务必区分：
-     * <ul>
-     *   <li><b>直播</b>：{@code MediaType.REALTIME} 会话数 —— 正在从设备拉流的通道；</li>
-     *   <li><b>播放</b>：ZLM 中各流<b>观众总数之和</b> —— 含实时流的播放者、
-     *       云端录像点播，以及<b>录制器本身</b>（ZLM 把 MP4 录制当读者，
-     *       见 {@code protocol.mp4_as_player}）。同一个流被多个浏览器打开
-     *       会累加，所以这个数字是「多少路正在被看」而非「多少路流有观众」。
-     *       不能用会话数代替：录像点播走 MP4 解复用源，压根不建 RtpSession，
-     *       只遍历会话表永远是 0；</li>
-     *   <li><b>录像</b>：ZLM 内存索引里「会话仍在录」的通道数 —— 见
-     *       {@link #countRecording()}（注意不能用 {@code endTime<=0} 判断）。</li>
-     * </ul>
-     *
-     * <p><b>为什么不直接用 {@code sessionCount()}</b>：那返回全部会话数，
-     * 回放会话也被算进去，导致「直播」虚高而「播放」恒为 0。
+     * 负载计数：直播 = {@code REALTIME} 会话数；播放 = ZLM 各流观众总数之和
+     * （含点播与录制器本身，同一流多个浏览器会累加；不能用会话数代替 ——
+     * 录像点播走 MP4 解复用源，压根不建 RtpSession）；录像见 {@link #countRecording()}。
      */
     private void fillLoadCounts(SystemMetricsVo vo) {
         long live = 0;
@@ -247,9 +200,8 @@ public class SystemMetricsService {
                 }
                 long total = sun.getTotalMemorySize();
                 if (total > 0) {
-                    // 已用内存优先采用 /proc/meminfo 的 MemAvailable 口径
-                    // （与 free 命令一致，排除 page cache 干扰；JDK 的
-                    // getFreeMemorySize 在 Linux 上不含 cache 导致虚高）
+                    // 已用内存优先用 /proc/meminfo 的 MemAvailable（与 free 一致，排除 page cache；
+                    // JDK 的 getFreeMemorySize 在 Linux 上不含 cache 会虚高）
                     Long available = readMemAvailable();
                     long free = available != null ? available : sun.getFreeMemorySize();
                     vo.setMemTotal(total);
@@ -394,26 +346,12 @@ public class SystemMetricsService {
     }
 
     /**
-     * 录制中的云端录像条数。
-     *
-     * <p><b>为什么读 ZLM 内存索引而不是库表</b>：自动录像的归档挂在
-     * 「流下线」事件上 —— 录制中的条目<b>还没落库</b>（没有 recordId 入库），
-     * 查库恒为 0，用户会以为「我明明开了录像怎么计数是 0」。
-     * ZLM 的内存索引才是录制状态的真源。
-     *
-     * <p><b>为什么不能用 {@code endTime <= 0} 判断「录制中」（踩过的坑）</b>：
-     * {@code Recording#bindSegment} 每次分片落盘都会把 {@code endTime} 设成
-     * 「<b>该分片的结束时刻</b>」—— 因为条目语义是「最近完成的一个分片」，
-     * 不是「整个录制会话」。而 ZLM 每 {@code record-max-second}（默认 1800 秒）
-     * 就切一段，于是从第一段落盘起 {@code endTime} 就一直 &gt; 0，
-     * 用 {@code endTime <= 0} 过滤<b>恒为空</b>。
-     *
-     * <p>实测：录像计划从 08:00 连续录到 12:30（9 个 176MB 文件，当前段还在写），
-     * 而总览的「录像」一直是 0 —— 用户看到的正是「录像计划没被统计到」。
-     *
-     * <p>{@code isRecording()} 查的是 {@code activeByChannel}，
-     * 那才是「会话还在录」的真源。再按通道去重，避免同一通道的历史分片
-     * 被重复计数。
+     * 录制中的云端录像条数。必须读 ZLM 内存索引：录制中的条目还没落库（无 recordId），
+     * 查库恒为 0。不能用 {@code endTime <= 0} 判断「录制中」：{@code bindSegment} 每次分片落盘
+     * 都会把 {@code endTime} 设成该分片结束时刻（条目语义是「最近完成的分片」而非整个会话），
+     * 而 ZLM 每 {@code record-max-second}（默认 1800 秒）切一段，从第一段起就恒 &gt; 0。
+     * 实测录像计划从 08:00 连续录到 12:30（9 个 176MB 文件），总览「录像」一直是 0。
+     * {@code isRecording()} 查的 {@code activeByChannel} 才是真源；再按通道去重避免历史分片重复计数。
      */
     private long countRecording() {
         try {

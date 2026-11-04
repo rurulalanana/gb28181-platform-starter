@@ -41,8 +41,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 前端设备录像接口。
- *
+ * 前端设备录像接口。路由：
  * <pre>
  * GET  /api/v1/playback/recordlist    查询录像列表
  * POST /api/v1/playback/start         开始回放 / 下载
@@ -52,8 +51,7 @@ import java.util.List;
  * GET  /api/v1/playback/streaminfo    单条回放流信息（含下载进度）
  * </pre>
  *
- * <p>回放与直播的关键差异：回放流<b>多路不复用</b>，同一通道每次回放都会占用设备一路
- * 输出，因此务必及时调用 {@code playback/stop}，否则设备会过载。
+ * <p>回放流不复用：同一通道每次回放都占用设备一路输出，必须及时调用 {@code playback/stop}。
  */
 @Slf4j
 @RestController
@@ -64,19 +62,13 @@ public class PlaybackController {
 
     private final RecordService recordService;
     private final StreamService streamService;
-    /** 用于把通道编码反查成设备编码（SIP 寻址只认设备编码）。 */
+    /** 通道编码反查设备编码：SIP 寻址只认设备编码。 */
     private final DeviceService deviceService;
-    /** 设备录像下载：把回放流录成本地 MP4。 */
     private final DownloadService downloadService;
-    /** 录像文件路径 → 带签名的静态 URL 的唯一出口。 */
+    /** 录像文件路径 → 签名静态 URL 的唯一出口。 */
     private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
-    /**
-     * 查询录像列表。
-     *
-     * <p>走标准 9.8 的 {@code RecordInfo} 查询，同步等待设备应答；
-     * 结果同时缓存到 {@code gb_device_record} 便于后续分页与按天统计。
-     */
+    /** 走标准 9.8 的 {@code RecordInfo} 查询（同步等设备应答），结果缓存到 {@code gb_device_record}。 */
     @Operation(summary = "查询录像列表")
     @GetMapping("/recordlist")
     public ApiResponse<RecordListVo> recordList(
@@ -88,26 +80,18 @@ public class PlaybackController {
             @RequestParam(defaultValue = "config") String center,
             @RequestParam(defaultValue = "config") String indistinct,
             @RequestParam(required = false) Integer streamnumber,
-            /*
-             * 默认 20 秒，而不是 15。
-             *
-             * <p>设备（下级平台）自己会向上级摄像机等 15 秒，超时才回
-             * `400 wait for recordinfo timeout[15s]`。取 15 就变成和设备的
-             * 回话点赛跑，白白丢掉它给出的原因。
-             */
+            // 默认 20 秒而非 15：设备自己等 15 秒后才回 400 wait for recordinfo timeout[15s]，
+            // 取 15 会与设备的回话点赛跑，丢掉它给出的原因。
             @RequestParam(defaultValue = "20") Integer timeout) {
         StpUtil.checkLogin();
         String channelId = DeviceRef.channelOf(serial, code);
-        // serial 是设备编码（SIP 寻址），channelId 是通道编码（<DeviceID>）。
-        // 录像挂在通道上，但 SIP 只认注册实体 —— 两者不能混用。
+        // serial 是设备编码（SIP 只认注册实体），channelId 是通道编码；录像挂在通道上，两者不能混用。
         String deviceId = code == null || code.isBlank()
                 ? deviceService.deviceIdOfChannel(channelId) : serial;
         String start = starttime;
         String end = endtime == null || endtime.isBlank()
                 ? TimeFormats.toIso(LocalDateTime.now()) : endtime;
-        /*
-         * 走「带应答标志」的检索：设备没答 ≠ 没有录像，必须区分开。
-         */
+        // 带应答标志的检索：设备没答 ≠ 没有录像，必须区分。
         RecordService.DeviceRecordQuery result = recordService.queryDeviceRecordsAnswered(
                 deviceId == null ? channelId : deviceId, channelId, start, end, timeout);
         List<RecordVo> list = new ArrayList<>();
@@ -116,13 +100,8 @@ public class PlaybackController {
         }
         boolean fromCache = false;
         if (!result.deviceAnswered()) {
-            /*
-             * 设备没答时才降级到本地缓存。
-             *
-             * <p>设备明确回了「没有录像」时<b>不能</b>用缓存顶替 ——
-             * 那等于把已经失效的旧录像重新显示出来，用户会以为录像还在，
-             * 点回放才失败。
-             */
+            // 仅设备未应答时降级到缓存。设备明确回「没有录像」时不能用缓存顶替，
+            // 否则会显示已失效的旧录像，点回放才失败。
             List<GbDeviceRecord> cached = recordService.deviceRecords(channelId,
                     TimeFormats.parse(start), TimeFormats.parse(end), type);
             for (GbDeviceRecord r : cached) {
@@ -146,23 +125,15 @@ public class PlaybackController {
         vo.setDeviceAnswered(result.deviceAnswered());
         vo.setFromCache(fromCache);
         if (!result.deviceAnswered()) {
-            /*
-             * 把设备的原话带上。
-             *
-             * <p>设备在 SIP 层拒绝时（例如 LiveGBS 回
-             * {@code 400 wait for recordinfo timeout[15s]}）已经把原因说清楚了，
-             * 而只报「设备未应答」会让人去查平台/网络 —— 排查方向完全错。
-             */
+            // 带上设备原话：例如 LiveGBS 回 400 wait for recordinfo timeout[15s]，
+            // 只报「设备未应答」会把排查引向平台/网络。
             String base = fromCache
                     ? "设备未应答本次检索，下面是上一次查询的缓存结果（可能不完整）"
                     : "设备未应答本次录像检索";
             vo.setNotice(result.failure() != null
                     ? base + "：" + result.failure()
-                    /*
-                     * 设备连 SIP 响应都没给（UDP 丢包或设备完全没处理）。
-                     * 明确写出来，和「设备回了 400 但说原因」区分开：
-                     * 前者要先查网络/设备负载，后者是设备侧检索故障。
-                     */
+                    // 连 SIP 响应都没有（UDP 丢包或设备未处理）：
+                    // 与「回了 400 但说明原因」区分，前者先查网络/设备负载。
                     : base + "（未收到设备的 SIP 应答）。请确认设备在线，或稍后重试");
             log.warn("设备录像检索未应答: channel={} 缓存条数={} 设备响应={}",
                     channelId, list.size(), result.failure());
@@ -170,7 +141,6 @@ public class PlaybackController {
         return ApiResponse.ok(vo);
     }
 
-    /** 开始回放 / 下载。 */
     @Operation(summary = "开始回放 / 下载")
     @PostMapping("/start")
     public ApiResponse<PlaybackVo> start(@RequestBody PlaybackStartRequest req) {
@@ -191,7 +161,7 @@ public class PlaybackController {
             LocalDateTime wantStart = TimeFormats.parse(req.getStarttime());
             LocalDateTime wantEnd = TimeFormats.parse(req.getEndtime() == null
                     ? req.getStarttime() : req.getEndtime());
-            // 未给 filePath 时从缓存里挑**覆盖这个起点**的那一段
+            // 未给 filePath 时从缓存里挑覆盖该起点的一段
             List<GbDeviceRecord> records = recordService.deviceRecords(channelId,
                     wantStart, wantEnd, null);
             if (records.isEmpty()) {
@@ -200,35 +170,15 @@ public class PlaybackController {
             }
             GbDeviceRecord hit = pickRecord(records, wantStart);
             boolean wholeSegment = isWholeSegment(hit, wantStart, wantEnd);
-            /*
-             * 只有设备真的给了 FilePath 才填（回放 INVITE 的 u= 用它）。
-             * 大量设备（实测 LiveGBS、多数国产摄像机）不填 FilePath，
-             * 而是按时间段管理录像 —— 此时必须留空，让媒体层改用
-             * StartTime/EndTime 定位。强行把 Name 或路径塞进 u=
-             * 会让设备按「文件不存在」直接拒绝。
-             *
-             * <p><b>请求的是段内一小截时不填 FilePath</b>：{@code u=} 一旦给了
-             * 文件路径，设备就按「播放整个文件」处理，{@code t=} 常被忽略 ——
-             * 于是「只要 14:00~14:05」会变成「下整个 2 小时」。这种情况改走
-             * 纯时间区间（{@code u=<通道>:0}），由 {@code t=} 定位。
-             */
+            // 只有设备真的给了 FilePath 才填（回放 INVITE 的 u= 用它）。实测 LiveGBS、多数国产
+            // 摄像机按时间段管理录像，不填 FilePath；强行塞 Name/路径会让设备按「文件不存在」拒绝。
+            // 请求段内一小截时不填：u= 一旦给文件路径，设备就播整个文件并忽略 t=，
+            // 「只要 14:00~14:05」会变成「下整个 2 小时」，此时改走 u=<通道>:0 + t= 定位。
             req.setFilePath(wholeSegment && hit.getFilePath() != null
                     ? hit.getFilePath() : "");
-            /*
-             * 【必须保留用户请求的区间，不能整段覆盖】
-             *
-             * <p>改造前这里直接 {@code req.setStarttime(hit.getStartTime())}，
-             * 把请求区间换成整段录像的时间 —— 于是「只下载 14:00~14:05」永远
-             * 变成「下载 12:00~14:00」，下载时长恒等于整段。这是「想快点下」
-             * 怎么都快不起来的根因：画质无损时下载耗时由内容时长决定，
-             * 不能收窄区间就只能等满整段。
-             *
-             * <p>现在只做两件必要的事：
-             * <ol>
-             *   <li>把区间<b>收拢</b>到匹配段的边界内（请求可能略微越过段首尾）；</li>
-             *   <li>结束时间缺失时补成该段结束（否则设备会一直推下去）。</li>
-             * </ol>
-             */
+            // 必须保留用户请求的区间：早先直接 setStarttime(hit.getStartTime()) 覆盖成整段，
+            // 使「只下载 14:00~14:05」永远变成整段（画质无损时下载耗时由内容时长决定）。
+            // 这里只把区间收拢到匹配段边界内，结束时间缺失时补成该段结束。
             LocalDateTime start = wantStart;
             LocalDateTime end = req.getEndtime() == null ? null : wantEnd;
             if (hit.getStartTime() != null && start.isBefore(hit.getStartTime())) {
@@ -242,43 +192,27 @@ public class PlaybackController {
                 req.setEndtime(TimeFormats.toIso(end));
             }
         }
-        /*
-         * 构造回放项：有 FilePath 走按文件回放，没有则按时间区间回放。
-         * 见 RecordItem#ofRange 的说明 —— FilePath 在标准里是可选的。
-         */
+        // 有 FilePath 按文件回放，否则按时间区间回放（FilePath 在标准里可选）。
         RecordItem item = req.getFilePath() == null || req.getFilePath().isBlank()
                 ? RecordItem.ofRange(channelId,
                         TimeFormats.toDate(TimeFormats.parse(req.getStarttime())),
                         TimeFormats.toDate(TimeFormats.parse(req.getEndtime() == null
                                 ? req.getStarttime() : req.getEndtime())), null)
                 : RecordItem.ofFilePath(channelId, req.getFilePath());
-        /*
-         * 倍速只在「下载」时生效：普通回放必须是 1 倍速，否则用户点开回放
-         * 看到的是快进画面。这是 {@code PlaybackStartRequest.downloadSpeed}
-         * 默认 4 却必须配合 {@code download=true} 的原因。
-         */
+        // 倍速只在下载时生效：普通回放必须 1 倍速，否则点开看到的是快进画面。
         int downloadSpeed = Boolean.TRUE.equals(req.getDownload())
                 ? Math.max(1, req.getDownloadSpeed() == null ? 1 : req.getDownloadSpeed())
                 : 1;
         GbStream stream = streamService.startPlayback(deviceId, channelId, item, downloadSpeed);
-        /*
-         * 【必须按回放会话取播放地址】
-         *
-         * <p>不能用 {@code streamService.session(deviceId, channelId)}：那是
-         * <b>直播</b>会话（键不带类型后缀）。云端录像自动开录后，通道上长期
-         * 有一路直播流在跑，于是这里会拿到<b>直播流的播放地址</b> ——
-         * 用户点「回放 2026-10-25 00:00~02:00」，画面里却是当下的实时画面
-         * （OSD 时间显示今天）。
-         *
-         * <p>回放会话的键是 {@code <设备>/<通道>_playback}（见 RtpSession#getSessionKey），
-         * {@code GbStream#getStreamKey()} 保存的正是它。
-         */
+        // 必须按回放会话取地址：session(deviceId, channelId) 查的是直播键（无类型后缀），
+        // 云端录像保活使通道长期有直播流，会返回直播地址（OSD 显示当下时间）。
+        // 回放键是 <设备>/<通道>_playback，正是 GbStream#getStreamKey() 保存的值。
         RtpSession playbackSession = streamService.sessionByKey(stream.getStreamKey());
         PlaybackVo vo = new PlaybackVo();
         if (playbackSession != null) {
             BeanUtils.copyProperties(streamService.describe(playbackSession), vo);
         }
-        // describe 拿不到时退回入库的流信息（至少保证地址不为空）
+        // describe 失败时退回入库信息，至少保证地址非空
         if (vo.getStreamId() == null) {
             vo.setStreamId(stream.getStreamKey());
             vo.setWebrtc(stream.getWebrtc());
@@ -294,13 +228,8 @@ public class PlaybackController {
     }
 
     /**
-     * 停止回放。
-     *
-     * <p><b>下载中的通道不会被停掉</b>：后台下载依赖这路回放流。
-     * 用户关掉回放弹窗、切换页面时前端都会调本接口，若照常停流，
-     * 下载会直接中断（这正是「后台下载」改造前的问题）。
-     * 此时返回 {@code ok=false} 并说明原因，由界面提示
-     * 「后台下载中，完成后自动释放」。
+     * 停止回放。下载中的通道不会被停掉（后台下载依赖这路流）；
+     * 前端关弹窗、切页面都会调本接口，照常停流会中断下载，此时返回 {@code ok=false}。
      */
     @Operation(summary = "停止回放")
     @PostMapping("/stop")
@@ -334,12 +263,7 @@ public class PlaybackController {
         return ApiResponse.ok(vo);
     }
 
-    /**
-     * 回放控制。
-     *
-     * <p>命令映射到标准附录 D 的 {@code u=} 取值：
-     * {@code play} / {@code pause} / {@code teardown} / {@code scale}。
-     */
+    /** 命令映射到标准附录 D 的 {@code u=} 取值：play / pause / teardown / scale。 */
     @Operation(summary = "回放控制")
     @PostMapping("/control")
     public ApiResponse<Void> control(@RequestParam(required = false) String streamid,
@@ -362,11 +286,8 @@ public class PlaybackController {
         switch (command == null ? "" : command.trim().toLowerCase()) {
             case "pause" -> cmd = Gb28181MediaService.PlaybackCommand.PAUSE;
             case "play", "resume" -> {
-                /*
-                 * range 的语义是「相对本段录像起点的秒数」，不是绝对时间：
-                 * 国标设备的 npt 是段内偏移，传绝对秒数会跳到「开播 N 年后」
-                 * 而立刻结束。不传 range（或传 now）= 从当前位置继续。
-                 */
+                // range 是相对本段录像起点的秒数，不是绝对时间：国标 npt 是段内偏移，
+                // 传绝对秒数会跳到「开播 N 年后」立即结束。传 now/不传 = 继续播放。
                 if (range != null && !range.isBlank() && !"now".equalsIgnoreCase(range)) {
                     try {
                         seekSecond = Math.max(0L, Long.parseLong(range.trim()));
@@ -405,21 +326,12 @@ public class PlaybackController {
     // ==================== 录像下载 ====================
 
     /**
-     * 开始下载：对当前回放流开始录制成本地 MP4（后台任务）。
+     * 开始下载：把当前回放流录成本地 MP4（后台任务）。必须先调 {@code playback/start}，
+     * 边看边下共用一路流，避免重复 INVITE 占带宽；任务不随页面消失。
      *
-     * <p>必须先有回放流（先调 {@code playback/start}）—— 这样「边看边下」
-     * 共用一路流，不会为下载重复向设备发起 INVITE 而占掉一路带宽。
-     *
-     * <p><b>任务不随页面消失</b>：录满后由服务端自动收尾，
-     * 前端通过 {@code download/list} 在任何页面查看与取文件。
-     *
-     * @param streamid 回放会话键
-     * @param duration 录像段总时长（秒），用于计算进度；{@code 0} 表示未知
-     * @param speed    请求的设备推流倍速（多数设备忽略，仅作日志）
-     * @param expectedBytes 该段在设备侧的文件大小（录像检索的 FileSize）；
-     *                它是「内容已录完」的主判据 —— 设备不会按请求的结束时间停推，
-     *                只能靠大小判断。{@code 0} 表示未知
-     * @param name     通道名（仅用于任务列表展示）
+     * @param duration      录像段总时长（秒），{@code 0} 表示未知
+     * @param expectedBytes 设备侧文件大小，是「内容已录完」的主判据：
+     *                      设备不会按请求的结束时间停推，只能靠大小判断；{@code 0} 表示未知
      */
     @Operation(summary = "开始下载：对当前回放流开始录制成本地 MP4（后台任务）")
     @PostMapping("/download/start")
@@ -448,7 +360,6 @@ public class PlaybackController {
         return ApiResponse.ok(vo);
     }
 
-    /** 下载进度。 */
     @Operation(summary = "下载进度")
     @GetMapping("/download/progress")
     public ApiResponse<PlaybackDownloadVo.Progress> downloadProgress(@RequestParam String streamid) {
@@ -465,12 +376,7 @@ public class PlaybackController {
         return ApiResponse.ok(vo);
     }
 
-    /**
-     * 全局下载任务列表（进行中 + 最近已完成）。
-     *
-     * <p>后台下载的关键接口：任意页面都能拉到全部任务，所以用户切走页面、
-     * 甚至刷新浏览器之后依然能看到进度、并取回已完成的文件。
-     */
+    /** 全局下载任务列表：任意页面都能拉到，切页/刷新后仍可取进度与文件。 */
     @Operation(summary = "全局下载任务列表（进行中 + 最近已完成）")
     @GetMapping("/download/list")
     public ApiResponse<List<PlaybackDownloadVo.Task>> downloadList() {
@@ -503,7 +409,6 @@ public class PlaybackController {
         return ApiResponse.ok(out);
     }
 
-    /** 从任务列表移除一条已完成/已取消的记录（不删磁盘文件）。 */
     @Operation(summary = "从任务列表移除一条已完成/已取消的记录（不删磁盘文件）")
     @PostMapping("/download/remove")
     public ApiResponse<Void> downloadRemove(@RequestParam String taskid) {
@@ -512,12 +417,8 @@ public class PlaybackController {
         return ApiResponse.ok();
     }
 
-    /**
-     * 结束下载，返回可下载的 MP4 地址。
-     *
-     * <p>地址走已有的 {@code /record/...} 静态路径（nginx sendfile + 签名鉴权），
-     * 前端 {@code <a download>} 即可直接下载，支持 Range 断点续传。
-     */
+    /** 结束下载，返回可下载的 MP4 地址：走 {@code /record/...} 静态路径
+     *  （nginx sendfile + 签名鉴权），支持 Range 断点续传。 */
     @Operation(summary = "结束下载，返回可下载的 MP4 地址")
     @PostMapping("/download/finish")
     public ApiResponse<PlaybackDownloadVo.Finish> downloadFinish(@RequestParam String streamid) {
@@ -552,7 +453,6 @@ public class PlaybackController {
         return ApiResponse.ok(vo);
     }
 
-    /** 取消下载。 */
     @Operation(summary = "取消下载")
     @PostMapping("/download/cancel")
     public ApiResponse<Void> downloadCancel(@RequestParam String streamid) {
@@ -561,7 +461,6 @@ public class PlaybackController {
         return ApiResponse.ok();
     }
 
-    /** 回放流列表。 */
     @Operation(summary = "回放流列表")
     @GetMapping("/streamlist")
     public ApiResponse<StreamListVo> streamList(
@@ -574,7 +473,6 @@ public class PlaybackController {
                 streamService.playbackList(), start, limit, serial, code, null));
     }
 
-    /** 单条回放流信息。 */
     @Operation(summary = "单条回放流信息")
     @GetMapping("/streaminfo")
     public ApiResponse<PlaybackVo> streamInfo(@RequestParam String streamid) {
@@ -597,19 +495,10 @@ public class PlaybackController {
     // ==================== 内部 ====================
 
     /**
-     * 由 streamid 或 serial/code 定位<b>回放</b>会话。
-     *
-     * <p>会话对象同时带设备编码与通道编码，故直接返回会话而非通道编码——
-     * 通道编码跨设备可重复，光有通道编码无法唯一定位（会误停别的设备的流）。
-     *
-     * <p><b>必须按 {@link MediaType#PLAYBACK} 查</b>：同一通道上通常还有一路直播
-     * （云端录像保活让它长期在线），而直播与回放是两个独立会话，
-     * 键分别是 {@code 设备/通道} 与 {@code 设备/通道_playback}。
-     * 早先这里用 {@code streamService.session(serial, code)}（只查直播键），
-     * 于是「拖动定位 / 暂停 / 倍速」的 SIP INFO 全部发到了<b>直播</b>对话框里 ——
-     * 设备回 200 却不执行，表现为「拖进度条没反应，甚至像重新拉流」、
-     * 「倍速选了等于没选」。{@code /playback/stop} 早就按类型停流了，
-     * 但解析会话这一步没跟着改，等于白改。
+     * 由 streamid 或 serial/code 定位<b>回放</b>会话。返回会话而非通道编码：通道编码跨设备可重复。
+     * 必须按 {@link MediaType#PLAYBACK} 查——同一通道通常还有一路直播（云端录像保活），
+     * 键分别是 {@code 设备/通道} 与 {@code 设备/通道_playback}。早先用直播键解析，
+     * 拖动/暂停/倍速的 SIP INFO 全发到直播对话，设备回 200 却不执行（拖进度条无反应、倍速无效）。
      */
     private RtpSession resolveSession(String streamid, String serial, String code) {
         if (streamid != null && !streamid.isBlank()) {
@@ -626,21 +515,10 @@ public class PlaybackController {
     }
 
     /**
-     * 从候选录像段里挑出「包含请求起点」的那一段。
-     *
-     * <p><b>为什么不能用 {@code records.get(0)}</b>：{@code deviceRecords} 按
-     * 起始时间<b>降序</b>返回，而交集查询会把相邻的段也带进来 ——
-     * 请求 00:00~02:00 时，00:00-02:00 与 02:00-04:00 都满足交集条件
-     * （后者 start=02:00 &le; to=02:00），降序第一条就是 02:00-04:00。
-     * 用户点 00:00 的录像，看到的却是从 02:00 开始的画面 —— 偏移量正好
-     * 等于一段录像的长度，很容易被误判成时区问题。
-     *
-     * <p>挑选优先级：
-     * <ol>
-     *   <li>起点与请求完全相同的（用户点的是段首，最精确）</li>
-     *   <li>真正包含请求起点的段里，起点最晚的（区间最贴合）</li>
-     *   <li>都没有时退化为起点最早的那段（至少不会跳到很后面）</li>
-     * </ol>
+     * 从候选录像段里挑出包含请求起点的那段。不能用 {@code get(0)}：deviceRecords 按起点降序返回，
+     * 交集查询会把相邻段带进来（请求 00:00~02:00 时 02:00-04:00 也满足），第一条就是下一段，
+     * 偏移量正好等于一段长度，易误判成时区问题。
+     * 优先级：起点完全相同 → 覆盖起点且起点最晚 → 起点最早。
      */
     private static GbDeviceRecord pickRecord(List<GbDeviceRecord> records,
                                              LocalDateTime wantStart) {
@@ -679,11 +557,8 @@ public class PlaybackController {
     }
 
     /**
-     * 请求区间是否就是这段录像本身（允许 2 秒误差）。
-     *
-     * <p>只有「整段」时才把 {@code FilePath} 传给设备：按文件回放对设备最友好，
-     * 但粒度是「整个文件」。用户只想取段内一小截时必须放弃它 —— 否则设备
-     * 会忽略 {@code t=} 去播整个文件，导致「只要 5 分钟」变成「下 2 小时」。
+     * 请求区间是否就是这段录像本身（允许 2 秒误差）。只有整段才传 {@code FilePath}：
+     * 按文件回放对设备最友好，但粒度是整个文件，段内一小截会变成下整段。
      */
     private static boolean isWholeSegment(GbDeviceRecord hit,
                                           LocalDateTime start, LocalDateTime end) {
@@ -704,7 +579,6 @@ public class PlaybackController {
         return segSeconds <= 0 || wantSeconds >= segSeconds * 99 / 100;
     }
 
-    /** 由 streamid 或 serial/code 定位通道编号（仅用于展示）。 */
     private String resolveChannel(String streamid, String serial, String code) {
         RtpSession session = resolveSession(streamid, serial, code);
         if (session != null) {
@@ -717,10 +591,8 @@ public class PlaybackController {
     }
 
     /**
-     * 从复合标识 {@code <设备编码>/<通道编码>} 中取出通道编码。
-     *
-     * <p>不按斜杠盲拆：GB28181 编码本身不含斜杠，而历史流名曾形如
-     * {@code <通道编码>/<序号>}，故只在第二段是 20 位编码时才当作复合标识。
+     * 从 {@code <设备编码>/<通道编码>} 取出通道编码。不盲拆斜杠：GB28181 编码不含斜杠，
+     * 历史流名曾形如 {@code <通道编码>/<序号>}，只有第二段是 20 位编码时才算复合标识。
      */
     private static String channelOf(String stream) {
         int slash = stream.lastIndexOf('/');
@@ -731,7 +603,6 @@ public class PlaybackController {
         return ZlmMediaServer.isChannelId(tail) ? tail : stream;
     }
 
-    /** 录像段 → 返回体。 */
     private RecordVo recordView(RecordItem item, String channelId) {
         RecordVo vo = new RecordVo();
         vo.setDeviceId(item.getDeviceId() == null ? channelId : item.getDeviceId());

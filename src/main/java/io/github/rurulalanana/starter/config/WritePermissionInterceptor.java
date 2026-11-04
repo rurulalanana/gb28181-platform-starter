@@ -21,56 +21,31 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 接口级权限校验：把「哪个路径需要哪个权限点」收口到一张表里。
  *
- * <h3>为什么是拦截器而不是给每个方法加注解</h3>
+ * <p>不用逐方法 {@code @SaCheckPermission}：那要改 150 多个方法，漏一个就留一个洞，
+ * 且新增接口默认仍是敞开的。路径按<b>最长前缀</b>匹配，每条规则两个权限点：
+ * {@code read} 管 GET/HEAD/OPTIONS，{@code write} 管其余方法。
+ * 少数接口「方法 POST、语义读取」（取流地址）在 {@link #WRITE_EXEMPT} 单独放行。
  *
- * <p>逐个 Controller 加 {@code @SaCheckPermission} 要改 20 个类、150 多个方法，
- * 漏一个就留一个洞，而且<b>以后新增的接口默认仍是敞开的</b>。
- * 收口到拦截器后策略是「按前缀分类 + 未分类默认收紧」：
- * 新写的接口只要落在已分类的前缀下就自动受控，不用记得加注解。
- *
- * <h3>规则表怎么读</h3>
- *
- * <p>路径按<b>最长前缀</b>匹配（表内按长度降序排好，第一个命中的即为最长）。
- * 每条规则两个权限点：{@code read} 管 GET/HEAD/OPTIONS，{@code write} 管其余方法。
- * 少数接口「方法上是 POST、语义上是读取」（取流地址），在 {@link #WRITE_EXEMPT}
- * 里单独放行，避免让只读账号播不了视频。
- *
- * <h3>失败方向</h3>
- *
- * <p>没有匹配到规则的写请求不会直接放行，而是要求「具备任意一项写权限」并打 WARN 日志。
- * <b>宁可多拦一次（表现为功能被挡、日志有据可查），也不要少拦一次
- * （表现为越权成功而没人发现）</b>。
- *
- * <h3>与数据范围的关系</h3>
- *
- * <p>本类只判「能做什么」。{@code gb_user.has_all_channel} 目前<b>仍未生效</b>
- * —— 没有 {@code gb_user_channel} 表，设备/通道列表不做按用户过滤。
- * 有 {@code device:read} 的账号能看见全部设备，这是已知缺口。
+ * <p><b>失败方向是默认拒绝</b>：未匹配规则的写请求要求「具备任意一项写权限」并打 WARN。
+ * {@code gb_user.has_all_channel} 仍未生效，有 {@code device:read} 的账号能看见全部设备（已知缺口）。
  */
 @Slf4j
 @Component
 public class WritePermissionInterceptor implements HandlerInterceptor {
 
-    /** 一条路径规则：读方法要的权限点、写方法要的权限点。 */
     private record Rule(String read, String write) {
     }
 
     /**
-     * 前缀规则，<b>顺序即优先级</b>（长的必须排在短的之前）。
-     *
-     * <p>例：{@code /api/v1/device/setchannel} 必须排在 {@code /api/v1/device} 之前，
-     * 否则「改通道名称」会被当成「改设备」，只需要 {@code device:write} 就够了。
+     * 前缀规则，<b>顺序即优先级</b>（长的排在短的之前）。例：{@code /device/setchannel}
+     * 必须排在 {@code /device} 之前，否则「改通道名称」会被当成「改设备」。
      */
     private static final Map<String, Rule> PREFIX_RULES = buildPrefixRules();
 
     private static Map<String, Rule> buildPrefixRules() {
         Map<String, Rule> m = new LinkedHashMap<>();
 
-        // ==================== 按钮级规则 ====================
-        // 前缀匹配是「最长优先」，这些路径都比 /api/v1/device 等父前缀长，
-        // 因此会先命中这里。新增按钮时先在这里补一行，再到前端把 canWrite 换成具体编码。
-
-        // ---- 设备 ----
+        // 新增按钮时先在这里补一行，再到前端把 canWrite 换成具体编码。
         m.put("/api/v1/device/remove", new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_DELETE));
         putAll(m, new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_SYNC),
                 "/api/v1/device/fetchcatalog",
@@ -92,7 +67,6 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
                 "/api/v1/device/setmediatransport",
                 "/api/v1/device/setpassword");
 
-        // ---- 通道（通道编辑接口都挂在 /api/v1/device/setchannel* 下） ----
         putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_WRITE),
                 "/api/v1/device/setchannelname",
                 "/api/v1/device/setchannelid",
@@ -114,7 +88,6 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
         // 删录像不可恢复：单列 cloud:delete，默认只给管理员
         m.put("/api/v1/cloudrecord/remove", new Rule(Permissions.CLOUD_READ, Permissions.CLOUD_DELETE));
 
-        // ---- 级联 ----
         putAll(m, new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_SHARE),
                 "/api/v1/cascade/savechannels",
                 "/api/v1/cascade/removechannels",
@@ -124,31 +97,81 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
                 "/api/v1/cascade/pushchannelcatalog");
         m.put("/api/v1/cascade/remove", new Rule(Permissions.CASCADE_READ, Permissions.CASCADE_DELETE));
 
-        // ---- 用户与角色 ----
         m.put("/api/v1/user/resetpassword", new Rule(Permissions.USER_READ, Permissions.USER_RESET));
         m.put("/api/v1/user/remove", new Rule(Permissions.USER_READ, Permissions.USER_DELETE));
         m.put("/api/v1/role", new Rule(Permissions.USER_READ, Permissions.ROLE_WRITE));
 
-        // ---- 系统 ----
         m.put("/api/v1/config", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_CONFIG));
         m.put("/api/v1/acl", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_ACL));
         m.put("/api/v1/tls", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_TLS));
         m.put("/api/v1/restart", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_RESTART));
-        // 菜单外观：读对所有人开放（侧栏都要用，见 SELF_SERVICE_PATHS）
         m.put("/api/v1/menu", new Rule(Permissions.SYSTEM_READ, Permissions.MENU_WRITE));
 
         // ==================== 模块级规则 ====================
         m.put("/api/v1/stream/relay", new Rule(Permissions.PLAY_LIVE, Permissions.CASCADE_CONTROL));
-        // 清空报警不可恢复
         m.put("/api/v1/alarm/clear", new Rule(Permissions.ALARM_READ, Permissions.ALARM_DELETE));
-        // 性能指标：能看设备的人就该看得到，不要求 system:read
-        // （system:read 还覆盖运行时配置与 SIP 接入密码，不能顺手给只读账号）
+        // 性能指标：能看设备的人就该看得到。不要求 system:read（它还覆盖运行时配置与
+        // SIP 接入密码，不能顺手给只读账号）。
         m.put("/api/v1/system/metrics", new Rule(Permissions.DEVICE_READ, Permissions.SYSTEM_WRITE));
         // 录像下载会在服务器上落文件，单列 cloud:download
         m.put("/api/v1/playback/download", new Rule(Permissions.PLAY_RECORD, Permissions.CLOUD_DOWNLOAD));
 
+        // ---- 云台控制：按面板 tab 拆成四组，四者平级不互为隐含 ----
+        // 默认（/api/v1/control 前缀）仍要求 channel:ptz，下面的具体路径覆盖它。
+        // 前缀清单按长度降序匹配，所以更长的路径优先命中。
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ),
+                // 方向盘 + 变倍 + 光圈/聚焦 + 拉框缩放 + 中心喊话
+                "/api/v1/control/ptz",
+                "/api/v1/control/ptzprecise",
+                "/api/v1/control/fi",
+                "/api/v1/control/dragzoomin",
+                "/api/v1/control/dragzoomout",
+                "/api/v1/control/navigate",
+                "/api/v1/control/talk");
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PRESET),
+                // 预置位 tab：调用/设置/删除，以及「回原点」这种按编号跳转的
+                "/api/v1/control/preset",
+                "/api/v1/control/homeposition");
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ_DEVICE),
+                // 设备 tab：雨刷、补光、设备录像、布防/撤防、报警布防
+                "/api/v1/control/wiper",
+                "/api/v1/control/filllight",
+                "/api/v1/control/record",
+                "/api/v1/control/guard",
+                "/api/v1/control/alarmnotify",
+                "/api/v1/control/alarmreset");
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ_ADVANCED),
+                // 高级 tab：关键帧、重启、格式化、升级、校时、订阅、OSD/抓拍配置、目标跟踪
+                "/api/v1/control/iframe",
+                "/api/v1/control/teleboot",
+                "/api/v1/control/formatsdcard",
+                "/api/v1/control/deviceupgrade",
+                "/api/v1/control/synctime",
+                "/api/v1/control/deviceconfig",
+                "/api/v1/control/devicesubscribe",
+                "/api/v1/control/osdconfig",
+                "/api/v1/control/snapshotconfig",
+                "/api/v1/control/targettrack");
+
         // ---- 父前缀 ----
         m.put("/api/v1/device", new Rule(Permissions.DEVICE_READ, Permissions.DEVICE_WRITE));
+        /*
+         * 大华扩展能力。必须给出显式规则，否则会落到「未分类的写请求」被拒。
+         * 权限点按功能性质分：
+         *   云台扩展（巡航/巡迹/限位/重启）→ channel:ptz
+         *   相机参数                        → channel:ptz:device（与「设备 tab」同级）
+         *   对讲                            → channel:ptz（喊话本来就是云台面板的入口）
+         *   录像下载                        → channel:record
+         */
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ),
+                "/api/v1/dahua/ptz",
+                "/api/v1/dahua/talk");
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_PTZ_DEVICE),
+                "/api/v1/dahua/cameraconfig");
+        // 录像计划读写与录像下载同属「录像」能力域
+        putAll(m, new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_RECORD),
+                "/api/v1/dahua/record/download",
+                "/api/v1/dahua/record/plan");
         m.put("/api/v1/stream", new Rule(Permissions.PLAY_LIVE, Permissions.PLAY_LIVE));
         m.put("/api/v1/playback", new Rule(Permissions.PLAY_RECORD, Permissions.PLAY_RECORD));
         // 手动启停本地录像属于「写盘」，不是播放
@@ -182,10 +205,8 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
     }
 
     /**
-     * 登录用户可自行调用的接口，<b>不需要任何权限点</b>。
-     *
-     * <p>只放「改自己的东西 / 会话操作 / 每个人都要用的概览」。
-     * <b>不要往这里加业务接口</b> —— 每加一个就等于对全部账号开放一次。
+     * 登录用户可自行调用的接口，<b>不需要任何权限点</b>。只放「改自己的东西 / 会话操作 /
+     * 每个人都要用的概览」。<b>不要往这里加业务接口</b> —— 每加一个就等于对全部账号开放一次。
      */
     private static final Set<String> SELF_SERVICE_PATHS = new HashSet<>(List.of(
             "/api/v1/login",
@@ -193,23 +214,23 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
             "/api/v1/modifypassword",
             // 改自己的密码：即便落在 /api/v1/user 前缀下，也不能要求 user:write
             "/api/v1/user/setpassword",
-            // 当前登录用户信息与平台概览：每个登录用户都要用
+            // 自己的 API 密钥：同属「改自己的东西」。三个路径都要列 ——
+            // 下面的匹配是精确 contains，不是前缀匹配，写 "/api/v1/user/apikey" 盖不住子路径。
+            // 三个接口内部都只取 StpUtil.getLoginId()，操作不到别人的密钥。
+            "/api/v1/user/apikey",
+            "/api/v1/user/apikey/generate",
+            "/api/v1/user/apikey/revoke",
             "/api/v1/userinfo",
             "/api/v1/getserverinfo",
-            // 菜单外观配置：渲染侧栏要读，每个登录用户都要用；
-            // 里面只有「菜单叫什么名字」，不含任何业务数据。写接口不经此白名单
+            // 菜单外观：渲染侧栏要读；只有菜单名称，不含业务数据。写接口不经此白名单
             "/api/v1/menu/config",
-            // 菜单结构补齐：幂等，且只在种子版本变化时真正写库。
-            // 若要求管理权限，普通账号首次打开会因「菜单还没种」看到空白侧栏
+            // 菜单结构补齐：幂等。要求管理权限的话，普通账号首开会被「菜单还没种」困扰
             "/api/v1/menu/sync"
     ));
 
     /**
-     * 「方法上是 POST、语义上是读取」的接口。
-     *
-     * <p>前端为了「播放即点播」会 POST 取流地址，但它不改变任何持久状态
-     * （SSRC/端口是会话级的，关流即回收）。
-     * 若按写请求处理，只读账号就<b>永远播不了视频</b> —— 那是本末倒置。
+     * 「方法上是 POST、语义上是读取」的接口。前端为了「播放即点播」会 POST 取流地址，
+     * 它不改变持久状态（SSRC/端口是会话级的，关流即回收）。按写请求处理会让只读账号永远播不了视频。
      */
     private static final Set<String> WRITE_EXEMPT = new HashSet<>(List.of(
             "/api/v1/stream/start",
@@ -231,9 +252,7 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
         if (!path.startsWith("/api/v1/")) {
             return true;
         }
-        // 未登录交给 Sa-Token 的登录拦截器处理（它给 401 语义），这里不重复判断。
-        // 也必须这样放行：/api/v1/share/**、/api/v1/cloudrecord/snap/*/* 等
-        // 豁免登录的路径，在图片/子请求里根本拿不到 token。
+        // 未登录交给 Sa-Token 处理（401）；分享页/快照等免登录路径在图片/子请求里拿不到 token。
         if (!StpUtil.isLogin()) {
             return true;
         }
@@ -251,9 +270,8 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
             if (readOnlyMethod) {
                 return true;
             }
-            // 未分类的写请求：要求「具备任意一项写权限」。
-            // 与改造前「admin 或 operator」等价（只读角色没有任何写权限点），
-            // 对自定义角色也成立。
+            // 未分类的写请求：要求「具备任意一项写权限」。与改造前「admin 或 operator」等价
+            // （只读角色没有任何写权限点），对自定义角色也成立。
             if (hasAnyWritePermission()) {
                 warnUnmapped(path);
                 return true;

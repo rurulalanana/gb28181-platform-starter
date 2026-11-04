@@ -10,27 +10,17 @@ import java.time.format.DateTimeParseException;
 import java.util.Date;
 
 /**
- * 时间格式工具。
- *
- * <p>GBS 在不同接口里混用两种时间格式，这里统一收敛：
- * <ul>
- *   <li>{@code YYYY-MM-DDTHH:mm:ss}（查询类接口、SIP MANSCDP）</li>
- *   <li>{@code YYYYMMDDHHmmss}（云端录像类接口、文件名）</li>
- *   <li>{@code YYYY-MM-DD HH:mm:ss}（展示用）</li>
- *   <li>{@code YYYYMM}（云端录像按月统计）</li>
- * </ul>
+ * 时间格式工具。GBS 在不同接口混用多种格式，这里统一收敛：
+ * {@code YYYY-MM-DDTHH:mm:ss}（查询类接口、SIP MANSCDP）、{@code YYYYMMDDHHmmss}（云端录像、文件名）、
+ * {@code YYYY-MM-DD HH:mm:ss}（展示）、{@code YYYYMMDD}（日期）、{@code YYYYMM}（按月统计）。
  */
 public final class TimeFormats {
 
     /** SIP / MANSCDP 标准格式。 */
     public static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
-    /** 紧凑格式（云端录像接口与文件名）。 */
     public static final DateTimeFormatter COMPACT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
-    /** 展示格式。 */
     public static final DateTimeFormatter DISPLAY = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    /** 日期格式。 */
     public static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("yyyyMMdd");
-    /** 月份格式。 */
     public static final DateTimeFormatter MONTH = DateTimeFormatter.ofPattern("yyyyMM");
     /** 时钟格式（概览页折线图的 X 轴刻度）。 */
     public static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -39,13 +29,9 @@ public final class TimeFormats {
     }
 
     /**
-     * 宽松解析：依次尝试 ISO、紧凑、展示、日期、月份格式。
-     *
-     * <p>包含 {@code YYYYMM}（月）是因为云端录像的 {@code querymonthly} /
-     * {@code queryflags} 以月份为参数，而 {@code DATE}（{@code YYYYMMDD}）
-     * 无法匹配 6 位串——缺了它这两类接口会一律报「月份格式应为 YYYYMM」。
-     *
-     * @return 解析失败返回 {@code null}
+     * 宽松解析：依次尝试 ISO、紧凑、展示、日期、月份。必须包含 YYYYMM：
+     * {@code querymonthly/queryflags} 以月份为参数，DATE（8 位）匹配不上 6 位串。
+     * 解析失败返回 {@code null}。
      */
     public static LocalDateTime parse(String text) {
         if (text == null || text.isBlank()) {
@@ -68,17 +54,14 @@ public final class TimeFormats {
         return null;
     }
 
-    /** 解析为 SIP 需要的格式（{@code yyyy-MM-dd'T'HH:mm:ss}）。 */
     public static String toIso(LocalDateTime time) {
         return time == null ? null : ISO.format(time);
     }
 
-    /** 解析为紧凑格式（{@code yyyyMMddHHmmss}）。 */
     public static String toCompact(LocalDateTime time) {
         return time == null ? null : COMPACT.format(time);
     }
 
-    /** 转为展示格式。 */
     public static String toDisplay(LocalDateTime time) {
         return time == null ? null : DISPLAY.format(time);
     }

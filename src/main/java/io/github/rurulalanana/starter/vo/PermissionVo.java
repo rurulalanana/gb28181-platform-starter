@@ -4,7 +4,7 @@ import lombok.Data;
 
 import java.util.List;
 
-/** 权限点。 */
+/** 权限点（即角色页右侧的一个按钮勾选框）。 */
 @Data
 public class PermissionVo {
 
@@ -13,6 +13,9 @@ public class PermissionVo {
     private String name;
 
     private String description;
+
+    /** 所属二级菜单名，如「通道控制」。角色页按它把按钮聚成一行。 */
+    private String module;
 
     /**
      * 上级权限点编码（为空表示它是顶部项）。

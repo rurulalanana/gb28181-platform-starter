@@ -7,6 +7,7 @@ import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import io.github.rurulalanana.starter.service.ControlService;
 import io.github.rurulalanana.starter.vo.ChannelNavigateVo;
+import io.github.rurulalanana.starter.vo.ControlResultVo;
 import io.github.rurulalanana.starter.vo.DeviceUpgradeVo;
 import io.github.rurulalanana.starter.vo.SnapshotConfigVo;
 import io.github.rurulalanana.starter.vo.TalkVo;
@@ -24,37 +25,16 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * 设备控制接口。
- *
+ * 设备控制接口。路由前缀 {@code /api/v1/control}：
  * <pre>
- * POST /api/v1/control/ptz                 云台控制
- * POST /api/v1/control/fi                  焦点光圈
- * POST /api/v1/control/preset              预置位
- * POST /api/v1/control/homeposition        看守位
- * POST /api/v1/control/navigate            巡航
- * POST /api/v1/control/dragzoomin          拉框放大
- * POST /api/v1/control/dragzoomout         拉框缩小
- * POST /api/v1/control/teleboot            远程重启
- * POST /api/v1/control/record              设备端录像
- * POST /api/v1/control/guard               布防撤防
- * POST /api/v1/control/wiper               雨刷
- * POST /api/v1/control/filllight           补光灯
- * POST /api/v1/control/alarmnotify         报警通知
- * POST /api/v1/control/alarmreset          报警复位
- * POST /api/v1/control/iframe              强制关键帧
- * POST /api/v1/control/deviceconfig        设备配置
- * POST /api/v1/control/devicesubscribe     设备订阅
- * POST /api/v1/control/talk                语音喊话
- * POST /api/v1/control/ptzprecise          精确云台（2022）
- * POST /api/v1/control/osdconfig           OSD 配置（2022）
- * POST /api/v1/control/snapshotconfig      抓拍配置（2022）
- * POST /api/v1/control/deviceupgrade       设备升级（2022）
- * POST /api/v1/control/formatsdcard        存储卡格式化（2022）
- * POST /api/v1/control/targettrack         目标跟踪（2022）
+ * ptz / fi / preset / homeposition / navigate / dragzoomin / dragzoomout / iframe
+ * teleboot / record / guard / wiper / filllight / alarmnotify / alarmreset / synctime
+ * deviceconfig / devicesubscribe / talk
+ * 2022 扩展：ptzprecise / osdconfig / snapshotconfig / deviceupgrade / formatsdcard / targettrack
  * </pre>
  *
  * <p>控制命令均为「发出即返回」：设备是否接受由 MANSCDP 应答决定，
- * 需要确认结果时请查询 {@code /api/v1/device/statuslog} 或抓包核对。
+ * 确认结果请查 {@code /api/v1/device/statuslog} 或抓包。
  */
 @Slf4j
 @RestController
@@ -70,7 +50,6 @@ public class ControlController {
 
     // ==================== 云台 ====================
 
-    /** 云台控制。 */
     @Operation(summary = "云台控制")
     @PostMapping("/ptz")
     public ApiResponse<Void> ptz(@RequestParam String serial,
@@ -82,7 +61,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 焦点光圈控制。 */
     @Operation(summary = "焦点光圈控制")
     @PostMapping("/fi")
     public ApiResponse<Void> focusIris(@RequestParam String serial,
@@ -94,7 +72,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 精确云台控制（2022）。 */
     @Operation(summary = "精确云台控制（2022）")
     @PostMapping("/ptzprecise")
     public ApiResponse<Void> ptzPrecise(@RequestParam String serial,
@@ -107,50 +84,42 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 拉框放大。 */
     @Operation(summary = "拉框放大")
     @PostMapping("/dragzoomin")
-    public ApiResponse<Void> dragZoomIn(@RequestParam String serial,
-                                        @RequestParam(required = false) String code,
-                                        @RequestParam Integer length,
-                                        @RequestParam Integer width,
-                                        @RequestParam Integer midpointx,
-                                        @RequestParam Integer midpointy,
-                                        @RequestParam Integer lengthx,
-                                        @RequestParam Integer lengthy) {
+    public ApiResponse<ControlResultVo> dragZoomIn(@RequestParam String serial,
+                                                   @RequestParam(required = false) String code,
+                                                   @RequestParam Integer length,
+                                                   @RequestParam Integer width,
+                                                   @RequestParam Integer midpointx,
+                                                   @RequestParam Integer midpointy,
+                                                   @RequestParam Integer lengthx,
+                                                   @RequestParam Integer lengthy) {
         StpUtil.checkLogin();
-        controlService.dragZoom(channel(serial, code), true,
-                length, width, midpointx, midpointy, lengthx, lengthy);
-        return ApiResponse.ok();
+        return ApiResponse.ok(controlService.dragZoom(channel(serial, code), true,
+                length, width, midpointx, midpointy, lengthx, lengthy));
     }
 
-    /** 拉框缩小。 */
     @Operation(summary = "拉框缩小")
     @PostMapping("/dragzoomout")
-    public ApiResponse<Void> dragZoomOut(@RequestParam String serial,
-                                         @RequestParam(required = false) String code,
-                                         @RequestParam Integer length,
-                                         @RequestParam Integer width,
-                                         @RequestParam Integer midpointx,
-                                         @RequestParam Integer midpointy,
-                                         @RequestParam Integer lengthx,
-                                         @RequestParam Integer lengthy) {
+    public ApiResponse<ControlResultVo> dragZoomOut(@RequestParam String serial,
+                                                    @RequestParam(required = false) String code,
+                                                    @RequestParam Integer length,
+                                                    @RequestParam Integer width,
+                                                    @RequestParam Integer midpointx,
+                                                    @RequestParam Integer midpointy,
+                                                    @RequestParam Integer lengthx,
+                                                    @RequestParam Integer lengthy) {
         StpUtil.checkLogin();
-        controlService.dragZoom(channel(serial, code), false,
-                length, width, midpointx, midpointy, lengthx, lengthy);
-        return ApiResponse.ok();
+        return ApiResponse.ok(controlService.dragZoom(channel(serial, code), false,
+                length, width, midpointx, midpointy, lengthx, lengthy));
     }
 
     // ==================== 预置位 / 巡航 / 看守位 ====================
 
     /**
-     * 预置位控制。
-     *
-     * @param command {@code set} 设置 / {@code goto} 调用 / {@code remove} 删除
-     * @param preset  预置位编号 1~255
-     * @param name    备注名称（可选）。<b>只有 {@code set} 时生效</b>，
-     *                且只存平台侧（{@code gb_preset}）—— 设备只存编号，
-     *                各厂商对 {@code PresetName} 的支持程度差异很大。
+     * 预置位控制。command：set 设置 / goto 调用 / remove 删除；preset 取值 1~255。
+     * name 只在 set 时生效且仅存平台侧（{@code gb_preset}）—— 设备只存编号，
+     * 各厂商对 {@code PresetName} 的支持差异很大。
      */
     @Operation(summary = "预置位控制")
     @PostMapping("/preset")
@@ -162,29 +131,17 @@ public class ControlController {
         StpUtil.checkLogin();
         String channelId = channel(serial, code);
         controlService.preset(channelId, command, preset);
-        /*
-         * 名称必须真的落库。
-         *
-         * <p>改造前这里只有一行 log.info("预置位名称由本域保存…")，
-         * 注释写着「由本域保存」但实际没调任何持久化 —— 用户设置了备注，
-         * 刷新后名字又变回「预置位 N」，看起来像保存失败。
-         */
+        // 名称必须真的落库：早先只打一行日志，用户设置备注后刷新又变回「预置位 N」。
         if (name != null && !name.isBlank() && "set".equalsIgnoreCase(command)) {
             deviceService.savePresetName(channelId, preset, name.trim());
         }
-        /*
-         * 删除预置位时一并清掉平台侧的自定义名称。
-         *
-         * <p>不清的话会留下「幽灵备注」：设备上这个槽位已经空了，
-         * 但界面上列出的空槽位若按名称表渲染，会显示一个已经不存在的名字。
-         */
+        // 删除时一并清掉平台侧名称，否则设备槽位已空但界面仍显示旧名称（幽灵备注）。
         if ("remove".equalsIgnoreCase(command) || "delete".equalsIgnoreCase(command)) {
             deviceService.savePresetName(channelId, preset, null);
         }
         return ApiResponse.ok();
     }
 
-    /** 看守位控制。 */
     @Operation(summary = "看守位控制")
     @PostMapping("/homeposition")
     public ApiResponse<Void> homePosition(@RequestParam String serial,
@@ -197,11 +154,7 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /**
-     * 巡航控制。
-     *
-     * <p>{@code command=query} 时返回巡航组列表结构（数据由设备 MANSCDP 应答异步返回）。
-     */
+    /** {@code command=query} 返回巡航组列表结构，数据由设备 MANSCDP 应答异步返回。 */
     @Operation(summary = "巡航控制")
     @PostMapping("/navigate")
     public ApiResponse<ChannelNavigateVo> navigate(@RequestParam String serial,
@@ -228,7 +181,6 @@ public class ControlController {
 
     // ==================== 辅助开关 ====================
 
-    /** 雨刷开关。 */
     @Operation(summary = "雨刷开关")
     @PostMapping("/wiper")
     public ApiResponse<Void> wiper(@RequestParam String serial,
@@ -240,7 +192,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 补光灯开关。 */
     @Operation(summary = "补光灯开关")
     @PostMapping("/filllight")
     public ApiResponse<Void> fillLight(@RequestParam String serial,
@@ -255,7 +206,6 @@ public class ControlController {
 
     // ==================== 设备动作 ====================
 
-    /** 设备远程重启。 */
     @Operation(summary = "设备远程重启")
     @PostMapping("/teleboot")
     public ApiResponse<Void> teleBoot(@RequestParam String serial,
@@ -265,7 +215,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 设备端录像控制。 */
     @Operation(summary = "设备端录像控制")
     @PostMapping("/record")
     public ApiResponse<Void> record(@RequestParam String serial,
@@ -277,7 +226,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 布防撤防。 */
     @Operation(summary = "布防撤防")
     @PostMapping("/guard")
     public ApiResponse<Void> guard(@RequestParam String serial,
@@ -288,7 +236,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 强制关键帧。 */
     @Operation(summary = "强制关键帧")
     @PostMapping("/iframe")
     public ApiResponse<Void> forceIFrame(@RequestParam String serial,
@@ -298,7 +245,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 存储卡格式化（2022）。 */
     @Operation(summary = "存储卡格式化（2022）")
     @PostMapping("/formatsdcard")
     public ApiResponse<Void> formatSdCard(@RequestParam String serial,
@@ -311,7 +257,6 @@ public class ControlController {
 
     // ==================== 报警 ====================
 
-    /** 报警通知下发。 */
     @Operation(summary = "报警通知下发")
     @PostMapping("/alarmnotify")
     public ApiResponse<Void> alarmNotify(@RequestParam String serial,
@@ -328,7 +273,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 报警复位。 */
     @Operation(summary = "报警复位")
     @PostMapping("/alarmreset")
     public ApiResponse<Void> alarmReset(@RequestParam String serial,
@@ -341,12 +285,9 @@ public class ControlController {
     }
 
     /**
-     * 设备校时。
-     *
-     * <p>设备时钟漂移会让它上报的录像时间与平台检索区间对不上，
-     * 表现为「按时间段查不到录像，但录像确实存在」，排查成本极高。
-     *
-     * @param time 要下发的本地时间 {@code yyyy-MM-dd'T'HH:mm:ss}；留空用平台当前时间
+     * 设备校时。设备时钟漂移会让上报的录像时间与平台检索区间对不上，
+     * 表现为「按时间段查不到录像，但录像确实存在」。
+     * {@code time} 留空用平台当前时间，格式 {@code yyyy-MM-dd'T'HH:mm:ss}。
      */
     @Operation(summary = "设备校时")
     @PostMapping("/synctime")
@@ -369,7 +310,6 @@ public class ControlController {
 
     // ==================== 配置 / 订阅 ====================
 
-    /** 设备配置。 */
     @Operation(summary = "设备配置")
     @PostMapping("/deviceconfig")
     public ApiResponse<Void> deviceConfig(@RequestParam String serial,
@@ -380,7 +320,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 设备订阅。 */
     @Operation(summary = "设备订阅")
     @PostMapping("/devicesubscribe")
     public ApiResponse<Void> subscribe(@RequestParam String serial,
@@ -398,11 +337,8 @@ public class ControlController {
     // ==================== 语音喊话 ====================
 
     /**
-     * 语音喊话。
-     *
-     * <p>标准流程：平台发 {@code Broadcast} 通知 → 设备回 INVITE → 平台应答并建立
-     * 下行通道 → 音频数据持续推送。本接口完成第一步；
-     * 实时音频推送建议改用 WebSocket 接口（{@code ws-talk}）。
+     * 语音喊话。标准流程：平台发 {@code Broadcast} 通知 → 设备回 INVITE → 平台应答并建立下行通道 →
+     * 音频持续推送。本接口只完成第一步，实时音频请用 {@code ws-talk}。
      */
     @Operation(summary = "语音喊话")
     @PostMapping("/talk")
@@ -432,7 +368,6 @@ public class ControlController {
 
     // ==================== 2022 扩展 ====================
 
-    /** OSD 配置（2022）。 */
     @Operation(summary = "OSD 配置（2022）")
     @PostMapping("/osdconfig")
     public ApiResponse<Void> osdConfig(@RequestParam String serial,
@@ -453,7 +388,6 @@ public class ControlController {
         return ApiResponse.ok();
     }
 
-    /** 图像抓拍配置（2022）。 */
     @Operation(summary = "图像抓拍配置（2022）")
     @PostMapping("/snapshotconfig")
     public ApiResponse<SnapshotConfigVo> snapshotConfig(
@@ -472,7 +406,6 @@ public class ControlController {
         return ApiResponse.ok(vo);
     }
 
-    /** 设备软件升级（2022）。 */
     @Operation(summary = "设备软件升级（2022）")
     @PostMapping("/deviceupgrade")
     public ApiResponse<DeviceUpgradeVo> deviceUpgrade(@RequestParam String serial,
@@ -481,31 +414,35 @@ public class ControlController {
                                                       @RequestParam String fileurl,
                                                       @RequestParam String manufacturer) {
         StpUtil.checkLogin();
-        controlService.deviceUpgrade(channel(serial, code), firmware, fileurl, manufacturer);
+        ControlResultVo ack = controlService.deviceUpgrade(
+                channel(serial, code), firmware, fileurl, manufacturer);
         DeviceUpgradeVo vo = new DeviceUpgradeVo();
-        vo.setUpgradeResult("PENDING");
+        // 有应答就报应答（OK/ERROR），没有就 PENDING —— 三种状态互斥，不再一律 PENDING
+        vo.setUpgradeResult(ack.isAnswered()
+                ? (ack.isSent() ? ack.getResult() : null) : "PENDING");
         vo.setFirmware(firmware);
-        vo.setNote("升级命令已下发；结果由设备通过 DeviceUpgradeResult 通知回传");
+        vo.setSessionId(ack.getSessionId());
+        vo.setNote(ack.getNote()
+                + "；升级是否成功由设备通过 DeviceUpgradeResult 通知回传（session="
+                + ack.getSessionId() + "）");
         return ApiResponse.ok(vo);
     }
 
-    /** 目标跟踪控制（2022）。 */
     @Operation(summary = "目标跟踪控制（2022）")
     @PostMapping("/targettrack")
-    public ApiResponse<Void> targetTrack(@RequestParam String serial,
-                                         @RequestParam(required = false) String code,
-                                         @RequestParam(value = "target_track") String targetTrack,
-                                         @RequestParam(value = "device_id2", required = false) String deviceId2,
-                                         @RequestParam(required = false) Integer length,
-                                         @RequestParam(required = false) Integer width,
-                                         @RequestParam(required = false) Integer midpointx,
-                                         @RequestParam(required = false) Integer midpointy,
-                                         @RequestParam(required = false) Integer lengthx,
-                                         @RequestParam(required = false) Integer lengthy) {
+    public ApiResponse<ControlResultVo> targetTrack(@RequestParam String serial,
+                                                    @RequestParam(required = false) String code,
+                                                    @RequestParam(value = "target_track") String targetTrack,
+                                                    @RequestParam(value = "device_id2", required = false) String deviceId2,
+                                                    @RequestParam(required = false) Integer length,
+                                                    @RequestParam(required = false) Integer width,
+                                                    @RequestParam(required = false) Integer midpointx,
+                                                    @RequestParam(required = false) Integer midpointy,
+                                                    @RequestParam(required = false) Integer lengthx,
+                                                    @RequestParam(required = false) Integer lengthy) {
         StpUtil.checkLogin();
-        controlService.targetTrack(channel(serial, code), targetTrack, deviceId2,
-                length, width, midpointx, midpointy, lengthx, lengthy);
-        return ApiResponse.ok();
+        return ApiResponse.ok(controlService.targetTrack(channel(serial, code), targetTrack, deviceId2,
+                length, width, midpointx, midpointy, lengthx, lengthy));
     }
 
     // ==================== 内部 ====================

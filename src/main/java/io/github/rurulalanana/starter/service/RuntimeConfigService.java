@@ -17,33 +17,13 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 运行时配置服务：<b>数据库优先，application.yml 兜底</b>。
+ * 运行时配置服务：数据库优先，application.yml 兜底。
  *
- * <h3>解决什么问题</h3>
+ * <p>改「录像保留 7 天 → 30 天」不该走改 yml、重新打包、停服重启（重启会中断录像并让设备重注册）；
+ * 放进 {@code gb_config} 后保存即生效：写库 + 更新内存镜像，定时任务下一轮按新值跑。
  *
- * <p>改一个「录像保留 7 天 → 30 天」需要改 yml、重新打包、上传 76MB jar、
- * 停服重启（停机本身还要 20 秒）。运维角度这是不可接受的 ——
- * 而且重启会中断所有录像、让设备重新注册。
- *
- * <p>把这些参数放进 {@code gb_config} 表后，界面上改完<b>立即生效</b>：
- * 用户保存 → 写库 + 更新内存镜像 → 定时任务下一次执行就按新值跑。
- *
- * <h3>读取为什么走内存</h3>
- *
- * <p>这些值在<b>高频路径</b>上被读：保活任务每 30 秒 × 通道数、
- * 对账任务每 60 秒、流上线回调里还要读分片时长。每次都查库会产生
- * 大量本可避免的 SQL。因此启动时一次性载入 {@link #cache}，
- * 之后读内存（{@link ConcurrentHashMap#get} 是无锁的）。
- *
- * <h3>为什么 yml 也要读</h3>
- *
- * <p>如果只用注册表里写死的默认值，就与 {@code application.yml} 里的
- * 配置脱节了 —— 运维改了 yml 却不生效，会非常反直觉。因此启动顺序是：
- * <ol>
- *   <li>先读 {@link Environment}（即 yml 的值）作为基线；</li>
- *   <li>再用库里的值覆盖。</li>
- * </ol>
- * 这样「yml 是出厂默认，库是运行时覆盖」，两层语义清晰。
+ * <p>读取走内存：这些值在高频路径上被读（保活每 30 秒 × 通道数、对账每 60 秒、流上线回调）。
+ * 启动顺序是先读 {@link Environment} 作为基线，再用库里的值覆盖 —— yml 是出厂默认，库是运行时覆盖。
  */
 @Slf4j
 @Service
@@ -53,12 +33,7 @@ public class RuntimeConfigService {
     private final GbConfigMapper configMapper;
     private final Environment env;
 
-    /**
-     * 生效值缓存（key → 字符串值）。
-     *
-     * <p>只放<b>已解析并校验过</b>的值。读不到时回落到 {@link #defaults}，
-     * 再读不到才用 {@link ConfigKeys.Def#def()}。
-     */
+    /** 生效值缓存：只放已解析并校验过的值；读不到时回落 {@link #defaults}，再回落 {@link ConfigKeys.Def#def()}。 */
     private final Map<String, String> cache = new ConcurrentHashMap<>();
 
     /** yml 基线（key → 值），启动时算好，避免每次回落都去查 Environment。 */
@@ -68,18 +43,9 @@ public class RuntimeConfigService {
     private volatile boolean loaded;
 
     /**
-     * 启动期先只把「yml 基线」灌进去，不等数据源。
-     *
-     * <p><b>为什么不能只靠 {@link #reload()}</b>：reload 要查库，
-     * 而它是在 {@code StreamEventBridge#attach} 里触发的 —— 那时平台 bean
-     * 已经构造完（信令栈已经起来了）。在此期间如果有人读配置（典型是
-     * SIP 注册鉴权要读 {@code sip.password}），
-     * {@link #raw} 会一路回落到 {@code def.def()}，也就是注册表里写死的
-     * 空串 —— <b>等于启动瞬间把鉴权关了</b>。设备恰好在这几秒内注册就会
-     * 绕过密码校验。
-     *
-     * <p>这里只读 {@link Environment}（无 IO），把 yml 值先就位，
-     * 库里的覆盖稍后由 reload 补上。
+     * 启动期先只灌「yml 基线」，不等数据源。不能只靠 {@link #reload()}：它要查库，
+     * 由 {@code StreamEventBridge#attach} 触发，而那之前 SIP 注册鉴权就会读 {@code sip.password}，
+     * {@link #raw} 会回落到写死的空串 —— 等于启动瞬间把鉴权关了。
      */
     @jakarta.annotation.PostConstruct
     void initDefaultsFromEnv() {
@@ -90,10 +56,7 @@ public class RuntimeConfigService {
     }
 
     /**
-     * 启动时加载：yml 基线 + 数据库覆盖。
-     *
-     * <p>由 {@code @PostConstruct} 之外的地方调用（`StreamEventBridge#attach`），
-     * 因为需要数据源就绪。
+     * 启动时加载：yml 基线 + 数据库覆盖。需在数据源就绪后调用（{@code StreamEventBridge#attach}）。
      */
     public void reload() {
         // 1) yml 基线
@@ -116,16 +79,14 @@ public class RuntimeConfigService {
                 }
                 ConfigKeys.Def def = ConfigKeys.find(key);
                 if (def == null) {
-                    // 库里有多余的 key（旧版本遗留 / 手写进去的）：忽略但不删，
-                    // 保留下来便于排查，只是不参与生效值
+                    // 库里多余的 key（旧版本遗留 / 手写）：忽略但不删，便于排查
                     log.debug("忽略未注册的配置项: {}", key);
                     continue;
                 }
                 try {
                     merged.put(def.key(), def.validate(row.getConfigValue()));
-                    // 只统计「真正改变了生效值」的行：库里可能残留与默认值相同的记录
-                    // （旧版本写入、或从外部手工导入），把它们算进「已覆盖」
-                    // 会和界面上的 overridden 判定（按值比较）对不上。
+                    // 只统计真正改变了生效值的行：库里可能残留与默认值相同的记录，
+                    // 把它们算进「已覆盖」会与界面按值比较的 overridden 判定对不上
                     if (!java.util.Objects.equals(row.getConfigValue(),
                             base.get(def.key()))) {
                         overridden++;
@@ -149,11 +110,8 @@ public class RuntimeConfigService {
     }
 
     /**
-     * 从 Environment 取某个 key 的 yml 值。
-     *
-     * <p>把注册表的 key（{@code record.retain-days}）映射成 Spring 的属性名
-     * （{@code gb28181.starter.record-retain-days}）。两者形态不同：
-     * 注册表用点分层级便于分组展示，Spring 用 kebab-case 且带前缀。
+     * 从 Environment 取 key 的 yml 值：注册表用点分层级（{@code record.retain-days}），
+     * Spring 用 kebab-case 且带前缀（{@code gb28181.starter.record-retain-days}）。
      */
     private String resolveFromEnv(ConfigKeys.Def def) {
         String property = toPropertyName(def.key());
@@ -171,25 +129,17 @@ public class RuntimeConfigService {
     }
 
     /**
-     * 注册表 key → Spring 属性名。
-     *
-     * <p>{@code record.retain-days} → {@code gb28181.starter.record-retain-days}
-     *
-     * <p>只有 {@code record.}/{@code log.} 两组在 yml 里位于 {@code starter} 下；
-     * {@code stream.} 与 {@code device.} 分属 {@code gb28181} 与
-     * {@code gb28181.starter}。这里逐个映射而不是硬套前缀 ——
-     * 猜错前缀会让「yml 改了不生效」这个坑以更难排查的形式出现。
+     * 注册表 key → Spring 属性名，逐个映射而非硬套前缀：yml 里各组的真实位置不一致
+     * （{@code record.}/{@code log.} 在 starter 下，{@code stream.} 与部分 {@code device.} 不在，
+     * {@code tls.*} 是嵌套结构），猜错前缀会让「yml 改了不生效」以更难排查的形式出现。
      */
     private static String toPropertyName(String key) {
         return switch (key) {
             case ConfigKeys.DEVICE_OFFLINE_SECONDS ->
                     "gb28181.starter.device-offline-seconds";
             /*
-             * device.* 组里其余项的 yml 名字**不带 device- 前缀**
-             * （yml 里是 starter.auto-collect / starter.collect-interval-seconds …）。
-             * 走下面的默认分支会拼成 gb28181.starter.device-auto-collect ——
-             * 那个属性根本不存在，于是 yml 里改了也不生效，只能靠库里覆盖，
-             * 表现就是「配置文件里写着 false，界面显示 true」。
+             * device.* 组里其余项的 yml 名字不带 device- 前缀（starter.auto-collect 等），
+             * 走默认分支会拼成不存在的属性，表现为「yml 写着 false，界面显示 true」。
              */
             case ConfigKeys.DEVICE_OFFLINE_SCAN_INTERVAL_MS ->
                     "gb28181.starter.offline-scan-interval-ms";
@@ -204,11 +154,7 @@ public class RuntimeConfigService {
             // sip.password → gb28181.sip-password（不在 starter 下）
             case ConfigKeys.SIP_PASSWORD ->
                     "gb28181.sip-password";
-            /*
-             * tls.* 在 yml 里是嵌套结构（gb28181.tls.port），
-             * 不是 kebab-case 平铺。走默认分支会拼成 gb28181.starter.tls-port，
-             * 那个属性不存在 —— 于是 yml 里改了端口不生效，只能靠库里覆盖。
-             */
+            /* tls.* 在 yml 里是嵌套结构（gb28181.tls.port），走默认分支拼出的属性不存在，改了不生效 */
             case ConfigKeys.TLS_PORT ->
                     "gb28181.tls.port";
             case ConfigKeys.TLS_AUTO_RELOAD ->
@@ -286,10 +232,8 @@ public class RuntimeConfigService {
     // ==================== 写入 ====================
 
     /**
-     * 保存一项配置（校验 → 写库 → 更新内存）。
-     *
-     * <p><b>写库成功才更新内存</b>：反过来会造成「界面显示已保存、实际重启后
-     * 又变回旧值」——库和内存不一致是最难排查的一类问题。
+     * 保存一项配置（校验 → 写库 → 更新内存）。必须写库成功才更新内存，
+     * 否则会出现「界面显示已保存、重启后变回旧值」。
      *
      * @return 生效值
      * @throws IllegalArgumentException 值非法（由 {@link ConfigKeys.Def#validate} 抛出）
@@ -300,10 +244,8 @@ public class RuntimeConfigService {
             throw new IllegalArgumentException("不支持的配置项：" + key);
         }
         String normalized = def.validate(value);
-        // 「把值改成和默认一样」在语义上就是「恢复默认」：
-        // 若还留一行与默认值相同的记录，gb_config 会积累一堆看不出作用的冗余行，
-        // 而 list() 又要按「值是否等于默认」判定 overridden，于是库里有行、
-        // 界面却显示「未修改」，两个口径打架。直接删行，让两者永远一致。
+        // 改成与默认值相同在语义上就是「恢复默认」：删行而不是留着，
+        // 否则库里积冗余行、界面按值判定 overridden 显示「未修改」，两个口径打架
         String fallback = defaults.getOrDefault(def.key(), def.def());
         boolean sameAsDefault = normalized.equals(fallback);
         GbConfig existing = configMapper.selectOne(Wrappers.<GbConfig>lambdaQuery()
@@ -337,11 +279,7 @@ public class RuntimeConfigService {
         return normalized;
     }
 
-    /**
-     * 删除一项配置的数据库覆盖，回落到 yml / 默认值。
-     *
-     * <p>「恢复默认」比「改成一个猜的值」更可靠 —— 运维不必记住出厂值。
-     */
+    /** 删除一项配置的数据库覆盖，回落到 yml / 默认值（运维不必记住出厂值）。 */
     public String reset(String key) {
         ConfigKeys.Def def = ConfigKeys.find(key);
         if (def == null) {
@@ -356,28 +294,19 @@ public class RuntimeConfigService {
     }
 
     /**
-     * 批量保存多项配置（一次请求提交整页改动）。
-     *
-     * <p><b>为什么要批量</b>：界面上是「改好几项、最后点一次保存」——
-     * 这是配置页的常规心智（参考 LiveGBS 等同类产品）。
-     * 让前端循环发 N 个单项请求有两个问题：中途某项失败时前面的已经生效，
-     * 界面却提示「保存失败」，用户不知道到底存了哪些；而且 N 次网络往返
-     * 在弱网下会明显拖慢。
-     *
-     * <p><b>先整体校验、再逐项落库</b>：任何一项不合法就整体拒绝，
-     * 不做「部分成功」—— 半套配置生效比全都不生效更难排查。
-     * 落库阶段若某项写库异常，前面已写的保留（无法回滚跨行事务的语义），
-     * 但会在返回值里带上失败的 key，前端据此提示重试。
+     * 批量保存多项配置：先整体校验、再逐项落库，任一项非法就整体拒绝（半套配置生效比全不生效更难排查）。
+     * 前端「改几项、点一次保存」是配置页的惯例，逐个请求会出现中途失败而前面的已生效。
+     * 落库阶段若某项异常，前面已写的保留（跨行无法回滚），前端可按返回值重试。
      *
      * @param changes key → 期望值
-     * @return 实际生效的 key → 值（规范化后的）
+     * @return 实际生效的 key → 规范化后的值
      * @throws IllegalArgumentException 任一项的值非法
      */
     public java.util.Map<String, String> setBatch(java.util.Map<String, String> changes) {
         if (changes == null || changes.isEmpty()) {
             return java.util.Map.of();
         }
-        // 第一轮：全部校验。任一非法直接抛出，不做任何写入。
+        // 第一轮：全部校验，任一非法直接抛出，不做任何写入
         java.util.Map<String, String> normalized = new java.util.LinkedHashMap<>();
         for (java.util.Map.Entry<String, String> e : changes.entrySet()) {
             ConfigKeys.Def def = ConfigKeys.find(e.getKey());
@@ -386,7 +315,7 @@ public class RuntimeConfigService {
             }
             normalized.put(def.key(), def.validate(e.getValue()));
         }
-        // 第二轮：落库 + 更新内存。
+        // 第二轮：落库 + 更新内存
         java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
         for (java.util.Map.Entry<String, String> e : normalized.entrySet()) {
             String key = e.getKey();
@@ -411,7 +340,7 @@ public class RuntimeConfigService {
             item.setDefaultValue(defaults.getOrDefault(d.key(), d.def()));
             item.setMin(d.min());
             item.setMax(d.max());
-            // 数据库里有覆盖 = true（界面上可以显示「已修改」并可一键恢复）
+            // 库里有覆盖 = true（界面显示「已修改」并可一键恢复）
             item.setOverridden(cache.containsKey(d.key())
                     && !raw(d.key()).equals(item.getDefaultValue()));
             out.add(item);
@@ -433,7 +362,6 @@ public class RuntimeConfigService {
         private String description;
         /** 当前生效值。 */
         private String value;
-        /** yml / 内置默认值（用于「恢复默认」和「已修改」标记）。 */
         private String defaultValue;
         private long min;
         private long max;

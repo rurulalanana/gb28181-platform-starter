@@ -18,30 +18,16 @@ public class CascadeChannelVo {
     private String name;
     private String customName;
     private String customId;
-    /**
-     * 所属设备是否在线。
-     *
-     * <p>注意这是<b>设备</b>级状态，不等于通道可用：下级平台在线时，
-     * 它上报的通道仍可能是 {@code Status=OFF}（摄像机被拔线、断电）。
-     * 判断「这一路能不能看」要用 {@link #online}。
-     */
+    /** 设备级在线状态，不等于通道可用：下级平台在线时，通道仍可能 Status=OFF（摄像机拔线/断电）。 */
     private Boolean deviceOnline;
     /**
-     * 通道是否可用（<b>判断能否点播就用这个</b>）。
-     *
-     * <p>= 设备在线 && 通道 {@code Status=ON}。
-     *
-     * <p>改造前前端直接读 {@code online}，而后端只返回了 {@code deviceOnline}，
-     * 字段名对不上，弹窗里所有通道恒显示「离线」—— 通道明明能播。
+     * 通道是否可用（<b>判断能否点播就用这个</b>）= 设备在线 && 通道 {@code Status=ON}。
+     * 早先前端只读 {@code online} 而接口只返回 {@code deviceOnline}，字段名对不上，
+     * 弹窗里所有通道恒显示「离线」—— 通道明明能播。
      */
     private Boolean online;
     private Integer channel;
-    /**
-     * 通道类型大类：{@code video} / {@code audio} / {@code alarm} / {@code other}。
-     *
-     * <p>由 20 位国标编码第 11~13 位的类型编码推导（GB/T 28181 附录 D）。
-     * 上级平台的「通道类型」筛选就按这个维度分类，而不是列 20 种细类。
-     */
+    /** 大类 {@code video/audio/alarm/other}，由 20 位编码第 11~13 位推导（GB/T 28181 附录 D）。 */
     private String channelType;
     /** 类型编码原文（如 {@code 131}），排查时对得上国标表。 */
     private String typeCode;
@@ -59,11 +45,9 @@ public class CascadeChannelVo {
     private Boolean ondemand;
     private Boolean audioEnable;
     /**
-     * 通道快照地址；无快照时为 {@code null}。
-     *
-     * <p>指向 {@code /api/v1/cloudrecord/snap/{设备编码}/{通道编码}.jpg}（免登录）。
-     * <b>不在这里现抓</b>：列表可能几百上千条，逐条拉流截图会瞬间打爆设备和带宽。
-     * 快照由用户在播放页手动抓拍或报警联动产生，这里只回已有的那张。
+     * 通道快照地址；无快照时为 {@code null}。指向免登录的
+     * {@code /api/v1/cloudrecord/snap/{设备编码}/{通道编码}.jpg}。
+     * <b>不在这里现抓</b>：列表可能上千条，逐条拉流截图会打爆设备与带宽；只回已有的那张。
      */
     private String snapshot;
 }

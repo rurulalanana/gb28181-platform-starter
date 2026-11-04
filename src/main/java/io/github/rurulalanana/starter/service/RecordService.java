@@ -36,18 +36,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 录像服务：设备侧录像检索（标准 9.8）与平台侧云端录像管理。
+ * 录像服务：设备侧录像检索（标准 9.8）与云端录像管理。
  *
- * <p>两套录像语义不同，务必区分：
- * <ul>
- *   <li><b>设备录像</b>：文件在设备（NVR / SD 卡）上，平台通过 {@code RecordInfo}
- *       查询目录，通过回放 INVITE 让设备把流推回来。</li>
- *   <li><b>云端录像</b>：平台用 ZLMediaKit 把收到的实时流录成 MP4，文件在平台磁盘上；
- *       启用对象存储（{@code gb28181.oss.enabled=true}）时停止录制后自动上传。</li>
- * </ul>
- *
- * <p><b>云端录像元数据以 {@code gb_record} 表为准</b>：ZLMediaKit 的内存索引只用于
- * 查询「正在录制中」的条目，历史条目一律从库读取，避免重启后列表丢失。
+ * <p>设备录像文件在 NVR / SD 卡上，走 {@code RecordInfo} 查询 + 回放 INVITE；
+ * 云端录像是 ZLM 把实时流录成的 MP4，元数据以 {@code gb_record} 表为准，
+ * ZLM 内存索引只用于「正在录制中」的条目（重启后历史不丢）。
  */
 @Slf4j
 @Service
@@ -55,20 +48,13 @@ import java.util.concurrent.TimeUnit;
 public class RecordService {
 
     /**
-     * 设备录像检索默认超时（秒）。
-     *
-     * <p><b>必须大于设备自身的内部等待</b>：实测 LiveGBS 会向上级摄像机再等 15 秒
-     * （超时后回 {@code 400 wait for recordinfo timeout[15s]}）。若这里也取 15，
-     * 就永远和设备的回话点赛跑 —— 设备刚要说原因，我们已经放弃了。
+     * 设备录像检索默认超时（秒）：必须大于设备自身内部等待。
+     * 实测 LiveGBS 会向上级摄像机等 15 秒后回 {@code 400 wait for recordinfo timeout[15s]}，
+     * 这里取 15 就永远在设备回话前放弃。
      */
     private static final int QUERY_TIMEOUT_SECONDS = 20;
 
-    /**
-     * 等待聚合结果的轮询片长（毫秒）。
-     *
-     * <p>用途是「让设备的拒绝能提前打断等待」：见 {@code doQuery} 的说明。
-     * 200ms 相对十几秒的超时可忽略不计。
-     */
+    /** 等待聚合结果的轮询片长（毫秒），用于让设备的拒绝提前打断等待。 */
     private static final long WAIT_SLICE_MS = 200L;
 
     /** 等待流建立的总超时（毫秒）：设备推流通常 1~3 秒内开始。 */
@@ -80,7 +66,6 @@ public class RecordService {
     /** 归档时等待 ZLM 写终态的时长（毫秒）：录制停止是异步的，需给回调留时间。 */
     private static final long ARCHIVE_WAIT_MS = 3000;
 
-    /** 归档等待终态的轮询间隔（毫秒）。 */
     private static final long ARCHIVE_WAIT_POLL_MS = 100;
 
     private final Gb28181MediaPlatform platform;
@@ -91,13 +76,10 @@ public class RecordService {
     private final io.github.rurulalanana.starter.storage.ObjectStorageProperties storageProps;
     private final StreamService streamService;
     private final Gb28181Properties props;
+    /** SDK 直连设备的录像检索走同步调用，不经过 SIP。 */
+    private final DahuaCapabilityService dahuaCapability;
 
-    /**
-     * 设备录像检索的「同通道串行锁」。
-     *
-     * <p>锁对象必须<b>按通道</b>而不是全局：不同通道的查询互不影响，
-     * 用全局锁会让「查 A 通道时 B 通道也卡住」，把一次慢查询放大成全线卡顿。
-     */
+    /** 设备录像检索的同通道串行锁：必须按通道而非全局，否则一次慢查询会卡住所有通道。 */
     private final Map<String, Object> channelLocks = new ConcurrentHashMap<>();
 
     /** 相同查询窗口的短时缓存：{@code 通道|起|止} → 结果。 */
@@ -107,24 +89,13 @@ public class RecordService {
     private final Map<String, CompletableFuture<DeviceRecordQuery>> recordInFlight =
             new ConcurrentHashMap<>();
 
-    /**
-     * 检索结果缓存有效期（毫秒）。
-     *
-     * <p>取 15 秒的理由：设备录像目录不会秒级变化，而界面上的连续操作
-     * （换通道 → 切日期 → 切视角 → 回来）都发生在几秒内。
-     * 再长就会让「刚录完的一段」迟迟不出现。
-     */
+    /** 检索结果缓存有效期（毫秒）：界面连续操作都在几秒内，再长会让刚录完的段落迟迟不出现。 */
     private static final long RECORD_CACHE_MS = 15_000L;
 
     /** 缓存条目上限：超过就整体清空（设备录像检索不是高频接口，够用即可）。 */
     private static final int RECORD_CACHE_MAX = 200;
 
-    /**
-     * 一条检索结果缓存。
-     *
-     * @param result 完整结果（含“设备是否应答”标志，否则命中缓存时无法传递）
-     * @param at     写入时刻
-     */
+    /** 一条检索结果缓存：必须带「设备是否应答」标志，否则命中缓存时无法传递。 */
     private record CachedRecords(DeviceRecordQuery result, long at) {
         boolean expired() {
             return System.currentTimeMillis() - at >= RECORD_CACHE_MS;
@@ -141,20 +112,8 @@ public class RecordService {
     }
 
     /**
-     * 已删除录像的「墓碑」：文件路径 → 删除时刻。
-     *
-     * <p><b>为什么需要</b>：{@link #reconcileAutoRecordings} 是按「磁盘上有文件、
-     * 库里没有记录」来补登记的。而删除接口是「先删文件、再删记录」—— 文件删除
-     * 可能失败（权限、文件被占用、OSS 本地副本策略），此时库里记录已删、
-     * 磁盘文件还在，下一次对账就会把刚删掉的录像<b>重新登记回来</b>，
-     * 表现为「删除后刷新又出现了」。
-     *
-     * <p>用墓碑记住「这个路径是用户主动删的」，对账时跳过。带过期时间，
-     * 避免无限增长：文件最终被清理后墓碑也没有存在意义。
-     *
-     * <p><b>内存实现</b>：重启后墓碑丢失，但对账也只在启动 30 秒后才跑，
-     * 且文件通常已被删掉；重启后仍残留的删除失败文件被重新登记属于可接受的
-     * 降级（用户可再删一次）。用 DB 存墓碑需要建表，收益不成比例。
+     * 已删除录像的墓碑（文件路径 → 删除时刻）：删除接口先删文件再删记录，
+     * 文件删除失败时下一次对账会把刚删的录像重新登记回来。内存实现，重启后丢失属可接受降级。
      */
     private final Map<String, Long> deletedPaths = new ConcurrentHashMap<>();
 
@@ -163,57 +122,24 @@ public class RecordService {
 
     /**
      * 临时录像文件「多久没被写入」即认定为孤儿（毫秒）。
-     *
-     * <p>ZLM 正在写的分片带 {@code .} 前缀且持续被追加，修改时间一直在更新；
-     * 进程异常退出后没人再碰它，修改时间就冻住了。
-     * 取 10 分钟：远大于任何正常的分片写盘间隔（实测 60 分钟一段、
-     * 每秒都在写），又足够短以便及时告警。
+     * ZLM 正在写的分片持续被追加、修改时间一直在更新，进程异常退出后才冻住。
      */
     private static final long ORPHAN_STALE_MS = 10 * 60 * 1000L;
 
-    /**
-     * 已告警过的孤儿文件路径（去重）。
-     *
-     * <p>对账每 60 秒跑一次，若不去重，一个 319 MB 的孤儿文件会每分钟
-     * 刷一条同样的告警，把日志淹掉。重启后重新告警一次是可接受的
-     * （反而能提醒运维「上次的还没清理」）。
-     */
+    /** 已告警过的孤儿文件路径：对账每 60 秒跑一次，不去重会把日志淹掉。 */
     private final java.util.Set<String> warnedOrphans = ConcurrentHashMap.newKeySet();
 
     // ==================== 设备侧录像（RecordInfo） ====================
 
-    /**
-     * 检索设备录像（标准 9.8），同步等待应答。
-     *
-     * @param channelId 通道编码
-     * @param startTime ISO 格式开始时间
-     * @param endTime   ISO 格式结束时间
-     * @param timeoutSeconds 等待设备应答的超时
-     * @return 录像段列表；设备不应答时返回空列表
-     */
+    /** 检索设备录像（标准 9.8），同步等待应答。 */
     public List<RecordItem> queryDeviceRecords(String channelId, String startTime,
                                                String endTime, Integer timeoutSeconds) {
         return queryDeviceRecords(channelId, channelId, startTime, endTime, timeoutSeconds);
     }
 
     /**
-     * 检索设备录像（标准 9.8 RecordInfo）。
-     *
-     * <p><b>SIP 寻址用设备编码、查询目标用通道编码</b>：国标里录像挂在通道上，
-     * 所以 MANSCDP 的 {@code <DeviceID>} 必须是通道编码；而 SIP 的 To / 请求行
-     * 只认设备编码（设备才是注册实体）。
-     *
-     * <p>改造前这个方法只有一个 ID 且传的是通道编码，于是：
-     * <ul>
-     *   <li>直连摄像机（设备编码 == 通道编码）能跑通，问题被掩盖；</li>
-     *   <li>下级平台 / 级联（两者不同）必然抛「设备未注册或会话已失效」——
-     *       而界面上只显示「没有录像」，用户会以为设备真的没录像。</li>
-     * </ul>
-     *
-     * @param deviceId       设备编码（SIP 寻址）
-     * @param channelId      通道编码（{@code <DeviceID>}，也是缓存键）
-     * @param timeoutSeconds 等待设备应答的超时
-     * @return 录像段列表；设备不应答时返回空列表
+     * 检索设备录像（标准 9.8 RecordInfo）：SIP 寻址用设备编码，MANSCDP 的 {@code <DeviceID>} 用通道编码。
+     * 只用一个 ID 时，下级平台 / 级联场景必然抛「设备未注册」，界面只会显示「没有录像」。
      */
     public List<RecordItem> queryDeviceRecords(String deviceId, String channelId,
                                                String startTime, String endTime,
@@ -223,11 +149,8 @@ public class RecordService {
     }
 
     /**
-     * 一次设备录像检索的结果。
-     *
-     * @param items          录像段
-     * @param deviceAnswered 设备是否真的应答了（收到过 RecordInfo 帧，或正常收齐）
-     * @param failure        设备拒绝本次检索的原因（如 SIP {@code 400 ...}）；无则为 {@code null}
+     * 一次设备录像检索的结果。{@code deviceAnswered} 区分「没答」与「答了空列表」，
+     * {@code failure} 是设备拒绝本次检索的原因（如 SIP {@code 400 ...}）。
      */
     public record DeviceRecordQuery(List<RecordItem> items, boolean deviceAnswered,
                                     String failure) {
@@ -241,16 +164,22 @@ public class RecordService {
     }
 
     /**
-     * 检索设备录像，并<b>明确告知设备有没有应答</b>。
-     *
-     * <p>“设备没应答”与“设备回了空列表（这段确实没录）”在数据上都是空列表，
-     * 但处理方式完全相反：前者要去查设备/网络，后者什么都不用做。
-     * 只看 {@code items.isEmpty()} 分不出来，所以必须把标志一起交上去 ——
-     * 否则界面上就会把“设备故障”显示成“当天无录像”。
+     * 检索设备录像，并明确告知设备有没有应答。
+     * 「设备没应答」与「设备回了空列表」在数据上都是空列表，但处理方式相反：
+     * 前者要查设备 / 网络，后者什么都不用做。
      */
     public DeviceRecordQuery queryDeviceRecordsAnswered(String deviceId, String channelId,
                                                         String startTime, String endTime,
                                                         Integer timeoutSeconds) {
+        /*
+         * SDK 直连设备（大华等）不走 SIP RecordInfo：它不接 MANSCDP，
+         * 只能调 CLIENT_QueryRecordFile 同步拿回列表。
+         * 不在这里分流的话，国标链路会一直等一个永远不会来的应答，
+         * 界面表现是「检索转圈 15 秒后什么都没有」。
+         */
+        if (dahuaCapability.isDahua(deviceId)) {
+            return querySdkRecords(deviceId, channelId, startTime, endTime);
+        }
         Gb28181MediaService media = platform.mediaService();
         if (media == null) {
             throw BizException.badRequest("媒体服务未启动");
@@ -279,26 +208,16 @@ public class RecordService {
         try {
             DeviceRecordQuery result;
             /*
-             * ③ 同一通道串行。
-             *
-             * <p>必须串行的原因在 SIP 层：应答聚合状态是<b>按通道单一槽位</b>
-             * （recordPagers / recordCallbacks 都以通道编码为键），
-             * 同通道两个查询会互相覆盖回调 —— 先发的那个永远等不到应答，
-             * 最终以「设备未应答」超时收场。而界面上「换通道」会同时触发
-             * 「当天检索」与「最近 15 分钟录像状态」两次查询，
-             * 于是每换一次通道就必然产生一次假超时（线上日志里超时次数
-             * 是成功次数的两倍，而设备其实每次都答了）。
+             * ③ 同一通道必须串行：SIP 层的应答聚合状态是按通道单一槽位
+             * （recordPagers / recordCallbacks 以通道编码为键），同通道两个查询会互相覆盖回调，
+             * 先发的那个永远等不到应答。界面「换通道」会同时触发当天检索与最近 15 分钟状态两次查询，
+             * 不串行则每换一次通道必然产生一次假超时。
              */
             Object lock = channelLocks.computeIfAbsent(channelId, k -> new Object());
             synchronized (lock) {
                 result = doQuery(media, deviceId, channelId, startTime, endTime, timeoutSeconds);
             }
-            /*
-             * 只缓存「设备应答过」的查询。
-             *
-             * <p>未应答的结果缓存下来会让用户重试时立刻又拿到同一个失败结果，
-             * 看起来像平台坏了。
-             */
+            /* 只缓存设备应答过的查询：缓存失败结果会让重试立刻又拿到同一个失败。 */
             if (result.deviceAnswered()) {
                 recordCache.put(key, new CachedRecords(result, System.currentTimeMillis()));
                 trimRecordCache();
@@ -314,15 +233,99 @@ public class RecordService {
     }
 
     /**
-     * 真正下发 {@code RecordInfo} 并等待聚合结果。
+     * SDK 直连设备的录像检索（同步）。
      *
-     * <p><b>等待方式要「能被设备打断」</b>：设备拒绝时（实测 LiveGBS 回
-     * {@code 400 wait for recordinfo timeout[15s]}）它是在自己的超时点才回话的，
-     * 正好落在业务超时附近。若只做一次 {@code future.get(timeout)}，
-     * 很可能在设备回话前就放弃 —— 那样就拿不到原因，只能报「设备未应答」。
+     * <p>与国标路径的本质区别：国标是「下发查询 → 等设备分多帧应答 → 聚合」，
+     * 有超时、有丢帧、要处理 SumNum 不匹配；SDK 是一次同步调用直接返回完整列表，
+     * 因此这里不需要超时窗口、不需要聚合、也没有「答了一半」的状态。
      *
-     * <p>所以按小片轮询：一旦发现设备已经明确拒绝，立刻结束等待把原因带回去，
-     * 既最快、又完整。
+     * @return 恒为 {@code deviceAnswered=true}（同步调用成功即代表设备答了）；
+     *         设备拒绝时抛业务异常而不是返回空列表 —— 空列表与「设备拒绝」
+     *         在界面上必须区分，否则用户会以为「这段没录像」
+     */
+    private DeviceRecordQuery querySdkRecords(String deviceId, String channelId,
+                                              String startTime, String endTime) {
+        var session = dahuaCapability.requireSession(deviceId);
+        int sdkChannel = dahuaCapability.sdkChannel(session, deviceId, channelId);
+        String start = normalizeSdkTime(startTime, false);
+        String end = normalizeSdkTime(endTime, true);
+        List<io.github.rurulalanana.dahua.ext.DahuaExtAccess.RecordFile> files;
+        try {
+            files = dahuaCapability.ext().queryRecordFile(session, sdkChannel, start, end);
+        } catch (io.github.rurulalanana.dahua.ext.DahuaSdkException e) {
+            /*
+             * 把「设备没有录像能力」与「真故障」分开说。
+             *
+             * 实测 IPC（无 SD 卡 / 无本地存储）调 CLIENT_QueryRecordFile 直接失败：
+             *   0x80000018 配置项/能力不存在
+             *   0x8000004F 该型号不支持此查询
+             * 这两种情况报「设备拒绝」就够了，不该让运维去查网络。
+             * 其余码（句柄无效、超时）必须照实透出。
+             */
+            int code = e.sdkError();
+            if (code == 0x80000018 || code == 0x8000004F) {
+                throw BizException.badRequest("该型号不支持设备录像检索，或未安装存储卡："
+                        + channelId + "（SDK 错误码 0x" + Integer.toHexString(code) + "）");
+            }
+            throw dahuaCapability.translate("录像检索", e);
+        }
+        List<RecordItem> items = new ArrayList<>(files.size());
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        for (var f : files) {
+            try {
+                items.add(RecordItem.ofSdkRecord(channelId, f.fileName(),
+                        f.fileName() == null || f.fileName().isBlank()
+                                ? "录像 " + f.start() : f.fileName(),
+                        sdf.parse(f.start()), sdf.parse(f.end()), f.bytes()));
+            } catch (java.text.ParseException pe) {
+                // 单条时间解析失败只跳过这一条：一条坏数据不该让整次检索作废
+                log.debug("SDK 录像段时间解析失败，跳过: {}", f);
+            }
+        }
+        log.info("SDK 录像检索: device={} channel={} {} ~ {} 共 {} 段",
+                deviceId, channelId, start, end, items.size());
+        return new DeviceRecordQuery(items, true, null);
+    }
+
+    /**
+     * 把前端传来的时间规整成 SDK 要的 {@code yyyy-MM-dd HH:mm:ss}。
+     *
+     * <p>前端可能传 {@code 2026-11-02T00:00:00}（ISO，带 T）、
+     * {@code 2026-11-02 00:00:00}，或只有日期。大华只认空格分隔且必须有秒，
+     * 传 T 会被判非法而返回空结果 —— <b>这种失败不报错</b>，
+     * 看起来就像「这段时间没录像」，是本项目踩过的坑（见排障实录 §1.1）。
+     *
+     * @param endOfDay {@code true} 表示这是结束时间：只给日期时补到 23:59:59
+     */
+    private static String normalizeSdkTime(String text, boolean endOfDay) {
+        if (text == null || text.isBlank()) {
+            throw BizException.badRequest("缺少时间参数");
+        }
+        String s = text.trim().replace('T', ' ');
+        // 去掉毫秒与时区后缀
+        int dot = s.indexOf('.');
+        if (dot > 0) {
+            s = s.substring(0, dot);
+        }
+        if (s.endsWith("Z")) {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        if (s.length() == 10) {
+            s = s + (endOfDay ? " 23:59:59" : " 00:00:00");
+        } else if (s.length() == 16) {
+            s = s + (endOfDay ? ":59" : ":00");
+        }
+        if (s.length() != 19) {
+            throw BizException.badRequest("时间格式非法（要求 yyyy-MM-dd HH:mm:ss）：" + text);
+        }
+        return s;
+    }
+
+    /**
+     * 下发 {@code RecordInfo} 并按小片轮询等待聚合结果。
+     * 必须轮询而非一次 {@code future.get(timeout)}：设备拒绝时（实测 LiveGBS 回
+     * {@code 400 wait for recordinfo timeout[15s]}）在自己的超时点才回话，
+     * 正好落在业务超时附近，一次等待很可能抢不到原因。
      */
     private DeviceRecordQuery doQuery(Gb28181MediaService media, String deviceId,
                                       String channelId, String startTime,
@@ -354,9 +357,8 @@ public class RecordService {
                 }
             }
             /*
-             * 超时也把已收到的帧交上去：设备少报了 SumNum（甚至根本不发
-             * SumNum），或分页帧中途丢包时，聚合永远等不到「收齐」。
-             * 让用户看到 5 段远好于「一段都没有」。
+             * 超时也把已收到的帧交上去：设备少报甚至不发 SumNum、分页帧丢包时，
+             * 聚合永远等不到「收齐」，让用户看到 5 段远好于一段都没有。
              */
             Gb28181MediaService.RecordDrain drain = media.drainRecordQuery(channelId);
             List<RecordItem> partial = drain.items();
@@ -367,11 +369,8 @@ public class RecordService {
                 return new DeviceRecordQuery(partial, true, null);
             }
             /*
-             * 设备在 SIP 层直接拒绝了（如 400）时把原因带上去。
-             *
-             * <p>这是最有价值的一条信息：没有它，界面只能报「设备未应答」，
-             * 运维会去查平台/网络；而设备其实已经说清楚了原因（例如
-             * {@code 400 wait for recordinfo timeout[15s]} 表示它去问下级摄像机超时）。
+             * 设备在 SIP 层拒绝时把原因带上去：没有它界面只能报「设备未应答」，
+             * 运维会去查平台 / 网络，而设备其实已说清原因。
              */
             String refusal = media.lastRecordFailure(channelId);
             log.warn("设备录像检索超时: device={} channel={} 收到帧={} 设备响应={}",
@@ -379,10 +378,7 @@ public class RecordService {
             if (refusal != null) {
                 return DeviceRecordQuery.refused(refusal);
             }
-            /*
-             * 收到过帧、但里面一段都没有 —— 设备确实回了「没有录像」，
-             * 这是有效答案，不是故障。
-             */
+            /* 收到过帧但里面一段都没有 —— 设备确实回了「没有录像」，这是有效答案。 */
             return new DeviceRecordQuery(List.of(), drain.framesReceived(), null);
         } catch (Exception e) {
             log.warn("设备录像检索失败: device={} channel={} {}",
@@ -393,13 +389,8 @@ public class RecordService {
 
     /**
      * 把检索结果写入本地缓存表，便于分页查询与按天统计。
-     *
-     * <p><b>唯一键用「通道 + 起始时间 + 结束时间」，不用 FilePath</b>：
-     * 标准 A.2.4.4 里 {@code FilePath} 是<b>可选</b>字段，实测 LiveGBS
-     * 与大量国产设备根本不填。改造前这里 {@code if (filePath == null) continue}
-     * 直接跳过 —— 于是「录像列表能查到，但缓存是空的」，
-     * 接着回放因找不到缓存行而报「未找到匹配的录像文件」。
-     * 录像段天然由时间区间唯一标识，用它做键既可靠又无需设备配合。
+     * 唯一键用「通道 + 起始时间 + 结束时间」而非 {@code FilePath}：标准 A.2.4.4 里
+     * {@code FilePath} 可选，实测 LiveGBS 与大量国产设备根本不填，用它做键会漏掉全部录像。
      */
     @Transactional
     public void cacheDeviceRecords(String channelId, List<RecordItem> items) {
@@ -443,16 +434,10 @@ public class RecordService {
     }
 
     /**
-     * 本地缓存的设备录像查询。
-     *
-     * <p><b>区间语义是「有交集」而不是「起始时间落在区间内」</b>：
-     * 录像段往往比用户查询的窗口长得多 —— 例如计划录像每 2 小时一段
-     * （{@code 08:00~10:00}），用户点 09:00 想回放。
-     * 用 {@code start_time BETWEEN 09:00 AND 09:30} 判不出这段录像，
-     * 界面上就报「未找到匹配的录像文件」，而录像明明存在。
-     *
-     * <p>正解：{@code start_time <= to AND end_time >= from}，
-     * 另需兼容 {@code end_time} 为空的单帧记录（此时退化为起点在区间内）。
+     * 本地缓存的设备录像查询，区间语义是「有交集」。
+     * 录像段常比查询窗口长（如 08:00~10:00 的一段，用户查 09:00），
+     * 用 {@code start_time BETWEEN from AND to} 会判不出这段录像。
+     * 另需兼容 {@code end_time} 为空的单帧记录（退化为起点在区间内）。
      */
     public List<GbDeviceRecord> deviceRecords(String channelId, LocalDateTime from,
                                               LocalDateTime to, String type) {
@@ -484,15 +469,8 @@ public class RecordService {
 
     /**
      * 开始平台侧录像。
-     *
-     * <p><b>录制要求流已建立</b>：ZLM 的 {@code mk_recorder_start} 按
-     * {@code app/stream} 查找媒体源，源不存在时直接失败
-     * （{@code 未找到相关的MediaSource}）。因此这里在流未建立时先自动点播，
-     * 并轮询等待 ZLM 真正收到 RTP 包后再开录 —— 否则用户点「开始录像」
-     * 只会得到一个失败提示。
-     *
-     * @param deviceId  设备编码（用于自动点播）
-     * @param channelId 通道编码
+     * ZLM 的 {@code mk_recorder_start} 按 {@code app/stream} 查找媒体源，源不存在直接失败
+     * （{@code 未找到相关的MediaSource}），所以流未建立时先自动点播并等 ZLM 真正收到 RTP 包。
      */
     @Transactional
     public GbRecord startCloudRecord(String deviceId, String channelId) {
@@ -506,14 +484,9 @@ public class RecordService {
     }
 
     /**
-     * 直接开始录像，<b>不点播、不等流</b>。
-     *
-     * <p>专供流上线回调使用：调用时机就是流刚就绪，再走
-     * {@link #startCloudRecord} 的点播+轮询是多余的（还可能重复 INVITE）。
-     *
-     * <p>落库由归档路径统一处理：自动录像在流下线时由
-     * {@link #archiveRecording} 落库；若中途被手动停止，则走
-     * {@link #stopCloudRecord} 的常规落库。
+     * 直接开始录像，不点播、不等流，专供流上线回调使用
+     * （此时流刚就绪，再走 {@link #startCloudRecord} 的点播 + 轮询会重复 INVITE）。
+     * 落库由归档路径统一处理。
      *
      * @return ZLM 录像条目；服务未启动返回 null
      */
@@ -526,10 +499,8 @@ public class RecordService {
 
     /**
      * 确保流已建立：未建立则点播，并等待 ZLM 收到 RTP 包。
-     *
-     * <p>用「ZLM 是否收到过 RTP 包」而非「会话是否存在」作为就绪判据：
-     * 会话在 INVITE 发出后立刻就有，但设备要过几百毫秒到数秒才开始推流，
-     * 这期间媒体源尚未注册，录制仍会失败。
+     * 判据用「ZLM 是否收到过 RTP」而非「会话是否存在」：会话在 INVITE 发出后立刻就有，
+     * 但设备要几百毫秒到数秒后才推流，期间媒体源尚未注册，录制仍会失败。
      */
     private void ensureStreamReady(String deviceId, String channelId) {
         Gb28181MediaService media = platform.mediaService();
@@ -574,9 +545,7 @@ public class RecordService {
     }
 
     /**
-     * 停止平台侧录像并归档。
-     *
-     * <p>启用对象存储时，录制结束后<b>异步</b>上传 MP4（大文件不阻塞接口），
+     * 停止平台侧录像并归档。启用对象存储时异步上传 MP4（大文件不阻塞接口），
      * 上传结果回写 {@code storage_type/object_key/file_url/upload_state}。
      */
     @Transactional
@@ -588,11 +557,9 @@ public class RecordService {
         if (recording == null) {
             return null;
         }
-        // 【必须判 filePath】停机/秒停场景下 ZLM 可能已抢先停录，
-        // 我们的 mk_recorder_stop 晚了一步、回调没送到，此时 filePath 为 null。
-        // 这种条目一旦入库就是坏记录（file_path 空、size=0），
-        // 前端点播放/下载会 Path.of(null) 抛 NPE，文件又在磁盘上「看不见」。
-        // 直接返回 null，交给归档的磁盘兜底路径（archiveFromDisk 能拿到真实路径）。
+        // 停机 / 秒停时 ZLM 可能已抢先停录，回调没送到，此时 filePath 为 null。
+        // 这种条目入库就是坏记录（file_path 空、size=0，前端播放会 Path.of(null) 抛 NPE），
+        // 返回 null 交给归档的磁盘兜底路径。
         if (recording.getFilePath() == null || recording.getFilePath().isBlank()) {
             log.warn("停止录像但未拿到文件路径，跳过入库（交给磁盘对账补登记）: channel={}",
                     channelId);
@@ -602,13 +569,9 @@ public class RecordService {
     }
 
     /**
-     * 异步上传录像到对象存储。
-     *
-     * <p>上传成功后按配置决定是否删除本地文件；失败只记日志并置
-     * {@code upload_state=FAILED}，本地文件保留，不影响录像的本地下载。
-     *
-     * <p><b>事务安全</b>：调用方在事务内时，上传任务必须等事务提交后再启动，
-     * 否则异步线程可能读不到刚写入的 {@code gb_record} 记录（另一个连接看不到未提交数据）。
+     * 异步上传录像到对象存储。成功后按配置决定是否删本地文件，
+     * 失败只置 {@code upload_state=FAILED}，本地文件保留。
+     * 调用方在事务内时必须等提交后再启动，否则异步线程读不到刚写入的记录。
      */
     private void uploadAsync(String recordId, String filePath, String channelId) {
         if (filePath == null || filePath.isBlank()) {
@@ -654,7 +617,6 @@ public class RecordService {
         }
     }
 
-    /** 回写上传结果。 */
     private void markUpload(String recordId, String state, String objectKey,
                             String fileUrl, long size) {
         try {
@@ -684,16 +646,9 @@ public class RecordService {
 
     /**
      * 自动录像对账：扫描录像目录，把「磁盘有、库里无」的文件补登记。
-     *
-     * <p><b>为什么扫磁盘而不是读 ZLM 内存索引</b>：实测流下线时 ZLM 侧的
-     * 停录与索引簿记存在竞态 —— 条目可能先被摘除，导致
-     * {@code stopRecording} 拿不到条目、终态永不归档（文件留在磁盘上、
-     * 云端录像列表却看不到）。而磁盘文件是最终事实：ZLM 完成归档后
-     * 会把临时名改成正式名（无 {@code .} 前缀），路径结构固定为
-     * {@code <recordRoot>/<channelId>/record/<app>/<zlmStream>/<yyyy-MM-dd>/*-<idx>.mp4}。
-     *
-     * <p>目录第三层（{@code record}）以下是 ZLM 的固定布局；
-     * 通道编码取自第一层目录名。
+     * 不读 ZLM 内存索引：实测流下线时停录与索引簿记有竞态，条目可能先被摘除，
+     * 导致 {@code stopRecording} 拿不到条目、终态永不归档。磁盘文件是最终事实。
+     * 目录布局：{@code <recordRoot>/<channelId>/record/<app>/<zlmStream>/<yyyy-MM-dd>/*-<idx>.mp4}。
      *
      * @return 本次补登记的文件数
      */
@@ -707,22 +662,14 @@ public class RecordService {
         if (channelDirs == null) {
             return 0;
         }
-        // 【性能】一次性把所有已入库的文件路径读进内存，而不是「每个文件查一次库」。
-        //
-        // 原来是 for 循环里 selectCount(file_path = ?)：本任务每 60 秒跑一次，
-        // 录像按天累积到 1000 个文件时就是每分钟 1000 条 SQL ——
-        // 白白占满连接池，拖慢同库的会话/设备查询。
-        // 现在一条 SELECT 换一个 HashSet，复杂度从 O(n·SQL) 降到 O(n) 内存比对。
+        // 【性能】一次性读出所有已入库路径，而不是每文件查一次库：
+        // 本任务每 60 秒跑一次，1000 个文件就是每分钟 1000 条 SQL，会占满连接池。
         Set<String> known = loadKnownFilePaths();
         for (File channelDir : channelDirs) {
             String channelId = channelDir.getName();
             /*
-             * 跳过「回放/下载」目录。
-             *
-             * <p>这些目录名形如 {@code <设备编码>/<通道编码>_playback}，是
-             * "设备录像下载"把回放流录成本地 MP4 时的产物目录，不是设备的
-             * 云端录像。对账若把它们当通道登记，云端录像列表里会凭空多出
-             * 一串叫「xxx_playback」的假通道，而且会与下载任务重复计数。
+             * 跳过 {@code <设备编码>/<通道编码>_playback} 这类目录：
+             * 它们是设备录像下载的产物，当作通道登记会在云端录像列表里凭空多出假通道。
              */
             if (isTransientDir(channelId)) {
                 continue;
@@ -764,25 +711,10 @@ public class RecordService {
     }
 
     /**
-     * 对「长时间未收尾的临时录像」告警。
-     *
-     * <p><b>为什么需要</b>：ZLM 写入中的分片带 {@code .} 前缀，正常关闭后会改名。
-     * 若进程被强杀 / ZLM 原生崩溃（实测 {@code RtmpMediaSourceMuxer::getOwnerPoller
-     * not implemented} 导致 SIGABRT），改名与 moov 回写都来不及做，
-     * 磁盘上就留下一个大小正常、<b>但没有 moov</b> 的文件 ——
-     * 任何播放器都打不开（{@code moov atom not found}），且无法修复。
-     *
-     * <p>原来这类文件被直接 {@code continue} 跳过，静默消失，
-     * 运维完全不知道丢过录像。这里只告警不删除：
-     * 文件可能仍有残余价值（例如可用工具抢救部分帧），
-     * 也避免误删正在写入的正常分片。
-     *
-     * <p>判据用「最后修改时间距今超过阈值」而不是「文件名以 . 开头」，
-     * 因为正在录制的分片同样带 {@code .} 前缀，不能一视同仁。
-     * 录制中文件会持续被写入，修改时间一直在更新，因此不会被误报。
-     *
-     * @param channelId 通道编码（仅用于日志定位）
-     * @param f         疑似未收尾的临时文件
+     * 对「长时间未收尾的临时录像」告警，只告警不删除。
+     * ZLM 写入中的分片带 {@code .} 前缀，正常关闭后改名；进程被强杀 / ZLM 原生崩溃时
+     * 改名与 moov 回写来不及做，留下大小正常但没有 moov 的文件，任何播放器都打不开。
+     * 判据用修改时间而不是前缀：录制中的分片同样带前缀，但修改时间一直在更新。
      */
     private void warnOrphanIfStale(String channelId, File f) {
         long age = System.currentTimeMillis() - f.lastModified();
@@ -800,16 +732,8 @@ public class RecordService {
 
     /**
      * 一次性读出库里所有已登记的录像文件路径（对账用）。
-     *
-     * <p><b>为什么是「全部」而不是「按通道查」</b>：对账要判断的是
-     * 「磁盘上这个文件是否已入库」，本质是全集比对。按通道查会变成
-     * 每通道一次 SQL，仍然是 N 次；全部取回只有一条 SQL，
-     * 且录像路径是短字符串，10 万条约 10MB —— 对本任务的调用频率（60 秒）
-     * 可以接受。真到百万级应改为「只取最近 N 天的路径」。
-     *
-     * <p>只 select 路径字段、不查整行：{@code gb_record} 有大字段
-     * （file_path/file_name 之外还有对象存储 key、URL 等），
-     * 查整行会让这条 SQL 慢一个数量级。
+     * 对账是全集比对，按通道查仍是 N 次 SQL；只 select 路径字段，不查整行。
+     * 10 万条约 10MB，以 60 秒一次的频率可接受；百万级应改为只取最近 N 天。
      */
     private Set<String> loadKnownFilePaths() {
         Set<String> out = new java.util.HashSet<>();
@@ -830,7 +754,6 @@ public class RecordService {
         return out;
     }
 
-    /** 递归收集目录下的 mp4 文件。 */
     private void collectMp4s(File dir, List<File> out) {
         File[] children = dir.listFiles();
         if (children == null) {
@@ -845,22 +768,20 @@ public class RecordService {
         }
     }
 
-    /** 从磁盘文件构建录像条目（时间从文件名/修改时间推断，文件名格式见 ZLM Mp4.cpp）。 */
+    /** 从磁盘文件构建录像条目（时间从文件名 / 修改时间推断，文件名格式见 ZLM Mp4.cpp）。 */
     private GbRecord toDiskRecord(String channelId, File f) {
         GbRecord r = new GbRecord();
         r.setRecordId(java.util.UUID.randomUUID().toString().replace("-", "")
                 .substring(0, 16));
         r.setChannelId(channelId);
-        // device_id 必须是「设备编码」而不是通道编码：对账只有目录名（= 通道编码），
-        // 需按 gb_channel 反查真实设备。查不到时退回通道编码（设备直连场景二者相同），
-        // 至少保证非空——否则 gb_record.device_id 为 null，按设备过滤的查询会漏掉它。
+        // device_id 必须是设备编码而非通道编码：对账只有目录名（= 通道编码），
+        // 需按 gb_channel 反查；查不到退回通道编码（直连场景二者相同），至少保证非空。
         r.setDeviceId(deviceIdOf(channelId));
         r.setName(channelId);
         r.setFilePath(f.getAbsolutePath());
         r.setFileName(f.getName());
         LocalDateTime end = lastModified(f);
-        // 文件名形如 2026-10-16-10-36-18-0.mp4，前 19 字符即开始时间；
-        // 文件名解析失败时用修改时间兜底（此时时长为 0，可接受）
+        // 文件名形如 2026-10-16-10-36-18-0.mp4，前 19 字符即开始时间；解析失败用修改时间兜底
         LocalDateTime start = parseZlmFileName(f.getName());
         if (start == null || start.isAfter(end)) {
             start = end;
@@ -890,14 +811,8 @@ public class RecordService {
     }
 
     /**
-     * 按通道编码反查设备编码。
-     *
-     * <p>对账只有目录名（= 通道编码），而 {@code gb_record.device_id} 语义是
-     * 设备编码。两者在多通道设备下不同（如通道 {@code 34020000001320000001}
-     * 属于设备 {@code 34020000002000000006}），直接写通道编码会让
-     * 「按设备查录像」漏掉这些记录。
-     *
-     * <p>查不到时退回通道编码：设备直连场景二者相同，且保证字段非空。
+     * 按通道编码反查设备编码。多通道设备下二者不同（通道 {@code 34020000001320000001}
+     * 属于设备 {@code 34020000002000000006}），直接写通道编码会让「按设备查录像」漏记录。
      */
     private String deviceIdOf(String channelId) {
         try {
@@ -933,30 +848,17 @@ public class RecordService {
         }
     }
 
-    /**
-     * 云端录像是否正在录制。
-     */
+    /** 云端录像是否正在录制。 */
     public boolean isRecording(String channelId) {
         return platform.recordingService() != null
                 && platform.recordingService().isRecording(channelId);
     }
 
     /**
-     * 归档一条已结束的录像（自动录像的收尾）。
-     *
-     * <p><b>两条数据来源，索引优先、磁盘兜底</b>：
-     * <ol>
-     *   <li>ZLM 内存索引里「已结束」（{@code endTime > 0}）的条目 —— 元数据最全；</li>
-     *   <li>索引里没有时，<b>扫描该通道的磁盘目录</b>补登记。</li>
-     * </ol>
-     * 必须有兜底：实测停止录像时 ZLM 索引里的条目 {@code endTime} <b>长期为 0</b>
-     * （连续轮询 31 次不变），而文件早已落盘并可播 —— 只认索引会让归档永远拿不到
-     * 东西，录像要等 60 秒对账才出现（这正是线上现象）。磁盘扫描是已被
-     * {@link #reconcileAutoRecordings} 验证可靠的路径。
-     *
-     * <p><b>为什么不用 {@link #stopCloudRecord}</b>：那是对外接口（record/stop），
-     * 它会再调一次 {@code mk_recorder_stop} —— 而流下线时 ZLM 已自动停录，
-     * 再调一次只会拿到 null。这里只做「取条目 → 落库 → 异步上传」。
+     * 归档一条已结束的录像（自动录像的收尾），索引优先、磁盘兜底。
+     * 必须有兜底：实测停止录像时 ZLM 索引条目的 {@code endTime} 长期为 0（连续轮询 31 次不变），
+     * 而文件早已落盘可播，只认索引会让录像要等 60 秒对账才出现。
+     * 不走 {@link #stopCloudRecord}：流下线时 ZLM 已自动停录，再调 {@code mk_recorder_stop} 只会拿到 null。
      *
      * @return 归档成功返回库里的条目；无可归档内容返回 null
      */
@@ -966,14 +868,10 @@ public class RecordService {
 
     /**
      * 归档一条已结束的录像，只认「不早于 {@code sinceMillis} 开始」的条目。
+     * ZLM 录像索引是累积的，不加时间窗口会命中第一个已结束条目 —— 实测回放会话关闭时
+     * 就拿到上一次直播的录像重复入库。
      *
-     * <p><b>为什么必须限定时间窗口</b>：ZLM 的录像索引是<b>累积</b>的，
-     * 已结束的历史条目会一直留着。若不加限制，任意一次归档都会命中
-     * 「第一个已结束条目」——实测回放会话关闭时就拿上一次直播的录像
-     * 重复入库（日志里同一个 recordId 归档两次）。
-     *
-     * @param sinceMillis 只归档开始时间不早于此时刻的条目（毫秒）；
-     *                    {@code 0} 表示不限（对账/手动归档场景）
+     * @param sinceMillis 只归档开始时间不早于此毫秒的条目；{@code 0} 表示不限
      * @return 归档成功返回库里的条目；无可归档内容返回 null
      */
     public GbRecord archiveRecording(String channelId, long sinceMillis) {
@@ -982,18 +880,9 @@ public class RecordService {
         }
         // 路径一：ZLM 内存索引的终态条目
         Recording recording = awaitTerminalRecording(channelId, sinceMillis);
-        // 【必须判 filePath】索引条目可能「已结束但没有文件路径」——
-        // 典型场景是停机：SIP 先停 → 设备不再推流 → ZLM 抢先自动停录并落盘，
-        // 而我们的 mk_recorder_stop 晚了一步，on_mk_record_mp4 回调没送到，
-        // 索引里 endTime 有了、filePath 仍是 null。
-        //
-        // 这种条目一旦入库就是**坏记录**：file_path 为空、size=0，
-        // 前端点播放/下载会 Path.of(null) 抛 NPE（返回 500），
-        // 而且文件明明在磁盘上却「打不开、删不掉」。
-        // 更糟的是它与随后对账补登记的正确记录**重复**（实测同一文件两条记录）。
-        //
-        // 所以：没有路径就不入库，直接落到路径二按磁盘文件补登记 ——
-        // 那里能拿到真实路径、真实大小、真实时长（c0ntinue 到 archiveFromDisk）。
+        // 索引条目可能「已结束但没有文件路径」：停机时 ZLM 抢先自动停录并落盘，
+        // 回调没送到，endTime 有了但 filePath 仍是 null。入库就是坏记录（file_path 空、size=0），
+        // 且会与随后对账补登记的正确记录重复（实测同一文件两条）。无路径时落到磁盘补登记。
         if (recording != null && recording.getFilePath() != null
                 && !recording.getFilePath().isBlank()) {
             return persistAndUpload(recording);
@@ -1003,13 +892,10 @@ public class RecordService {
     }
 
     /**
-     * 从磁盘补登记该通道最新一个尚未入库的录像文件。
+     * 从磁盘补登记该通道最新一个尚未入库的录像文件（归档场景只关心刚结束那一段）。
+     * 判据与 {@link #reconcileAutoRecordings} 一致：跳过 {@code .} 前缀的写入中分片、墓碑、已入库。
      *
-     * <p>与 {@link #reconcileAutoRecordings} 同一套判据（跳过 {@code .} 前缀的
-     * 写入中分片、跳过墓碑、跳过已入库），但只处理<b>指定通道</b>、
-     * 且只登记<b>最新一个</b>文件 —— 归档场景只关心刚结束的那段录像。
-     *
-     * @param sinceMillis 只登记修改时间不早于此时刻的文件（毫秒）；0 表示不限
+     * @param sinceMillis 只登记修改时间不早于此毫秒的文件；0 表示不限
      */
     private GbRecord archiveFromDisk(String channelId, long sinceMillis) {
         File channelDir = new File(props.resolvedRecordRoot(), channelId);
@@ -1057,17 +943,11 @@ public class RecordService {
 
     /**
      * 等待 ZLM 内存索引里出现「已结束」的录像条目。
+     * 停录由 ZLM 回调线程异步完成，归档在「停止直播」接口线程上同步执行，两者存在竞态：
+     * 归档跑在前面时 {@code endTime} 仍为 0，本次归档会静默失败（实测需等 60 秒对账才出现）。
+     * 等待有界：索引里压根没有该通道条目时立即返回 null。
      *
-     * <p><b>为什么需要等待</b>：录制停止是 ZLM 回调线程异步做的
-     * （{@code RecordingService.onStreamOffline → stopRecording} 里才写 {@code endTime}），
-     * 而归档在「停止直播」接口的线程上同步执行，两者存在竞态 ——
-     * 归档若跑在前面，索引里的 {@code endTime} 仍是 0，会被过滤掉，
-     * 于是本次归档静默失败、录像要等 60 秒对账才出现（实测现象）。
-     *
-     * <p>等待是有界的：一旦拿到终态条目立即返回；索引里压根没有该通道的条目
-     * （未开启录像）时立刻返回 null，不做无谓等待。
-     *
-     * @param sinceMillis 只认开始时间不早于此时刻的条目（毫秒）；0 表示不限
+     * @param sinceMillis 只认开始时间不早于此毫秒的条目；0 表示不限
      * @return 已结束的录像条目；超时或不存在返回 {@code null}
      */
     private Recording awaitTerminalRecording(String channelId, long sinceMillis) {
@@ -1106,18 +986,10 @@ public class RecordService {
     }
 
     /**
-     * 云端录像列表。
-     *
-     * <p>数据源是 {@code gb_record} 表（历史条目重启不丢），
-     * 再与 ZLMediaKit 内存索引合并：内存中「录制中」的条目用实时状态覆盖，
-     * 库中缺失的内存条目也会补上（例如录像刚开始、库尚未落盘的瞬间）。
-     *
-     * <p><b>去重必须按文件路径，不能按 recordId</b>：内存条目与库条目各有
-     * 独立生成的随机 recordId（{@code startRecording} 一个、
-     * 对账/归档 {@code saveRecord} 另一个），按 ID 比对永远不相等 ——
-     * 结果同一段录像在列表里出现两次（一次「录制中」、一次「已完成」）。
-     * 文件路径才是同一段录像的真正标识，且库里有 {@code uk_gb_record_file_path}
-     * 唯一索引保证它唯一。
+     * 云端录像列表：以 {@code gb_record} 表为底，再用 ZLM 内存索引覆盖「录制中」条目、
+     * 补齐库中缺失的新录像。
+     * 去重必须按文件路径而不是 recordId：内存条目与库条目各自生成随机 recordId，
+     * 按 ID 比对永远不相等，同一段录像会以「录制中 + 已完成」两条出现。
      */
     public List<GbRecord> cloudRecords(String channelId, LocalDateTime from, LocalDateTime to) {
         List<GbRecord> out = new ArrayList<>(recordMapper.selectList(
@@ -1168,20 +1040,8 @@ public class RecordService {
 
     /**
      * 追加一条「正在写的分片」占位条目（{@code endTime == null} 即界面上的「录制中」）。
-     *
-     * <p><b>为什么需要</b>：ZLM 只在分片<b>写完</b>时才回调（{@code on_mk_record_mp4}），
-     * 所以在两段之间（30 分钟窗口内）列表里完全看不出「还在录」。
-     * 用户会以为「录像停了」。
-     *
-     * <p><b>为什么是占位而不是真实条目</b>：正在写的文件带 {@code .} 前缀、
-     * 没有 moov、无法播放，且文件名由 ZLM 决定（我们拿不到，也不该猜）。
-     * 因此这条只用于表达「还在录制」，{@code filePath} 留空 ——
-     * 下载按钮与点播都会被前端按 {@code recording=true} 拦下并给出正确提示，
-     * 不会让用户去点一个打不开的文件。
-     *
-     * <p>开始时间取「上一段结束时间」：那是当前这段最可能开始的位置。
-     * 没有已完成分段时（刚开录）取会话开始时间，此时不追加占位
-     * （文件还没落盘，列表里一条都没有反而更干净）。
+     * ZLM 只在分片写完时才回调 {@code on_mk_record_mp4}，两段之间列表里完全看不出还在录。
+     * 占位条目的 {@code filePath} 必须留空：写入中的文件带 {@code .} 前缀、没有 moov、无法播放。
      */
     private void appendInProgressEntry(String channelId, List<GbRecord> out, LocalDateTime to) {
         if (channelId == null || channelId.isBlank() || out.isEmpty()) {
@@ -1295,10 +1155,8 @@ public class RecordService {
 
     /**
      * 该录像是否已归档到对象存储（且拿得到 objectKey）。
-     *
-     * <p>只有「存储类型为 OSS」不够：上传失败时 {@code object_key} 为空，
-     * 此时仍应回退到本地文件路径。三个调用点（下载地址/可用性/删除）
-     * 必须用同一判据，否则会出现「能播但删不掉」这类错位。
+     * 只判 {@code storage_type} 不够：上传失败时 {@code object_key} 为空，仍应回退本地路径。
+     * 下载地址 / 可用性 / 删除三个调用点必须用同一判据，否则会出现「能播但删不掉」。
      */
     private static boolean inObjectStorage(GbRecord record) {
         return ObjectStorageService.TYPE_OSS.equals(record.getStorageType())
@@ -1363,10 +1221,8 @@ public class RecordService {
     }
 
     /**
-     * 删除云端录像记录（不删文件）。
-     *
-     * <p>同时清理 ZLM 内存索引：{@code cloudRecords} 会合并索引里的条目，
-     * 只删库不删索引会让录像在列表里「删不掉」（刷新后依然出现）。
+     * 删除云端录像记录（不删文件）。必须同时清 ZLM 内存索引：
+     * {@code cloudRecords} 会合并索引条目，只删库会让录像刷新后依然出现。
      */
     public boolean removeRecord(String recordId) {
         if (platform.recordingService() != null) {
@@ -1377,20 +1233,10 @@ public class RecordService {
     }
 
     /**
-     * 按保留天数清理过期录像（删库 + 删文件）。
-     *
-     * <p><b>为什么必须有</b>：云端录像 24 小时不停写，单通道按
-     * 800 kbps 估算约 <b>350 MB/小时 ≈ 8 GB/天</b>。实测服务器只有 30G 盘，
-     * 一旦磁盘写满，不只是录像丢失 —— ZLM 写不进分片会持续报错，
-     * 数据库（同一块盘）也可能写失败，整个平台瘫痪。
-     *
-     * <p><b>跳过「重要」标记</b>：用户的 {@code important=true} 是明确的
-     * 「这段不能删」，清理必须尊重它；磁盘告急时由
-     * {@link #purgeOldestUntilFree} 单独处理（它同样跳过重要录像）。
-     *
-     * <p>删除顺序是<b>先删文件、再删库</b>：反过来若文件删除失败，
-     * 库里记录已没了，文件就成了永远没人管的孤儿（对账也不会再登记，
-     * 因为对账只补「库里有但磁盘上没记录」的反向场景）。
+     * 按保留天数清理过期录像（删库 + 删文件），跳过 {@code important=true}。
+     * 必须有：单通道 800 kbps 约 350 MB/小时 ≈ 8 GB/天，实测服务器只有 30G 盘，
+     * 盘满后 ZLM 写不进分片、同盘的数据库也可能写失败，整个平台瘫痪。
+     * 先删文件再删库：反过来文件删失败就成了没人管、也不会再被对账登记的孤儿。
      *
      * @param retainDays 保留天数；{@code <= 0} 表示不限（只受磁盘水位约束）
      * @return 清理掉的录像条数
@@ -1420,17 +1266,11 @@ public class RecordService {
 
     /**
      * 磁盘水位兜底：删最老的录像直到剩余空间占比达标。
+     * 与 {@link #purgeExpiredRecords} 互补：保留天数保证「至少留 N 天」，本方法保证「盘不能满」。
+     * 永远跳过 {@code important=true} 与正在录制的分片。
      *
-     * <p>与 {@link #purgeExpiredRecords} 互补：保留天数保证「至少留 N 天」，
-     * 本方法保证「盘不能满」。先到先删——只要水位超阈值，最老的先走，
-     * 与是否过保留期无关（磁盘满了就什么都存不下去了）。
-     *
-     * <p><b>永远跳过</b>：{@code important=true} 的录像、正在录制的分片
-     * （文件名 {@code .} 前缀）。
-     *
-     * @param recordRoot     录像根目录（用于读磁盘水位）
      * @param maxUsedPercent 磁盘使用率上限（如 85 表示超过 85% 开始删）
-     * @param keepMinDays    无论如何至少保留最近这么多天（防止配置失误把盘清空）
+     * @param keepMinDays    无论如何至少保留最近这么多天
      * @return 清理掉的录像条数
      */
     public int purgeOldestUntilFree(String recordRoot, int maxUsedPercent, int keepMinDays) {
@@ -1505,11 +1345,8 @@ public class RecordService {
 
     /**
      * 按录像开始时间定位（GBS 的 {@code period} 参数即开始时间）。
-     *
-     * <p><b>必须按秒区间匹配</b>：{@code period} 只精确到秒
-     * （{@code YYYYMMDDHHmmss}），而库里的 {@code start_time} 带毫秒
-     * （如 {@code 14:40:10.113}）。若直接 {@code eq(start_time, 14:40:10.000)}
-     * 永远匹配不上，{@code remove} / {@code setimportant} 会一律报「录像不存在」。
+     * 必须按秒区间匹配：{@code period} 只精确到秒，而库里的 {@code start_time} 带毫秒，
+     * 直接 eq 永远匹配不上，{@code remove} / {@code setimportant} 会一律报「录像不存在」。
      */
     public GbRecord findByPeriod(String channelId, String period) {
         LocalDateTime start = TimeFormats.parse(period);
@@ -1523,7 +1360,7 @@ public class RecordService {
                 .last("limit 1"));
     }
 
-    /** 删除某通道的全部云端录像记录。 */
+    /** 删除某通道的全部云端录像记录（同时清该通道的内存索引，否则列表仍会合并出已删条目）。 */
     public int removeChannelRecords(String channelId) {
         // 先清内存索引：与 removeRecord 同理，否则列表仍会合并出已删条目
         if (platform.recordingService() != null) {
@@ -1590,14 +1427,9 @@ public class RecordService {
 
     /**
      * 幂等写入录像记录。
-     *
-     * <p><b>为什么按 {@code file_path} 也要去重</b>：同一个录像文件有两条
-     * 写入路径 —— 归档（{@code archiveRecording}，recordId 来自 ZLM 索引）
-     * 与对账（{@code reconcileAutoRecordings}，recordId 随机生成）。
-     * 两者可能<b>并发</b>跑到同一文件：实测间隔仅 206 微秒，各自的
-     * 「是否已入库」检查都通过了，于是插入两条指向同一文件的记录。
-     * 数据库侧已加 {@code uk_gb_record_file_path} 唯一索引兜底，
-     * 这里先按 {@code file_path} 查一次，避免把异常当正常路径走。
+     * 归档（recordId 来自 ZLM）与对账（随机 recordId）可能并发跑到同一文件，
+     * 实测间隔仅 206 微秒，各自的「是否已入库」检查都通过，于是插入两条指向同一文件的记录。
+     * 这里先按 {@code file_path} 查一次，数据库侧另有 {@code uk_gb_record_file_path} 唯一索引兜底。
      */
     private void saveRecord(GbRecord record) {
         GbRecord existing = recordMapper.selectOne(Wrappers.<GbRecord>lambdaQuery()
@@ -1627,12 +1459,7 @@ public class RecordService {
         }
     }
 
-    /**
-     * 把 ZLM 录像条目折算成库记录并落库（含存储类型与上传状态初始化）。
-     *
-     * <p>三条写入路径（开录、停录、归档）此前各写一遍同样的四行，
-     * 任何一处改了存储字段很容易漏掉另一处。
-     */
+    /** 把 ZLM 录像条目折算成库记录并落库（含存储类型与上传状态初始化）。 */
     private GbRecord persistRecording(Recording recording) {
         GbRecord record = toRecord(recording);
         record.setStorageType(storage.type());
@@ -1667,17 +1494,9 @@ public class RecordService {
         r.setFileName(filePath == null ? null : new java.io.File(filePath).getName());
 
         // 【时间与大小一律以磁盘文件为准，不用内存条目的会话级时间】
-        //
-        // 内存 Recording 的 startTime 在早期实现里是「会话开始」（bindFile 只绑首段），
-        // 分片轮转后它就不再对应该文件了。实测后果：停机归档时
-        // toRecord 算出 duration = now - 会话开始 = 6501 秒，
-        // 而实际文件只有 1801 秒；这条坏数据又被 saveRecord 按 file_path
-        // 更新进库，界面显示「6501 秒 · 170MB」。
-        //
-        // 现在 Recording 已改为每次都指向最新完成的分片（见 bindSegment），
-        // 但这里仍然以文件为准：文件名里带着真实开始时刻，
-        // lastModified 就是该分片写完的时刻 —— 与对账 toDiskRecord 完全同一套算法，
-        // 两条写入路径不可能再算出不同的时长。
+        // 内存 Recording 的 startTime 曾是会话开始（bindFile 只绑首段），分片轮转后不再对应该文件，
+        // 实测归档算出 duration 6501 秒而实际文件只有 1801 秒，且被按 file_path 更新进库。
+        // 文件名里带真实开始时刻，lastModified 就是分片写完时刻 —— 与对账 toDiskRecord 同一套算法。
         LocalDateTime start = filePath == null ? null : parseZlmFileName(r.getFileName());
         LocalDateTime end = null;
         long size = recording.getFileSize();

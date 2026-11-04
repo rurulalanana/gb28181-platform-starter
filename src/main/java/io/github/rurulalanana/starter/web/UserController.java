@@ -10,6 +10,7 @@ import io.github.rurulalanana.starter.entity.GbUser;
 import io.github.rurulalanana.starter.mapper.GbUserMapper;
 import io.github.rurulalanana.starter.service.RoleService;
 import io.github.rurulalanana.starter.service.UserService;
+import io.github.rurulalanana.starter.vo.ApiKeyVo;
 import io.github.rurulalanana.starter.vo.DeletedVo;
 import io.github.rurulalanana.starter.vo.IdVo;
 import io.github.rurulalanana.starter.vo.UserListVo;
@@ -29,20 +30,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 用户管理接口。
- *
- * <pre>
- * GET  /api/v1/user/list            用户列表
- * GET  /api/v1/user/info            用户详情
- * POST /api/v1/user/save            新增 / 修改用户
- * POST /api/v1/user/remove          删除用户
- * POST /api/v1/user/setenable       启用 / 停用
- * POST /api/v1/user/resetpassword   重置密码
- * POST /api/v1/user/setpassword     修改自己的密码
- * </pre>
- *
- * <p>密码存储：{@code BCrypt(MD5(明文))}，与登录逻辑一致。
- * 本类不使用 {@code GbUser.password} 出参，避免哈希泄露。
+ * 用户管理接口（路由前缀 {@code /api/v1/user}）：列表、详情、增改、删除、启停、重置/修改密码。
+ * 密码存储 {@code BCrypt(MD5(明文))}，与登录一致；出参永不含密码哈希。
+ * 删除/停用/重置密码都会清除该用户全部会话，否则旧 token 能一直用到过期（默认 7 天）。
  */
 @Slf4j
 @RestController
@@ -55,7 +45,6 @@ public class UserController {
     private final RoleService roleService;
     private final GbUserMapper userMapper;
 
-    /** 用户列表。 */
     @Operation(summary = "用户列表")
     @GetMapping("/list")
     public ApiResponse<UserListVo> list(
@@ -80,7 +69,6 @@ public class UserController {
         return ApiResponse.ok(vo);
     }
 
-    /** 用户详情。 */
     @Operation(summary = "用户详情")
     @GetMapping("/info")
     public ApiResponse<UserVo> info(@RequestParam(required = false) Long id) {
@@ -98,7 +86,6 @@ public class UserController {
         return ApiResponse.ok(userView(user));
     }
 
-    /** 新增 / 修改用户。 */
     @Operation(summary = "新增 / 修改用户")
     @PostMapping("/save")
     public ApiResponse<IdVo> save(@RequestParam String username,
@@ -111,8 +98,8 @@ public class UserController {
         if (username.isBlank()) {
             throw BizException.badRequest("username 不能为空");
         }
-        // 角色编码必须真实存在：写入一个不存在的编码，这个人会「什么权限都没有」
-        // 且页面上查不出原因，排障成本极高。
+        // 角色编码必须真实存在：写入不存在的编码会变成「什么权限都没有」且页面查不出原因，
+        // 排障时只会看到账号一切正常但所有按钮 403。
         String normalizedRole = role == null ? null : role;
         if (normalizedRole != null && !normalizedRole.isBlank()) {
             normalizedRole = String.join(",",
@@ -155,7 +142,6 @@ public class UserController {
         return ApiResponse.ok(IdVo.ofUserId(user.getId()));
     }
 
-    /** 删除用户。 */
     @Operation(summary = "删除用户")
     @PostMapping("/remove")
     public ApiResponse<DeletedVo> remove(@RequestParam String id) {
@@ -175,20 +161,13 @@ public class UserController {
                 throw BizException.badRequest("不能删除当前登录用户");
             }
             deleted += userMapper.deleteById(userId);
-            /*
-             * 必须踢下线。
-             *
-             * <p>不踢的后果：鉴权只校验「登录态」，不校验账号是否还存在 ——
-             * 被删账号的 token 能继续用到过期（默认 7 天）。
-             * 想象一下「开除一个人、收回了账号，他还能看一周全部录像」的场景，
-             * 这是审计一定会问的问题，也是真实的越权面。
-             */
+            // 必须踢下线：鉴权只校验登录态、不校验账号是否存在，被删账号的 token 能一直用到过期
+            // （默认 7 天）——「开除一个人、收回账号，他还能看一周全部录像」。
             kickoutQuietly(userId);
         }
         return ApiResponse.ok(DeletedVo.of(deleted));
     }
 
-    /** 启用 / 停用。 */
     @Operation(summary = "启用 / 停用")
     @PostMapping("/setenable")
     public ApiResponse<Void> setEnable(@RequestParam Long id,
@@ -210,7 +189,6 @@ public class UserController {
         return ApiResponse.ok();
     }
 
-    /** 管理员重置密码。 */
     @Operation(summary = "管理员重置密码")
     @PostMapping("/resetpassword")
     public ApiResponse<Void> resetPassword(@RequestParam Long id,
@@ -225,19 +203,13 @@ public class UserController {
         }
         user.setPassword(userService.encodePassword(password));
         userMapper.updateById(user);
-        /*
-         * 重置密码后把该用户所有会话踢下线。
-         *
-         * <p>重置密码的典型场景是「怀疑账号被盗」—— 若旧会话仍然有效，
-         * 攻击者手里那个 token 还能继续用，改密码就失去了意义。
-         */
+        // 重置密码的典型场景是「怀疑账号被盗」：旧会话必须立即失效，否则改密码没有意义。
         kickoutQuietly(id);
         log.info("管理员 {} 重置了用户 {} 的密码（已清除其全部会话）",
                 StpUtil.getLoginId(), id);
         return ApiResponse.ok();
     }
 
-    /** 修改自己的密码。 */
     @Operation(summary = "修改自己的密码")
     @PostMapping("/setpassword")
     public ApiResponse<Void> setPassword(@RequestParam(value = "oldpassword") String oldPassword,
@@ -247,16 +219,44 @@ public class UserController {
         return ApiResponse.ok();
     }
 
+    // ==================== API 密钥（自助） ====================
+
+    /**
+     * 密钥由用户自己管理，不走 {@code user:write} 权限。
+     *
+     * <p>它是「我这个账号的凭据」，和改自己密码同级 —— 要求管理员权限的话，
+     * 普通对接账号就永远拿不到密钥，只能让管理员代劳。
+     */
+
+    @Operation(summary = "查看自己的 API 密钥状态",
+            description = "只返回是否启用与后 8 位提示，不返回明文（库里只存哈希，服务端也拿不回）")
+    @GetMapping("/apikey")
+    public ApiResponse<ApiKeyVo> apiKeyStatus() {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(userService.apiKeyStatus(StpUtil.getLoginIdAsLong()));
+    }
+
+    @Operation(summary = "生成 / 重新生成自己的 API 密钥",
+            description = "返回明文，仅此一次；重新生成会让旧密钥立即失效")
+    @PostMapping("/apikey/generate")
+    public ApiResponse<ApiKeyVo> generateApiKey() {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(userService.generateApiKey(StpUtil.getLoginIdAsLong()));
+    }
+
+    @Operation(summary = "撤销自己的 API 密钥", description = "撤销后旧密钥立即无法登录")
+    @PostMapping("/apikey/revoke")
+    public ApiResponse<Void> revokeApiKey() {
+        StpUtil.checkLogin();
+        userService.revokeApiKey(StpUtil.getLoginIdAsLong());
+        return ApiResponse.ok();
+    }
+
     // ==================== 内部 ====================
 
     /**
-     * 清除指定用户的全部会话（失败只记日志）。
-     *
-     * <p>为什么不让异常冒出去：踢下线是「附带动作」，主体操作（停用/删除/改密）
-     * 已经落库成功了。如果因为 Sa-Token 的会话存储抖动而报错，
-     * 前端会显示「操作失败」，管理员重试一次仍然失败 —— 而实际上账号已经是停用状态。
-     * 这种「操作成功但提示失败」最容易被反复操作，反而把状态搞乱。
-     * 所以这里降级为告警日志，并在日志里写清需要人工确认。
+     * 清除指定用户的全部会话（失败只记日志）。踢下线是附带动作，主体操作已落库成功：
+     * 若因会话存储抖动报错，前端会显示「操作失败」并反复重试，反而把状态搞乱。
      */
     private void kickoutQuietly(long userId) {
         try {

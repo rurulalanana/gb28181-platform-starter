@@ -452,6 +452,15 @@ CREATE TABLE IF NOT EXISTS gb_preset (
     UNIQUE (channel_id, preset_id)
 );
 
+/*
+ * 曾经加过 pan / tilt / zoom 三列，用于「平台存坐标 + 绝对定位」替代设备预置点。
+ * 后来确认设备完全支持预置点（QueryDevState 0x57 能读到名称与坐标），
+ * 那套副本已移除 —— 两份数据必然不同步。这里顺手把老库里的列删掉。
+ */
+ALTER TABLE gb_preset DROP COLUMN IF EXISTS pan;
+ALTER TABLE gb_preset DROP COLUMN IF EXISTS tilt;
+ALTER TABLE gb_preset DROP COLUMN IF EXISTS zoom;
+
 -- -------------------- 用户 --------------------
 
 CREATE TABLE IF NOT EXISTS gb_user (
@@ -472,6 +481,15 @@ CREATE TABLE IF NOT EXISTS gb_user (
     update_time     TIMESTAMP,
     UNIQUE (username)
 );
+
+-- API 密钥：给机器调用方（业务平台/脚本）用，由用户自己在「账号安全」里生成。
+-- 只存 SHA-256 哈希，明文仅在生成时返回一次；hint 是前 8 位，用于让用户认出是哪一把。
+-- api_key_hash 上的唯一索引是必须的：登录时按它反查用户，重复了就无法定位。
+ALTER TABLE gb_user ADD COLUMN IF NOT EXISTS api_key_hash       VARCHAR(64);
+ALTER TABLE gb_user ADD COLUMN IF NOT EXISTS api_key_hint       VARCHAR(24);
+ALTER TABLE gb_user ADD COLUMN IF NOT EXISTS api_key_created_at TIMESTAMP;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_gb_user_api_key_hash
+    ON gb_user (api_key_hash) WHERE api_key_hash IS NOT NULL;
 
 -- -------------------- gb_role / gb_role_permission --------------------
 -- 角色与权限点（RBAC）。权限点编码的权威定义在 Java 侧 Permissions.java，
@@ -988,11 +1006,11 @@ COMMENT ON COLUMN gb_position_log.direction   IS '方向（度）';
 COMMENT ON COLUMN gb_position_log.create_time IS '采集时间';
 
 -- -------------------- gb_preset --------------------
-COMMENT ON TABLE  gb_preset IS '预置位名称自定义：设备只存编号，名称由平台维护';
+COMMENT ON TABLE  gb_preset IS '预置点名称自定义：设备侧有编号与名称，平台只为它起本域别名';
 COMMENT ON COLUMN gb_preset.id          IS '自增主键';
 COMMENT ON COLUMN gb_preset.channel_id  IS '通道国标编码';
-COMMENT ON COLUMN gb_preset.preset_id   IS '预置位编号（1～255）';
-COMMENT ON COLUMN gb_preset.name        IS '预置位名称（平台侧自定义）';
+COMMENT ON COLUMN gb_preset.preset_id   IS '预置点编号（1～255）';
+COMMENT ON COLUMN gb_preset.name        IS '预置点别名（平台侧自定义，设备不存这个）';
 COMMENT ON COLUMN gb_preset.update_time IS '更新时间';
 
 -- -------------------- gb_user --------------------

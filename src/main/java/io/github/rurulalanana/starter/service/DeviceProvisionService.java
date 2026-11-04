@@ -183,6 +183,52 @@ public class DeviceProvisionService {
         return items;
     }
 
+    /**
+     * 只探测可达性并刷新在线状态，<b>不拉目录</b>。
+     *
+     * <p>给定时巡检用：{@link #refreshCatalog} 会顺带做一次完整目录同步
+     * （逐通道 upsert），每 60 秒跑一遍对数据库和设备都是浪费；
+     * 而 SDK 直连设备不发心跳，必须靠这一步主动探测才能维持在线状态
+     * （否则会被心跳巡检误判离线，见 {@code DeviceService#offlineSilentDevices}）。
+     *
+     * <p><b>刻意不加 {@code @Transactional}</b>：SDK 登录是网络操作，
+     * 慢的时候几秒。放在事务里会让 {@code gb_device} 的行锁被长时间持有，
+     * 与自动接入线程的「更新设备 + upsert 通道」形成交叉等待 ——
+     * 实测直接触发 PostgreSQL {@code deadlock detected}。
+     * 状态写入交给 {@code setDeviceAndChannelsStatus}（它自带短事务）。
+     *
+     * @return 探测是否成功；设备不存在或实现缺失时返回 {@code false}
+     */
+    public boolean probeOnly(String deviceId) {
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            return false;
+        }
+        DeviceKind kind = DeviceKind.of(device.getSource());
+        if (kind == DeviceKind.GB28181) {
+            // 国标设备由 SIP 心跳维持在线，不能在这里抢着改状态
+            return false;
+        }
+        DeviceAccessProvider provider = accessRegistry.provider(kind).orElse(null);
+        if (provider == null) {
+            return false;
+        }
+        DeviceContext ctx = contextOf(device);
+        if (!ctx.connectable()) {
+            return false;
+        }
+        boolean online;
+        try {
+            online = provider.probe(ctx);
+        } catch (RuntimeException e) {
+            // 探测失败是现场常态（设备断电、网络抖动），不能把巡检循环打挂
+            log.debug("SDK 设备探测异常: {} {}", deviceId, e.toString());
+            online = false;
+        }
+        deviceService.setDeviceAndChannelsStatus(deviceId, online);
+        return online;
+    }
+
     /** 设备记录 → 接入上下文。 */
     private static DeviceContext contextOf(GbDevice d) {
         return new DeviceContext(
@@ -206,5 +252,18 @@ public class DeviceProvisionService {
     public long countDahua() {
         return deviceMapper.selectCount(Wrappers.<GbDevice>lambdaQuery()
                 .eq(GbDevice::getSource, DeviceKind.DAHUA.code()));
+    }
+
+    /**
+     * 列出所有非国标（SDK 直连）设备编号，供定时巡检主动探测。
+     *
+     * <p>与 {@link #countDahua()} 同样用 SQL 判据 {@code source}；
+     * 未知值按国标处理（与 {@code DeviceKind.of} 一致），所以这里只取明确属于 SDK 的。
+     */
+    public java.util.List<String> sdkDeviceIds() {
+        return deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
+                        .select(GbDevice::getDeviceId)
+                        .apply("lower(trim(coalesce(source, ''))) in ('dahua', 'netsdk')"))
+                .stream().map(GbDevice::getDeviceId).toList();
     }
 }

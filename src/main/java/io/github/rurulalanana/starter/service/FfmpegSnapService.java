@@ -17,45 +17,15 @@ import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 服务端抓拍：拉 ZLM 的流 → ffmpeg 解码 → JPEG。
+ * 服务端抓拍：拉 ZLM 的 FLV 流 → ffmpeg 解码 → JPEG。
  *
- * <h2>为什么不用 JavaCV</h2>
+ * <p>不用 JavaCV：快照源是 H265，JavaCV 光 native（{@code ffmpeg-linux-x86_64}）就 26.9MB 且运行期还要联网下载；
+ * JCodec 只支持 H264。ffmpeg CLI 放在服务器磁盘，jar 增量为 0。
+ * ZLM 自带的 native 不含 ffmpeg（{@code nm -a libmk_api.so | grep -c avcodec_} 为 0），它只透传编码数据。
  *
- * <p>本项目快照的图像源是 <b>H265</b>（实测级联下级推 HEVC），必须真正解码。
- * 各方案的体积代价：
- * <table border="1">
- *   <caption>方案对比</caption>
- *   <tr><th>方案</th><th>jar 增量</th><th>说明</th></tr>
- *   <tr><td><b>ffmpeg CLI（本方案）</b></td><td><b>0</b></td>
- *       <td>二进制放服务器磁盘，不进 jar</td></tr>
- *   <tr><td>JavaCV</td><td>~1.3MB + 27MB</td>
- *       <td>{@code javacv} 0.44MB + {@code javacpp} 0.54MB +
- *           {@code ffmpeg} Java 类 0.29MB 进 jar；但 native 库在
- *           {@code ffmpeg-linux-x86_64} 里，<b>26.9MB</b>，运行期还要联网下载</td></tr>
- *   <tr><td>JCodec</td><td>2.1MB</td><td>只支持 H264，对 H265 无效</td></tr>
- * </table>
- *
- * <p>用户要求「最小增加包容量」，JavaCV 光 native 就 27MB，出局；
- * JCodec 解不了 H265，也出局。只有 ffmpeg CLI 能做到 jar 增量 <b>0</b>。
- *
- * <h2>另一个关键事实：ZLM 自带的 native 不含 ffmpeg</h2>
- *
- * <p>{@code nm -a libmk_api.so | grep -c avcodec_} 结果为 <b>0</b> ——
- * 嵌入式 ZLMediaKit 编译时没带 ffmpeg，它自己解不了 H265，
- * 只负责「透传」编码数据（浏览器侧靠 jessibuca+wasm 解）。
- * 这与 ZLM 作者在 issues 中的说明一致：解码要自己集成 ffmpeg 或 javacv。
- *
- * <h2>为什么用「管道」而不是让 ffmpeg 直接拉 URL</h2>
- *
- * <p>实测：{@code ffmpeg -i http://...live.flv} 直接拉 <b>活流会挂死</b>
- * （活流永不结束，ffmpeg 一直等；加 {@code -rw_timeout} / {@code -timeout}
- * 也无效，实测 20~25 秒超时全部为空输出）。
- *
- * <p>而先把流读进管道再喂给 ffmpeg 的 stdin，ffmpeg 读到一帧就出图退出，
- * <b>实测耗时约 1 秒</b>（H264 与 H265 均验证通过）。
- *
- * <p>因此本类自己用 {@link HttpURLConnection} 拉 FLV，边读边写进 ffmpeg 的 stdin，
- * ffmpeg 输出 mjpeg 到 stdout —— 全程在内存中，不落临时文件。
+ * <p>必须用管道而不是让 ffmpeg 直接拉 URL：实测 {@code ffmpeg -i http://...live.flv} 在活流上会挂死
+ * （加 {@code -rw_timeout} / {@code -timeout} 也无效，20~25 秒全部空输出）；
+ * 边读 FLV 边写 stdin，ffmpeg 读到一帧即出图退出，实测约 1 秒（H264 / H265 均验证）。
  */
 @Slf4j
 @Service
@@ -79,10 +49,8 @@ public class FfmpegSnapService {
 
     private final Gb28181Properties props;
 
-    /**
-     * 抓取一帧 JPEG。
+    /** 抓取一帧 JPEG（要求关键帧）。
      *
-     * @param flvUrl ZLM 的 FLV 播放地址
      * @return JPEG 字节；失败返回 {@code null}
      */
     public byte[] capture(String flvUrl) {
@@ -92,11 +60,8 @@ public class FfmpegSnapService {
     /**
      * 抓取一帧 JPEG。
      *
-     * @param flvUrl           ZLM 的 FLV 播放地址
-     * @param requireKeyFrame  {@code true} = 只取关键帧（画面完整，但流刚建立时
-     *                         可能几秒内一个关键帧都没有，导致 0 字节）；
-     *                         {@code false} = 不限制帧类型（一定能出图，
-     *                         但如果起点是 P 帧会花屏）
+     * @param requireKeyFrame {@code true} 只取关键帧（画面完整，但流刚建立时可能几秒内没有关键帧、得到 0 字节）；
+     *                        {@code false} 不限制帧类型（一定能出图，但起点是 P 帧会花屏）
      * @return JPEG 字节；失败返回 {@code null}
      */
     public byte[] capture(String flvUrl, boolean requireKeyFrame) {
@@ -117,9 +82,7 @@ public class FfmpegSnapService {
                     // 容忍解码报错：刚开始拉流时可能丢到半个 GOP
                     "-err_detect", "ignore_err"));
             if (requireKeyFrame) {
-                // 只输出关键帧。H265 的 P 帧依赖参考帧，
-                // 而 ZLM 刚建源时缓冲区里的帧可能不是从关键帧开始的 ——
-                // 直接解会报「Could not find ref with POC xx」并出一张坏图。
+                // 只输出关键帧：ZLM 刚建源时缓冲区的帧可能不从关键帧开始，直接解会报 POC 错误并出坏图
                 cmd.add("-skip_frame");
                 cmd.add("nokey");
             }
@@ -134,8 +97,7 @@ public class FfmpegSnapService {
             Process p = new ProcessBuilder(cmd).start();
             proc = p;
 
-            // ffmpeg 的 stdout 才是我们要的 JPEG，必须先起线程抽干，
-            // 否则管道写满后 ffmpeg 阻塞、双方互等。
+            // ffmpeg 的 stdout 是我们要的 JPEG，必须先起线程抽干，否则管道写满后双方互等
             ByteArrayOutputStream jpeg = new ByteArrayOutputStream(512 * 1024);
             Thread reader = new Thread(() -> copy(p.getInputStream(), jpeg, Integer.MAX_VALUE),
                     "ffmpeg-snap-out");
@@ -156,8 +118,7 @@ public class FfmpegSnapService {
 
             byte[] bytes = jpeg.toByteArray();
             if (bytes.length < 1024) {
-                // 降级为 debug：上层会重试并最终给出用户可见的错误，
-                // 这里再打 WARN 只是同一件事刷两遍
+                // 降级为 debug：上层会重试并给出用户可见错误，这里再打 WARN 只是同一件事刷两遍
                 log.debug("抓拍未取到有效 JPEG（{} 字节, requireKeyFrame={}）",
                         bytes.length, requireKeyFrame);
                 return null;
@@ -173,11 +134,7 @@ public class FfmpegSnapService {
         }
     }
 
-    /**
-     * 打开 FLV 流。
-     *
-     * <p>只取 HTTP 头做校验，真正的读取在 {@link #capture} 里流式进行。
-     */
+    /** 打开 FLV 流：只做连接与状态码校验，读取在 {@link #capture} 里流式进行。 */
     private InputStream openStream(String flvUrl) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) new URL(flvUrl).openConnection();
         conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -191,10 +148,9 @@ public class FfmpegSnapService {
         return conn.getInputStream();
     }
 
-    /**
-     * 拷贝流。
+    /** 拷贝流。
      *
-     * @param limit 最多拷贝的字节数；{@link Integer#MAX_VALUE} 表示不限
+     * @param limit 最多拷贝字节数；{@link Integer#MAX_VALUE} 表示不限
      */
     private void copy(InputStream in, OutputStream out, int limit) {
         byte[] buf = new byte[16 * 1024];
@@ -217,14 +173,9 @@ public class FfmpegSnapService {
     }
 
     /**
-     * 构造本机 ZLM 的 FLV 地址。
+     * 构造本机 ZLM 的 FLV 地址。直接用会话里实际的 app/stream，不猜模式
+     * （单端口是 {@code rtp/<设备>_<通道>}，多端口是设备编码 / 通道编码）。
      *
-     * <p>单端口模式下 ZLM 的 app 固定为 {@code rtp}、stream 为 {@code <设备>_<通道>}；
-     * 多端口模式 app 为设备编码、stream 为通道编码。
-     * 这里不猜 —— 直接用会话里 ZLM 实际的 app/stream（{@link RtpSession}），
-     * 两种模式都对。
-     *
-     * @param session 直播会话
      * @return 本机 FLV 地址；会话为空时返回 {@code null}
      */
     public String localFlvUrl(RtpSession session) {

@@ -5,6 +5,7 @@ import io.github.rurulalanana.gb28181.sip.manscdp.ManscdpBuilder;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.common.PtzEncoder;
 import io.github.rurulalanana.starter.common.TimeFormats;
+import io.github.rurulalanana.starter.vo.ControlResultVo;
 import io.github.rurulalanana.deviceaccess.DeviceAccessProvider;
 
 import io.github.rurulalanana.deviceaccess.DeviceContext;
@@ -16,16 +17,12 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * 设备控制服务（GB/T 28181—2022 附录 A.2.3 Control 命令族）。
- *
- * <p>覆盖 GBS 的 {@code /api/v1/control/*} 接口：云台、焦点光圈、预置位、巡航、
- * 看守位、录像控制、布撤防、重启、强制关键帧、格式化存储卡、报警复位、
- * 拉框缩放、雨刷补光、OSD、抓拍、升级、订阅、喊话。
- *
- * <p>PTZ 指令编码见 {@link PtzEncoder}（依赖模块的 {@code PtzCommand}
- * 无法表达预置位编号 1~255 与三种预置位操作，故自行编码）。
+ * 设备控制服务（GB/T 28181—2022 附录 A.2.3 Control）。覆盖云台、焦点光圈、预置位、巡航、看守位、
+ * 录像控制、布撤防、重启、关键帧、格式化、报警复位、拉框缩放、雨刷补光、OSD、抓拍、升级、订阅、喊话。
+ * PTZ 编码见 {@link PtzEncoder}（依赖模块的 {@code PtzCommand} 无法表达预置位编号 1~255）。
  */
 @Slf4j
 @Service
@@ -37,18 +34,32 @@ public class ControlService {
     /** 辅助开关编号：雨刷固定为 1（标准未定义，业界惯例）。 */
     private static final int WIPER_SWITCH_ID = 1;
     /**
-     * 转给厂商 SDK 的云台速度（统一 0~255 口径）。
-     *
-     * <p>取中上值 5 而非满速：SDK 的方向控制是「按住就走」的连续动作，
-     * 满速下轻微超调就会把机位带到画面外侧，而界面上的方向键本来就是
-     * 点一下走一点。国标侧默认也是 129（中值），两边口径保持一致。
+     * 转给厂商 SDK 的云台速度（0~255 口径）。取中值 129 而非满速：
+     * SDK 方向控制是连续动作，满速下轻微超调就会把机位带到画面外；国标侧默认也是 129。
      */
     private static final int PTZ_SDK_SPEED = 129;
+
+    /**
+     * 等设备回 MANSCDP 应答的时长（毫秒）。
+     *
+     * <p>取 2.5 秒的取舍：局域网设备实测 50~300ms 就回，给足余量覆盖慢固件；
+     * 但多数设备对云台类命令<b>根本不做应用层应答</b>，等太久接口就变成「点一下卡三秒」。
+     * 宁可如实报「设备未应答」，也不让界面假成功。
+     */
+    private static final int CONTROL_ACK_TIMEOUT_MS = 2500;
 
     private final Gb28181SipClientProvider clientProvider;
     private final DeviceService deviceService;
     /** 非国标设备的接入实现（大华 SDK 等）；国标设备不走这里。 */
     private final DeviceAccessRegistry accessRegistry;
+    /** 控制应答等待（A.2.6.2）。 */
+    private final ControlAckService ackService;
+    /** SDK 直连设备的预置位/巡航等扩展能力。 */
+    private final DahuaCapabilityService dahuaCapability;
+    /** SDK 直连设备的录像计划（国标 Record/StopRecord 的等价实现）。 */
+    private final DahuaRecordPlanService dahuaRecordPlan;
+    /** SDK 直连设备的配置项开关（布撤防等）。 */
+    private final DahuaConfigEditService dahuaConfigEdit;
 
     private Gb28181SipClient client() {
         Gb28181SipClient client = clientProvider.client();
@@ -61,30 +72,18 @@ public class ControlService {
     // ==================== 寻址：设备编码 vs 通道编码 ====================
 
     /**
-     * 一次控制指令的寻址对：{@code sipTarget} 用于 SIP 层找会话与构造请求行，
-     * {@code deviceId} 是写进 MANSCDP {@code <DeviceID>} 的值。
-     *
-     * <p><b>为什么必须分开</b>：GB/T 28181 里云台、预置位、录像等控制命令的
-     * {@code <DeviceID>} 是<b>通道编码</b>（功能挂在通道上），而 SIP 的
-     * {@code To}/{@code From}/请求行必须用<b>设备编码</b>（设备才是注册实体）。
-     * 底层 {@code Gb28181SipClient} 的方法只收一个 {@code deviceId} 并同时用于
-     * 这两处，于是「设备编码 ≠ 通道编码」时必然失败：
-     * <pre>
-     * 直连摄像机：设备 34020000001310000001 / 通道 34020000001310000001 → 恰好相同，能跑通
-     * 下级平台：  设备 34020000002000000006 / 通道 34020000001310000002 → 报「设备未注册或会话已失效」
-     * </pre>
-     * 因此本服务统一用本记录分离两者：SIP 层用 {@code sipTarget}，
-     * MANSCDP 用 {@code deviceId}。
+     * 一次控制指令的寻址对：{@code sipTarget} 用于 SIP 找会话与构造请求行，
+     * {@code deviceId} 写进 MANSCDP 的 {@code <DeviceID>}。
+     * 国标里控制命令的 {@code <DeviceID>} 是通道编码，而 SIP 的 {@code To}/{@code From}/请求行必须是设备编码；
+     * 底层 {@code Gb28181SipClient} 只收一个 ID，两者不同时必然报「设备未注册或会话已失效」
+     * （直连摄像机二者相同所以能跑通，级联场景暴露）。
      */
     private record Target(String sipTarget, String deviceId) {
     }
 
     /**
-     * 解析控制指令的寻址对。
-     *
-     * <p>{@code channelId} 是业务侧传入的通道编码。若库中能查到该通道，
-     * 则 SIP 目标取其所属设备编码；查不到（如直接传设备编码、或通道尚未同步）
-     * 则两者都退回 {@code channelId}，保持与旧行为一致。
+     * 解析控制指令的寻址对：能查到通道则 SIP 目标用其所属设备编码，
+     * 查不到则两者都退回 {@code channelId}（与旧行为一致）。
      */
     private Target target(String channelId) {
         if (channelId == null || channelId.isBlank()) {
@@ -95,23 +94,16 @@ public class ControlService {
     }
 
     /**
-     * 下发一条 MANSCDP 控制消息。
-     *
-     * <p>XML 由 {@code xmlBuilder} 用<b>通道编码</b>构造（保证 {@code <DeviceID>}
-     * 符合规范），SIP 层用<b>设备编码</b>寻址。
-     *
-     * <p><b>这里是唯一的下行出口</b>：所有控制类接口（云台、预置位、
-     * 录像控制、布撤防、重启…）最终都经过本方法。因此非国标设备的分流
-     * 只需要在这一点上判断 —— 不需要在每个 {@code public} 方法里写 if。
-     * 放在调用方逐个判断会让遗漏成为必然（新增一个命令就忘了处理）。
+     * 下发一条 MANSCDP 控制消息：XML 用通道编码构造，SIP 用设备编码寻址。
+     * 这是唯一的下行出口，非国标设备的分流只在这里判一次；
+     * 放到各 public 方法里会让新增命令时必然遗漏。
      */
     private void sendControl(String channelId, java.util.function.Function<String, String> xmlBuilder) {
         Target t = target(channelId);
         // 非国标设备没有 MANSCDP，交回对应 provider 自己处理
         DeviceAccessProvider p = providerOf(t.sipTarget());
         if (p != null) {
-            // 目前只有云台类命令在 SDK 侧有实现；其余命令显式拒绝，
-            // 而不是静默丢弃 —— 静默失败会让用户以为「点了没反应」。
+            // 目前只有云台类命令在 SDK 侧有实现；其余命令显式拒绝而不是静默丢弃（静默失败会让人以为「点了没反应」）
             throw BizException.badRequest("该设备通过 " + p.kind().code()
                     + " 接入，此控制命令暂未适配；请在设备本体上操作");
         }
@@ -119,20 +111,66 @@ public class ControlService {
     }
 
     /**
-     * 下发一条 PTZ 指令。
+     * 下发一条控制消息并等设备应答（A.2.6.2）。
      *
-     * <p>PTZ 命令码由 {@link PtzEncoder} 生成，与 {@code <DeviceID>} 无关，
-     * 因此只需保证 SIP 层寻址正确、{@code <DeviceID>} 写通道编码。
+     * <p>与 {@link #sendControl} 的唯一区别是<b>拿得到设备的回话</b>。
+     * 只给「成败对用户有意义」的命令用：目标跟踪、拉框缩放、设备升级。
+     * 云台方向键仍走发送即返回 —— 每个方向停一次都等 2.5 秒会把操作拖死。
      *
-     * <p>非国标设备（大华 SDK）在这里分流：SDK 的方向控制是独立 API，
-     * 没有 PTZCmd 字节串的概念，不能再往下走 MANSCDP 分支。
+     * @param xmlBuilder SN → 完整 MANSCDP 报文；SN 由本方法生成以保证能对上应答
+     */
+    private ControlResultVo sendControlAndAwait(String channelId,
+                                                java.util.function.IntFunction<String> xmlBuilder) {
+        Target t = target(channelId);
+        DeviceAccessProvider p = providerOf(t.sipTarget());
+        if (p != null) {
+            throw BizException.badRequest("该设备通过 " + p.kind().code()
+                    + " 接入，此控制命令暂未适配；请在设备本体上操作");
+        }
+        Gb28181SipClient c = client();
+        int sn = c.nextSn();
+        // 先登记再发：设备在局域网里几十毫秒就回，先发后登记会漏掉这条应答
+        CompletableFuture<ControlAckService.Ack> future = ackService.expect(t.deviceId(), sn);
+        c.sendMessage(t.sipTarget(), xmlBuilder.apply(sn));
+        ControlAckService.Ack ack = ackService.await(t.deviceId(), sn, future, CONTROL_ACK_TIMEOUT_MS);
+        if (ack == null) {
+            log.info("控制命令设备未应答: channel={} sn={}", t.deviceId(), sn);
+            return ControlResultVo.noAnswer(sn,
+                    "命令已下发，设备在 " + CONTROL_ACK_TIMEOUT_MS + "ms 内未回应答（多数设备对控制命令不做应用层应答）");
+        }
+        log.info("控制命令设备已应答: channel={} sn={} result={}", t.deviceId(), sn, ack.result());
+        return ControlResultVo.answered(sn, ack.result());
+    }
+
+    /**
+     * 下发一条 PTZ 指令。非国标设备（大华 SDK）在这里分流：SDK 的方向控制是独立 API，
+     * 没有 PTZCmd 字节串的概念。
      */
     private void sendPtz(String channelId, String ptzCmd) {
         Target t = target(channelId);
         DeviceAccessProvider p = providerOf(t.sipTarget());
         if (p != null) {
-            String dir = ptzCmdToDirection(ptzCmd);
-            p.ptz(contextOf(t.sipTarget()), t.deviceId(), dir, PTZ_SDK_SPEED);
+            String dir = ptzCmdToSdkCommand(ptzCmd);
+            if (dir == null) {
+                /*
+                 * 这个指令码不在 SDK 的可映射范围（预置位 / 巡航 / 扫描 / 辅助开关）。
+                 * 以前会静默退化成一次方向转动，用户点「设置预置位」结果镜头转走了。
+                 * 明说不可用，比动一下更有用。
+                 */
+                throw BizException.badRequest("该设备通过 " + p.kind().code()
+                        + " 接入，此云台指令暂未适配（只支持方向、变倍、聚焦、光圈）；"
+                        + "预置位/巡航请在设备本体或国标通道上操作");
+            }
+            try {
+                p.ptz(contextOf(t.sipTarget()), t.deviceId(), dir, PTZ_SDK_SPEED);
+            } catch (IllegalStateException | IllegalArgumentException e) {
+                /*
+                 * 转成 400：设备侧拒绝（不是球机 / 通道号错 / 会话失效）是正常的业务失败，
+                 * 不该按服务端故障打 ERROR + 堆栈。provider 抛的消息已经带了错误码与原因。
+                 */
+                throw BizException.badRequest(e.getMessage() == null
+                        ? "云台指令下发失败" : e.getMessage());
+            }
             return;
         }
         client().sendMessage(t.sipTarget(),
@@ -140,11 +178,9 @@ public class ControlService {
     }
 
     /**
-     * 取该设备对应的接入实现；国标设备返回 {@code null}（走原生链路）。
-     *
-     * <p>先按「设备编码」查，查不到再按通道反查所属设备 —— 与 {@link #target}
-     * 的回退口径保持一致，否则「通道编码传进来、设备编码与之不同」的场景会
-     * 被判成国标设备而往 SIP 里发。
+     * 取该设备对应的接入实现；国标设备返回 {@code null}。
+     * 先按设备编码查，查不到再按通道反查 —— 与 {@link #target} 的回退口径一致，
+     * 否则「通道编码传进来」的场景会被误判成国标设备而往 SIP 里发。
      */
     private DeviceAccessProvider providerOf(String deviceId) {
         GbDevice device = deviceService.findDevice(deviceId);
@@ -176,75 +212,95 @@ public class ControlService {
     }
 
     /**
-     * 把 PTZ 命令码翻回方向词。
+     * 把国标 PTZ 指令码翻译成「协议无关的方向词」，供厂商 SDK 使用。
      *
-     * <p>{@link PtzEncoder} 输出的是 GB 规范的 <b>8 字节十六进制串</b>：
+     * <p><b>必须按指令族整体匹配，不能只做方向位与运算</b>。
+     * {@link PtzEncoder} 的字节4 里，方向只占 {@code 0x01}~{@code 0x08}，
+     * 但聚焦/光圈的码值是 {@code 0x41}/{@code 0x42}/{@code 0x44}/{@code 0x48}
+     * —— 它们的低位恰好与方向位重合，于是：
      * <pre>
-     *   A5 | 0F | 地址低8 | 指令码 | 数据1 | 数据2 | 数据3+地址高4 | 校验
-     *   下标0  2      4        6        8       10        12          14
+     *   0x41 聚焦远  &amp; 0x01(右) = 0x01  → 被判成「右」
+     *   0x42 聚焦近  &amp; 0x02(左) = 0x02  → 被判成「左」
+     *   0x44 光圈放大 &amp; 0x04(下) = 0x04  → 被判成「下」
+     *   0x48 光圈缩小 &amp; 0x08(上) = 0x08  → 被判成「上」
      * </pre>
-     * 方向位与变倍位都在<b>指令码</b>（hex 下标 6~7）里，按位组合：
-     * <ul>
-     *   <li>{@code 0x01} 右、{@code 0x02} 左、{@code 0x04} 下、{@code 0x08} 上</li>
-     *   <li>{@code 0x10} 变倍放大、{@code 0x20} 变倍缩小</li>
-     *   <li>{@code 0x00} 停止</li>
-     * </ul>
-     * 方向可以叠加（如 {@code 0x09} = 上 + 右），因此这里拼成
-     * {@code upright} 这类组合词，而不是只取一个方向 —— 丢了半个方向会让
-     * 斜向操作在 SDK 侧变成纯直行，用户立刻能感觉到「按了斜着不走」。
+     * 现场表现就是本次反馈的现象：<b>点光圈，云台上下动；点聚焦，云台左右动</b>。
+     * 同类还有预置位 {@code 0x81}（低两位是 01）会被当成「右」。
      *
-     * <p>与其在编码侧再开一套「语义化 API」，不如在这里按位反解：
-     * 规则只有一张位表，复制两份反而会走偏。
+     * <p>因此这里按族划分：方向族 {@code 0x00~0x0F}、变倍 {@code 0x10}/{@code 0x20}、
+     * 聚焦光圈四个定值；<b>其余一律返回 {@code null}</b>（预置位、巡航、扫描、
+     * 辅助开关），由调用方明确报「SDK 侧不支持」，而不是悄悄变成一次转动。
+     *
+     * @return 方向词；{@code stop} 表示停止；无法映射时返回 {@code null}
      */
-    private static String ptzCmdToDirection(String hex) {
+    static String ptzCmdToSdkCommand(String hex) {
         if (hex == null || hex.isBlank()) {
             return "stop";
         }
+        int cmd;
         try {
             String h = hex.trim().replace("0x", "").replace(" ", "").replace("-", "");
             if (h.length() < 8) {
                 return "stop";
             }
-            int cmd = Integer.parseInt(h.substring(6, 8), 16);
-            if (cmd == 0) {
-                return "stop";
-            }
-            if ((cmd & PtzEncoder.ZOOM_IN) != 0) {
-                return "zoomin";
-            }
-            if ((cmd & PtzEncoder.ZOOM_OUT) != 0) {
-                return "zoomout";
-            }
-            StringBuilder sb = new StringBuilder();
-            if ((cmd & PtzEncoder.UP) != 0) {
-                sb.append("up");
-            } else if ((cmd & PtzEncoder.DOWN) != 0) {
-                sb.append("down");
-            }
-            if ((cmd & PtzEncoder.LEFT) != 0) {
-                sb.append("left");
-            } else if ((cmd & PtzEncoder.RIGHT) != 0) {
-                sb.append("right");
-            }
-            return sb.length() == 0 ? "stop" : sb.toString();
+            cmd = Integer.parseInt(h.substring(6, 8), 16);
         } catch (RuntimeException e) {
             // 解析不了就按「停」—— 比随便猜一个方向安全
-            log.debug("无法从 PTZ 命令码反解方向，按 stop 处理: {}", hex);
+            log.debug("无法解析 PTZ 指令码，按 stop 处理: {}", hex);
             return "stop";
         }
+        if (cmd == 0) {
+            return "stop";
+        }
+
+        // ① 聚焦 / 光圈：以 0x40 为基的独立指令码，必须先于方向位判断
+        switch (cmd) {
+            case PtzEncoder.FOCUS_FAR:
+                return "focusfar";
+            case PtzEncoder.FOCUS_NEAR:
+                return "focusnear";
+            case PtzEncoder.IRIS_IN:
+                return "irisin";
+            case PtzEncoder.IRIS_OUT:
+                return "irisout";
+            default:
+                break;
+        }
+
+        // ② 变倍：单一指令码，不与方向叠加（UI 也不会这么发）
+        if (cmd == PtzEncoder.ZOOM_IN) {
+            return "zoomin";
+        }
+        if (cmd == PtzEncoder.ZOOM_OUT) {
+            return "zoomout";
+        }
+
+        // ③ 方向族：只有 0x00~0x0F 这一段是纯方向位，可叠加出斜向
+        if (cmd > 0x0F) {
+            // 预置位/巡航/扫描/辅助开关等：厂商 SDK 的 ptz() 没有对应入参，
+            // 返回 null 让调用方报错，不要退化成一次方向转动
+            log.debug("PTZ 指令码不在 SDK 可映射范围: 0x{}", Integer.toHexString(cmd));
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        if ((cmd & PtzEncoder.UP) != 0) {
+            sb.append("up");
+        } else if ((cmd & PtzEncoder.DOWN) != 0) {
+            sb.append("down");
+        }
+        if ((cmd & PtzEncoder.LEFT) != 0) {
+            sb.append("left");
+        } else if ((cmd & PtzEncoder.RIGHT) != 0) {
+            sb.append("right");
+        }
+        return sb.length() == 0 ? "stop" : sb.toString();
     }
 
     // ==================== 云台 ====================
 
     /**
-     * 云台方向控制。
-     *
-     * <p>{@code speed} 语义随指令不同：
-     * <ul>
-     *   <li>方向：水平/垂直速度，0~255（字节5、字节6）</li>
-     *   <li>变倍：<b>0~15</b>（字节7 高 4 位），所以 0~255 的入参要折算过去 ——
-     *       直接把 129 塞进去会被夹成 15，永远最大速，用户调不出慢速变倍</li>
-     * </ul>
+     * 云台方向控制。{@code speed} 语义随指令不同：方向是水平 / 垂直速度 0~255，
+     * 变倍是 0~15（字节 7 高 4 位）；直接把 129 塞进变倍会被夹成 15，永远最大速。
      *
      * @param speed 速度 0~255，默认 129
      */
@@ -280,22 +336,10 @@ public class ControlService {
     }
 
     /**
-     * 焦点光圈控制。
-     *
-     * <p>GB/T 28181 附录 A.3.1 里<b>聚焦与光圈是独立指令码</b>（以 {@code 0x40} 为基）：
-     * <ul>
-     *   <li>{@code 0x42} 聚焦近（数据1 = 聚焦速度）</li>
-     *   <li>{@code 0x41} 聚焦远（数据1 = 聚焦速度）</li>
-     *   <li>{@code 0x44} 光圈放大（数据2 = 光圈速度）</li>
-     *   <li>{@code 0x48} 光圈缩小（数据2 = 光圈速度）</li>
-     * </ul>
-     *
-     * <p><b>曾经的错误</b>：早期把 {@code irisin}/{@code focusfar} 映射到
-     * {@link PtzEncoder#ZOOM_IN}、{@code irisout}/{@code focusnear} 映射到
-     * {@link PtzEncoder#ZOOM_OUT}，下发字节与变倍<b>逐字节相同</b>，
-     * 现场表现就是「按光圈，画面缩放」。
-     *
-     * @throws BizException 指令不支持时
+     * 焦点光圈控制。GB/T 28181 附录 A.3.1 里聚焦与光圈是以 {@code 0x40} 为基的独立指令码：
+     * {@code 0x42} 聚焦近、{@code 0x41} 聚焦远、{@code 0x44} 光圈放大、{@code 0x48} 光圈缩小。
+     * 早期把它们映射到 {@code ZOOM_IN}/{@code ZOOM_OUT}，下发字节与变倍逐字节相同，
+     * 现场表现是「按光圈，画面缩放」。
      */
     public void focusIris(String channelId, String command, Integer speed) {
         String cmd = normalize(command);
@@ -319,19 +363,81 @@ public class ControlService {
         client().ptzPrecise(channelId, pan, tilt, zoom);
     }
 
-    /** 拉框放大 / 缩小。 */
-    public void dragZoom(String channelId, boolean zoomIn, int length, int width,
-                         int midpointX, int midpointY, int lengthX, int lengthY) {
-        sendPtz(channelId, PtzEncoder.dragZoom(zoomIn, length, width,
+    /**
+     * 拉框放大 / 缩小（A.2.3.1.8 / A.2.3.1.9）。
+     *
+     * <p>走 2022 版标准：独立 XML 元素 {@code <DragZoomIn>/<DragZoomOut>}，
+     * 坐标为<b>像素值</b>，{@code length}/{@code width} 是平台播放窗口的像素尺寸。
+     *
+     * <p><b>不能走 PTZCmd</b>：A.3.2 的指令表（表 A.4/A.5）里没有拉框指令码，
+     * 早期业界流传的 11 字节 {@code 0x81/0x82} 形式既不在标准里，还与预置位的
+     * {@code PRESET_SET/PRESET_CALL} 同码 —— 设备按报文长度猜，猜错就变成
+     * 「点拉框放大，预置位被覆盖」。
+     */
+    public ControlResultVo dragZoom(String channelId, boolean zoomIn, int length, int width,
+                                    int midpointX, int midpointY, int lengthX, int lengthY) {
+        return sendControlAndAwait(channelId, sn -> zoomIn
+                ? ManscdpBuilder.dragZoomIn(sn, channelId, length, width,
+                midpointX, midpointY, lengthX, lengthY)
+                : ManscdpBuilder.dragZoomOut(sn, channelId, length, width,
                 midpointX, midpointY, lengthX, lengthY));
     }
 
     // ==================== 预置位 ====================
 
+    /**
+     * SDK 直连设备的预置位操作，<b>全部走设备</b>。
+     *
+     * <p>通道号要用 {@code sdkChannel}（IPC 是 0、NVR 是 1~N），
+     * 与云台方向键同一口径 —— 用 1 去控 IPC 不报错但设备不动。
+     *
+     * <h3>为什么不再存平台坐标</h3>
+     * 早期因为「{@code PtzPreset} 配置项读不到」误判成「该型号不支持预置点」，
+     * 于是做了一套「平台存 (pan,tilt,zoom) + 绝对定位回位」的兜底。
+     * 后来发现设备<b>完全支持</b>：`QueryDevState(0x57)` 能读到清单（含名称与坐标），
+     * GOTO 精确回位（连做 3 次误差 0）。
+     *
+     * <p>兜底方案是多余的一层：<b>设备有的就用设备的</b>。
+     * 它能做的设备都能做，还多出「设备 Web 界面可见、其他客户端可用、
+     * 设备侧掉电不丢」这些平台坐标给不了的特性。留着只会带来
+     * 「两边不同步」的维护成本和「设备上没有却显示存在」的假数据。
+     *
+     * <p>平台侧仍保留的是<b>预置点名称</b>（{@code gb_preset.name}）——
+     * 那是设备不存、只有平台知道的信息，与「设备能力」无关。
+     */
+    private void presetBySdk(DeviceAccessProvider provider, Target t,
+                             String command, int preset) {
+        var session = dahuaCapability.requireSession(t.sipTarget());
+        int sdkChannel = dahuaCapability.sdkChannel(session, t.sipTarget(), t.deviceId());
+        var ext = dahuaCapability.ext();
+        try {
+            switch (normalize(command)) {
+                case "set" -> ext.setPreset(session, sdkChannel, preset);
+                case "goto", "call" -> ext.gotoPreset(session, sdkChannel, preset);
+                case "remove", "delete" -> ext.deletePreset(session, sdkChannel, preset);
+                default -> throw BizException.badRequest("不支持的预置位指令：" + command);
+            }
+        } catch (io.github.rurulalanana.dahua.ext.DahuaSdkException e) {
+            throw dahuaCapability.translate("预置位操作", e);
+        }
+    }
+
     /** 预置位控制：{@code set} / {@code goto} / {@code remove}。 */
     public void preset(String channelId, String command, Integer preset) {
         if (preset == null) {
             throw BizException.badRequest("缺少预置位编号");
+        }
+        /*
+         * SDK 直连设备的预置位必须走 SDK，不能编码成国标 PTZCmd：
+         * 大华的预置位是 "PtzPreset" 配置项 + 专属指令码，收到国标的
+         * 0x81/0x82/0x83 只会当成未知指令忽略（而 SDK 照样返回成功），
+         * 表现为「点了设置预置位，界面说成功，设备上什么都没有」。
+         */
+        Target t = target(channelId);
+        DeviceAccessProvider sdkProvider = providerOf(t.sipTarget());
+        if (sdkProvider != null) {
+            presetBySdk(sdkProvider, t, command, preset);
+            return;
         }
         int op = switch (normalize(command)) {
             case "set" -> PtzEncoder.PRESET_SET;
@@ -342,27 +448,44 @@ public class ControlService {
         sendPtz(channelId, PtzEncoder.preset(DEFAULT_ADDRESS, op, preset));
     }
 
-    /** 查询设备侧预置位列表。 */
+    /**
+     * 查询设备侧预置位列表。
+     *
+     * <p><b>SDK 直连设备什么也不做，直接返回成功</b> —— 这不是偷懒：
+     * 国标是「下发 {@code PresetQuery} → 等设备 MANSCDP 应答 → 落内存快照」，
+     * 所以必须先发查询；而 SDK 是<b>同步读</b> {@code PtzPreset} 配置项，
+     * {@code GET /device/presetlist} 一次调用就把数据拿回来了，没有「异步等应答」这回事。
+     *
+     * <p>早期这里直接落到 {@link #sendControl}，对 SDK 设备抛「此控制命令暂未适配」，
+     * 而前端「刷新预置位」是「先 fetchpreset 再轮询 presetlist」的固定流程，
+     * 于是第一个请求就报错，用户根本走不到能出数据的第二步。
+     */
     public void queryPresets(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            log.info("SDK 直连设备无需下发预置位查询（同步读，结果由 /device/presetlist 返回）: {}",
+                    t.deviceId());
+            return;
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.presetQuery(client().nextSn(), deviceId));
     }
 
     // ==================== 巡航 / 看守位 ====================
 
     /**
-     * 巡航控制。
-     *
-     * <p>{@code query} 只下发查询（结果走 MANSCDP 应答）；{@code add}/{@code remove}
-     * 用 {@code 0x84}/{@code 0x85} 携带组号与预置位；{@code setspeed}/{@code setstay}
-     * 用 {@code 0x86}/{@code 0x87}（值占两字节）；{@code start} 用 {@code 0x88}；
-     * <b>{@code stop} 没有专属指令码，就是普通的停止（字节4 全 0）</b>。
-     *
-     * <p>早期全部用 {@code 0x40|…} 拼出来，设备一律忽略。
+     * 巡航控制：{@code add}/{@code remove} 用 {@code 0x84}/{@code 0x85}，
+     * {@code setspeed}/{@code setstay} 用 {@code 0x86}/{@code 0x87}，{@code start} 用 {@code 0x88}；
+     * {@code stop} 没有专属指令码，就是普通停止（字节 4 全 0）。
      */
     public void navigate(String channelId, String command, Integer groupId, Integer preset,
                          Integer speed, Integer stay, String name) {
         String cmd = normalize(command);
         int group = groupId == null ? 1 : groupId;
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            navigateBySdk(t, cmd, group, preset, command);
+            return;
+        }
         switch (cmd) {
             case "query" -> sendControl(channelId,
                     deviceId -> ManscdpBuilder.cruiseTrackListQuery(client().nextSn(), deviceId));
@@ -382,30 +505,84 @@ public class ControlService {
                 channelId, command, groupId, preset, speed, stay, name);
     }
 
+    /**
+     * SDK 直连设备的巡航组控制。
+     *
+     * <p>国标的巡航组 {@code groupId} 对应大华的「巡航线号」（1~64），
+     * 语义一致，可以直接映射 {@code NET_EXTPTZ_ADDTOLOOP} / {@code DELFROMLOOP} /
+     * {@code CLOSELOOP}。
+     *
+     * <p>做不到的两项要明说：{@code setspeed} / {@code setstay} 在大华侧是
+     * {@code PtzTour} 配置项的字段，不是指令参数，需要单独读改写配置；
+     * {@code query} 也没有「列出所有巡航组」的指令接口。
+     */
+    private void navigateBySdk(Target t, String cmd, int group, Integer preset, String rawCommand) {
+        var session = dahuaCapability.requireSession(t.sipTarget());
+        int sdkChannel = dahuaCapability.sdkChannel(session, t.sipTarget(), t.deviceId());
+        int p = preset == null ? 1 : preset;
+        try {
+            switch (cmd) {
+                case "add" -> io.github.rurulalanana.dahua.ext.DahuaPtzExt
+                        .cruiseAddPoint(session, sdkChannel, group, p);
+                case "remove" -> io.github.rurulalanana.dahua.ext.DahuaPtzExt
+                        .cruiseRemovePoint(session, sdkChannel, group, p);
+                case "start" -> io.github.rurulalanana.dahua.ext.DahuaPtzExt
+                        .cruiseRun(session, sdkChannel, group, true);
+                case "stop" -> io.github.rurulalanana.dahua.ext.DahuaPtzExt
+                        .cruiseRun(session, sdkChannel, group, false);
+                case "setspeed", "setstay" -> throw BizException.badRequest(
+                        "大华的巡航速度/停留时间是 PtzTour 配置项字段，不是指令参数，暂不支持在线修改；"
+                                + "请在设备 Web 界面设置巡航线 " + group + " 的速度与停留时间");
+                case "query" -> throw BizException.badRequest(
+                        "大华 SDK 没有「列出巡航组」的指令接口；"
+                                + "巡航组内容在设备 Web 界面的「PTZ 巡航」页查看");
+                default -> throw BizException.badRequest("不支持的巡航指令：" + rawCommand);
+            }
+        } catch (io.github.rurulalanana.dahua.ext.DahuaSdkException e) {
+            throw dahuaCapability.translate("巡航控制", e);
+        }
+        log.info("大华巡航控制: device={} channel={} command={} route={} preset={}",
+                t.sipTarget(), t.deviceId(), cmd, group, p);
+    }
+
     /** 查询巡航轨迹。 */
     public void queryCruiseTrack(String channelId, Integer number) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，没有「巡航轨迹查询」接口；"
+                    + "大华 SDK 的巡航组请用 /api/v1/dahua/ptz/action 直接控制");
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.cruiseTrackQuery(
                 client().nextSn(), deviceId, number == null ? 0 : number));
     }
 
     /** 查询看守位信息。 */
     public void queryHomePosition(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，没有「看守位」概念；"
+                    + "需要开机/空闲回到固定机位请用预置位 + 设备侧配置");
+        }
         sendControl(channelId,
                 deviceId -> ManscdpBuilder.homePositionQuery(client().nextSn(), deviceId));
     }
 
     /**
-     * 看守位控制。
-     *
-     * <p><b>看守位不是 PTZCmd</b>：它在 {@code <Control>} 下有自己的
-     * {@code <HomePosition>} 元素（{@code <Enabled>/<ResetTime>/<PresetIndex>}）。
-     * 早期把它当成 PTZCmd 发（还借着 {@code 0x40|0x04} 这个不存在的指令码），
-     * 设备自然不理。
+     * 看守位控制。它不是 PTZCmd：在 {@code <Control>} 下有自己的 {@code <HomePosition>} 元素
+     * （{@code <Enabled>/<ResetTime>/<PresetIndex>}），当成 PTZCmd 发设备不理。
      */
     public void homePosition(String channelId, Boolean enabled, Integer resetTime, Integer presetIndex) {
         boolean on = Boolean.TRUE.equals(enabled);
         int reset = resetTime == null ? 0 : resetTime;
         int preset = presetIndex == null ? 1 : presetIndex;
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，没有「看守位」这个概念；"
+                    + "需要空闲自动回位请先在预置位面板设好机位，再在设备 Web 界面配置空闲动作");
+        }
         sendControl(channelId, deviceId -> "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                 + "<Control><CmdType>DeviceControl</CmdType>"
                 + "<SN>" + client().nextSn() + "</SN>"
@@ -418,80 +595,167 @@ public class ControlService {
 
     // ==================== 辅助开关 ====================
 
-    /** 雨刷开关（开关编号固定 1，见标准与 wvp 实现）。 */
+    /**
+     * 雨刷开关（开关编号固定 1，见标准与 wvp 实现）。
+     *
+     * <p>SDK 直连设备：大华把雨刷与补光灯合成一条 {@code NET_PTZ_LAMP_CONTROL} 指令，
+     * 序号传 0。
+     */
     public void wiper(String channelId, String command) {
         boolean on = "on".equals(normalize(command));
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaCapability.setLamp(t.sipTarget(), t.deviceId(), on, 0);
+            return;
+        }
         sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, WIPER_SWITCH_ID, on));
     }
 
     /** 补光灯开关（编号由设备定义，默认 2）。 */
     public void fillLight(String channelId, String command, Integer index) {
         boolean on = "on".equals(normalize(command));
-        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS,
-                index == null ? 2 : index, on));
+        int idx = index == null ? 2 : index;
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaCapability.setLamp(t.sipTarget(), t.deviceId(), on, idx);
+            return;
+        }
+        sendPtz(channelId, PtzEncoder.auxiliary(DEFAULT_ADDRESS, idx, on));
     }
 
     // ==================== 设备控制 ====================
 
-    /** 设备端录像控制：{@code start} / {@code stop}。 */
+    /**
+     * 设备端录像控制：{@code start} / {@code stop}。
+     *
+     * <p>SDK 直连设备走<b>改录像计划</b>：大华没有「开始/停止录像」的开关接口，
+     * 设备侧录像完全由 {@code Record} 配置项里的时间段决定。
+     * 注意 {@code CLIENT_RecordStartEx} 录的是<b>平台机器的磁盘</b>，不是设备 SD 卡，
+     * 语义不对，所以不用。
+     */
     public void recordControl(String channelId, String command, Integer streamNumber) {
-        String value = switch (normalize(command)) {
-            case "start" -> "Record";
-            case "stop" -> "StopRecord";
+        boolean start;
+        String value;
+        switch (normalize(command)) {
+            case "start" -> {
+                start = true;
+                value = "Record";
+            }
+            case "stop" -> {
+                start = false;
+                value = "StopRecord";
+            }
             default -> throw BizException.badRequest("不支持的录像指令：" + command);
-        };
+        }
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaRecordPlan.setRecording(t.sipTarget(), t.deviceId(), start);
+            return;
+        }
+        String v = value;
         sendControl(channelId, deviceId -> ManscdpBuilder.recordControl(
-                client().nextSn(), deviceId, value, streamNumber));
+                client().nextSn(), deviceId, v, streamNumber));
     }
 
-    /** 布防 / 撤防。 */
+    /**
+     * 布防 / 撤防。
+     *
+     * <p>SDK 直连设备走 {@code Alarm} 配置项的 {@code Enable} —— 大华 IPC
+     * 没有独立的布防接口，通道级报警使能就是它。
+     */
     public void guard(String channelId, String command) {
-        String value = switch (normalize(command)) {
-            case "setguard" -> "SetGuard";
-            case "resetguard" -> "ResetGuard";
+        boolean on;
+        String value;
+        switch (normalize(command)) {
+            case "setguard" -> {
+                on = true;
+                value = "SetGuard";
+            }
+            case "resetguard" -> {
+                on = false;
+                value = "ResetGuard";
+            }
             default -> throw BizException.badRequest("不支持的布防指令：" + command);
-        };
+        }
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaConfigEdit.setTopLevelBoolean(t.sipTarget(), t.deviceId(),
+                    "Alarm", "Enable", on);
+            return;
+        }
+        String v = value;
         sendControl(channelId,
-                deviceId -> ManscdpBuilder.guardControl(client().nextSn(), deviceId, value));
+                deviceId -> ManscdpBuilder.guardControl(client().nextSn(), deviceId, v));
     }
 
-    /** 设备远程重启（标准 A.2.3.1.3）。 */
+    /**
+     * 设备远程重启（标准 A.2.3.1.3）。
+     *
+     * <p><b>SDK 直连设备重启后会断线几十秒</b>，期间预览与录像全部中断。
+     */
     public void teleBoot(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaCapability.reboot(t.sipTarget());
+            return;
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.teleBoot(client().nextSn(), deviceId));
     }
 
-    /** 强制关键帧（标准 A.2.3.1.7）。 */
+    /**
+     * 强制关键帧（标准 A.2.3.1.7）。
+     *
+     * <p><b>SDK 直连设备做不到</b>：大华 NetSDK 没有强制关键帧接口，
+     * 也没有对应的 {@code CtrlType}。可行路径只有在推流侧让 ZLM 重新请求 GOP，
+     * 与设备无关。这里如实报错而不是假装成功。
+     */
     public void forceIFrame(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，大华 SDK 没有强制关键帧接口；"
+                    + "需要立即刷新画面请改用「重新打开预览」");
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.forceIFrame(client().nextSn(), deviceId));
     }
 
     /** 存储卡格式化（标准 A.2.3.1.13）：{@code id=0} 表示全部。 */
     public void formatSdCard(String channelId, Integer sdCardId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，当前 SDK 版本没有存储卡结构体，无法下发格式化；"
+                    + "请在设备 Web 界面操作");
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.formatSdCard(
                 client().nextSn(), deviceId, sdCardId == null ? 0 : sdCardId));
     }
 
     /** 报警复位（标准 A.2.3.1.9）。 */
     public void alarmReset(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            dahuaCapability.clearAlarm(t.sipTarget(), t.deviceId());
+            return;
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.alarmReset(client().nextSn(), deviceId));
     }
 
     /**
-     * 设备校时（标准 A.2.3.1.9 / 9.12）。
+     * 设备校时（标准 A.2.3.1.9 / 9.12）。设备时钟漂移会让录像 {@code StartTime/EndTime}
+     * 与平台检索区间对不上，用户查「昨天下午 3 点」什么都查不到而录像其实存在。
      *
-     * <p>把平台当前时间下发给设备。设备时钟漂移会让它上报的录像
-     * {@code StartTime/EndTime} 与平台检索区间对不上 ——
-     * 用户按「昨天下午 3 点」查录像会什么都查不到，而录像其实存在。
-     * 这类问题排查成本极高（看起来像设备没录像），所以提供手动校时入口，
-     * 也便于定时任务批量校准。
-     *
-     * @param channelId 通道编码；内部会换算成 SIP 寻址用的设备编码
-     * @param localTime 要下发的本地时间；{@code null} 表示用平台当前时间
+     * @param localTime 要下发的时间；{@code null} 表示平台当前时间
      */
     public void syncTime(String channelId, java.time.LocalDateTime localTime) {
         java.time.LocalDateTime t = localTime == null
                 ? java.time.LocalDateTime.now() : localTime;
-        // 格式严格：yyyy-MM-dd'T'HH:mm:ss。带毫秒或时区后缀会被设备判非法
+        Target target = target(channelId);
+        if (providerOf(target.sipTarget()) != null) {
+            dahuaCapability.setDeviceTime(target.sipTarget(), t);
+            return;
+        }
+        // 格式严格 yyyy-MM-dd'T'HH:mm:ss：带毫秒或时区后缀会被设备判非法
         String text = t.format(java.time.format.DateTimeFormatter
                 .ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
         sendControl(channelId, deviceId ->
@@ -530,32 +794,84 @@ public class ControlService {
                 channelId, t.sipTarget(), event, exp);
     }
 
-    /** 查询设备状态（标准 9.6）。 */
+    /**
+     * 查询设备状态（标准 9.6）。
+     *
+     * <p>SDK 直连设备是同步查询的：直接打日志并在返回值之外不产生副作用。
+     * 真正的状态（在线、录像中、设备时间）已经在设备巡检里持续采集，
+     * 这里只回复一句「已同步查询」，避免前端以为要等异步应答。
+     */
     public void queryDeviceStatus(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            var time = dahuaCapability.deviceTime(t.sipTarget());
+            log.info("大华设备状态（同步查询）: device={} 设备时间={}", t.sipTarget(), time);
+            return;
+        }
         sendControl(channelId,
                 deviceId -> ManscdpBuilder.deviceStatusQuery(client().nextSn(), deviceId));
     }
 
-    /** 查询设备信息（标准 9.5）。 */
+    /**
+     * 查询设备信息（标准 9.5）。
+     *
+     * <p>SDK 直连设备直接读出来打日志（序列号 / 固件 / 通道数 / 设备类型）。
+     */
     public void queryDeviceInfo(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            var info = dahuaCapability.deviceInfo(t.sipTarget());
+            log.info("大华设备信息: device={} sn={} 固件={} 通道数={} 设备类型={}",
+                    t.sipTarget(), info.serial(), info.firmware(),
+                    info.channelCount(), info.deviceType());
+            return;
+        }
         sendControl(channelId,
                 deviceId -> ManscdpBuilder.deviceInfoQuery(client().nextSn(), deviceId));
     }
 
     /** 查询设备配置（标准 A.2.4.7）。 */
     public void queryConfig(String channelId, String configType) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，国标配置项查询不适用；"
+                    + "大华配置请用 /api/v1/dahua/cameraconfig（图像参数）"
+                    + " 或 /api/v1/dahua/record/plan（录像计划）");
+        }
         sendControl(channelId, deviceId -> ManscdpBuilder.configDownloadQuery(
                 client().nextSn(), deviceId, configType));
     }
 
     /** 查询存储卡状态（2022）。 */
     public void querySdCardStatus(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            throw BizException.badRequest("该设备通过 " + providerOf(t.sipTarget()).kind().code()
+                    + " 接入，当前 SDK 版本没有存储卡状态结构体，无法查询");
+        }
         sendControl(channelId,
                 deviceId -> ManscdpBuilder.sdCardStatusQuery(client().nextSn(), deviceId));
     }
 
-    /** 查询 PTZ 精确状态（2022）。 */
+    /**
+     * 查询 PTZ 精确状态（2022）。
+     *
+     * <p>SDK 直连设备是<b>同步查询</b>：直接读云台当前角度并在返回前拿到结果，
+     * 所以此处只记录日志，不需要“下发+等应答”。
+     */
     public void queryPtzPosition(String channelId) {
+        Target t = target(channelId);
+        if (providerOf(t.sipTarget()) != null) {
+            int ch = dahuaCapability.sdkChannel(
+                    dahuaCapability.requireSession(t.sipTarget()), t.sipTarget(), t.deviceId());
+            var pos = dahuaCapability.ext().position(
+                    dahuaCapability.requireSession(t.sipTarget()), ch);
+            log.info("大华云台位置（同步查询）: channel={} {}", t.deviceId(),
+                    pos == null ? "设备未返回"
+                            : "pan=" + pos.pan() + " tilt=" + pos.tilt() + " zoom=" + pos.zoom());
+            return;
+        }
         sendControl(channelId,
                 deviceId -> ManscdpBuilder.ptzPositionQuery(client().nextSn(), deviceId));
     }
@@ -608,49 +924,51 @@ public class ControlService {
         client().sendMessage(t.sipTarget(), sb.toString());
     }
 
-    /** 设备软件升级（2022）。 */
-    public void deviceUpgrade(String channelId, String firmware, String fileUrl, String manufacturer) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("<Control><CmdType>DeviceUpgrade</CmdType>")
-                .append("<SN>").append(client().nextSn()).append("</SN>")
-                .append("<DeviceID>").append(channelId).append("</DeviceID>")
-                .append("<Firmware>").append(escape(nz(firmware))).append("</Firmware>")
-                .append("<FileURL>").append(escape(nz(fileUrl))).append("</FileURL>")
-                .append("<Manufacturer>").append(escape(nz(manufacturer))).append("</Manufacturer>")
-                .append("</Control>");
-        Target t = target(channelId);
-        client().sendMessage(t.sipTarget(), sb.toString());
+    /**
+     * 设备软件升级（A.2.3.1.12）。命令发出即返回，最终结果由设备另行通知
+     * （A.2.5.9 {@code DeviceUpgradeResult}）。
+     *
+     * <p>这里等的是 A.2.6.2 的<b>控制应答</b>（受不受理），不是升级结果 ——
+     * 升级要下载固件再刷写，几分钟到几十分钟都有可能，不能同步等。
+     */
+    public ControlResultVo deviceUpgrade(String channelId, String firmware,
+                                         String fileUrl, String manufacturer) {
+        // SessionID 由平台生成：32 位十六进制，正好落在标准要求的 32~128 字节区间，
+        // 设备在结果通知里原样带回，用来关联本次升级
+        String sessionId = UUID.randomUUID().toString().replace("-", "");
+        ControlResultVo vo = sendControlAndAwait(channelId, sn -> ManscdpBuilder.deviceUpgrade(
+                sn, channelId, firmware, fileUrl, manufacturer, sessionId));
+        vo.setSessionId(sessionId);
+        return vo;
     }
 
     /**
-     * 目标跟踪控制（2022）。
+     * 目标跟踪控制（A.2.3.1.14）：{@code Auto} / {@code Manual} / {@code Stop}。
      *
-     * <p>{@code Auto} 自动跟踪 / {@code Manual} 手动框选跟踪 / {@code Stop} 停止。
-     * 手动模式需携带全景窗口与框选坐标。
+     * <p>手动跟踪要让设备把框选位置换算成 PTZ 动作，6 个坐标缺一不可，
+     * 少一个设备就算不出转向角度，所以这里直接拒掉而不是发一条残缺命令。
+     *
+     * <p>{@code Auto} 的跟踪算法在<b>设备侧</b>（球机智能分析固件），
+     * 平台只负责把命令发对。设备不支持时标准里没有替代通路。
      */
-    public void targetTrack(String channelId, String targetTrack, String deviceId2,
-                            Integer length, Integer width, Integer midpointX, Integer midpointY,
-                            Integer lengthX, Integer lengthY) {
+    public ControlResultVo targetTrack(String channelId, String targetTrack, String deviceId2,
+                                       Integer length, Integer width,
+                                       Integer midpointX, Integer midpointY,
+                                       Integer lengthX, Integer lengthY) {
         String mode = targetTrack == null ? "Stop" : targetTrack.trim();
-        StringBuilder sb = new StringBuilder();
-        sb.append("<Control><CmdType>TargetTrack</CmdType>")
-                .append("<SN>").append(client().nextSn()).append("</SN>")
-                .append("<DeviceID>").append(channelId).append("</DeviceID>")
-                .append("<TargetTrack>").append(mode).append("</TargetTrack>");
-        if (deviceId2 != null && !deviceId2.isBlank()) {
-            sb.append("<DeviceID2>").append(deviceId2).append("</DeviceID2>");
+        if (!"Auto".equalsIgnoreCase(mode) && !"Manual".equalsIgnoreCase(mode)
+                && !"Stop".equalsIgnoreCase(mode)) {
+            throw BizException.badRequest("TargetTrack 取值必须是 Auto / Manual / Stop：" + mode);
         }
-        if ("Manual".equalsIgnoreCase(mode)) {
-            sb.append("<Length>").append(nz(length)).append("</Length>")
-                    .append("<Width>").append(nz(width)).append("</Width>")
-                    .append("<MidpointX>").append(nz(midpointX)).append("</MidpointX>")
-                    .append("<MidpointY>").append(nz(midpointY)).append("</MidpointY>")
-                    .append("<LengthX>").append(nz(lengthX)).append("</LengthX>")
-                    .append("<LengthY>").append(nz(lengthY)).append("</LengthY>");
+        if ("Manual".equalsIgnoreCase(mode)
+                && (length == null || width == null || midpointX == null
+                || midpointY == null || lengthX == null || lengthY == null)) {
+            throw BizException.badRequest(
+                    "手动跟踪需要完整框选参数：length / width / midpointx / midpointy / lengthx / lengthy");
         }
-        sb.append("</Control>");
-        Target t = target(channelId);
-        client().sendMessage(t.sipTarget(), sb.toString());
+        return sendControlAndAwait(channelId, sn -> ManscdpBuilder.targetTrack(
+                sn, channelId, mode, deviceId2,
+                length, width, midpointX, midpointY, lengthX, lengthY));
     }
 
     // ==================== 报警通知 / 喊话 ====================
@@ -683,10 +1001,8 @@ public class ControlService {
     }
 
     /**
-     * 语音喊话（标准 A.2.3.1.11 Broadcast）。
-     *
-     * <p>平台先发 {@code Broadcast} 通知，设备回 INVITE（{@code s=AudioBroadcast}），
-     * 媒体侧由 {@code BroadcastService} 建立下行通道；音频数据通过 WebSocket 持续推送。
+     * 语音喊话（标准 A.2.3.1.11 Broadcast）：平台发通知，设备回 INVITE（{@code s=AudioBroadcast}），
+     * 媒体侧由 {@code BroadcastService} 建立下行通道，音频经 WebSocket 持续推送。
      */
     public void talk(String channelId, String sourceId) {
         Target t = target(channelId);
@@ -704,10 +1020,6 @@ public class ControlService {
 
     private static int nz(Integer v) {
         return v == null ? 0 : v;
-    }
-
-    private static String nz(String v) {
-        return v == null ? "" : v;
     }
 
     private static String escape(String v) {

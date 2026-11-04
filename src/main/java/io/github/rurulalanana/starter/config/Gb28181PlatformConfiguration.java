@@ -34,33 +34,16 @@ public class Gb28181PlatformConfiguration {
                 .sipHost(props.getSipHost())
                 .sipAdvertisedIp(props.getSipAdvertisedIp())
                 .sipPort(props.getSipPort())
-                /*
-                 * 用 CredentialProvider 而不是 sipPassword：
-                 * sipPassword 在构造时被读成常量，之后改配置必须重启；
-                 * CredentialProvider 是<b>每次 REGISTER 校验时</b>调用的函数，
-                 * 因此可以读运行时配置实现「改密码立即生效」。
-                 *
-                 * 用 ObjectProvider 延迟取：本 bean 构造得很早（信令栈要立刻起），
-                 * 直接注入 RuntimeConfigService 会连带提前初始化数据源。
-                 */
+                // 用 CredentialProvider 而不是 sipPassword：后者在构造时被读成常量，改密码必须重启；
+                // provider 每次 REGISTER 校验时调用，可读运行时配置实现「改密码立即生效」。
+                // ObjectProvider 延迟取：本 bean 构造得很早，直接注入会提前初始化数据源。
                 .credentialProvider(runtimeSipPassword(configProvider, props))
-                /*
-                 * 接入控制（黑白名单）：同样是每次 REGISTER 现取。
-                 *
-                 * 用 ObjectProvider 而不是直接注入，理由和上面一样：
-                 * 本 bean 构造得很早，直接注入会连带提前初始化数据源。
-                 *
-                 * 拿不到就返回 null（不装配）—— 此时平台行为与加黑白名单之前
-                 * 完全一致，不会因为配置服务没就绪而把所有设备挡在外面。
-                 */
+                // 黑白名单同样每次 REGISTER 现取；拿不到就返回 null（不装配），
+                // 行为与加黑白名单之前一致，不会因配置服务未就绪把所有设备挡在外面。
                 .accessControl(aclProvider.getIfAvailable())
-                /*
-                 * 上级平台判定器：让媒体层能分辨「这个 INVITE 来自我的上级」。
-                 *
-                 * 不注入时级联上行点播就退化成「开接收会话等设备推流」——
-                 * 上级永远等不到数据。判据来自配置表，但用无依赖的内存集合承载，
-                 * 避开「媒体平台 ↔ 链路服务」的 bean 循环。
-                 */
+                // 上级平台判定器：媒体层靠它分辨「INVITE 来自我的上级」。不注入时级联上行点播会退化成
+                // 「开接收会话等设备推流」，上级永远等不到数据。判据来自配置表，用无依赖的内存集合承载，
+                // 避开「媒体平台 ↔ 链路服务」的 bean 循环。
                 .uplinkPlatformChecker(lazyUplinkChecker(cascadeParentProvider))
                 .sipTransports(props.getSipTransports())
                 .httpPort(props.getHttpPort())
@@ -70,25 +53,19 @@ public class Gb28181PlatformConfiguration {
                 .app(props.getApp())
                 .rtpSinglePort(props.isRtpSinglePort())
                 .rtpSinglePortNumber(props.getRtpSinglePortNumber())
-                // RTP 收流缓冲：不显式传就用 MediaServerProperties 的 8MB 默认值。
-                // 只在配置了正数时覆盖，避免有人把 yml 写成 0 反而把缓冲清零。
+                // RTP 收流缓冲：只在配置了正数时覆盖，避免 yml 写成 0 反而把缓冲清零。
                 .udpRecvSocketBuffer(props.getUdpRecvSocketBuffer() > 0
                         ? props.getUdpRecvSocketBuffer() : 8 * 1024 * 1024)
-                /*
-                 * 等轨就绪的时间：决定「慢起推的录像段能不能播」。
-                 *
-                 * ZLM 默认 10 秒，实测设备（经下级平台转发）最慢要 11 秒才推视频，
-                 * 超过阈值就会被永久丢弃 H264 轨，媒体源只剩音频 —— 现象是
-                 * 「某些录像段怎么都播不出来」。只在配置了正数时覆盖。
-                 */
+                // 等轨就绪时间：ZLM 默认 10 秒，实测经下级平台转发的设备最慢 11 秒才推视频，
+                // 超时会被永久丢弃 H264 轨、只剩音频（现象是「某些录像段怎么都播不出来」）。
                 .waitTrackReadyMs(props.getWaitTrackReadyMs() > 0
                         ? props.getWaitTrackReadyMs() : 30_000)
                 .autoRecord(props.isAutoRecord())
                 .recordMaxSecond(props.getRecordMaxSecond())
                 .streamNoneReaderDelayMs(props.getStreamNoneReaderDelayMs())
                 .recordRoot(props.resolvedRecordRoot());
-        // 注意：Lombok @Builder.Default 只在"未显式赋值"时生效，
-        // 这里配置为空时不能传 null，否则 mediaIp 会变成 null（SDP 里写成 IN IP4 null）
+        // Lombok @Builder.Default 只在「未显式赋值」时生效：配置为空时不能传 null，
+        // 否则 mediaIp 变 null，SDP 里会写成 IN IP4 null。
         if (StringUtils.hasText(props.getMediaIp())) {
             builder.mediaIp(props.getMediaIp());
         }
@@ -109,21 +86,9 @@ public class Gb28181PlatformConfiguration {
     }
 
     /**
-     * SIP 注册鉴权：每次校验时读运行时配置。
-     *
-     * <p><b>为什么不用 {@code sipPassword} 直接传常量</b>：那样只能在启动时确定，
-     * 改密码必须重启（会中断所有录像与注册）。{@code credentialProvider}
-     * 是 {@code GbSipListener} 在<b>每次收到 REGISTER</b> 时调用的函数，
-     * 因此改成读 {@link RuntimeConfigService} 就能「保存后立即生效」。
-     *
-     * <p><b>为什么必须实现 {@code isEnabled()}</b>：密码留空 = 不鉴权，
-     * 而「不鉴权」不能靠 {@code passwordOf} 返回 {@code null} 表达
-     * （那个语义是「用户不存在 → 403」，清空密码会把所有设备挡在门外）。
-     * 参考站也有「设备统一接入密码」这一项，运维会期望它可清空。
-     *
-     * @param configProvider 延迟取配置服务（避免提前初始化数据源）
-     * @param props          启动配置，仅在配置服务不可用时兜底
-     * @return 凭据提供者
+     * SIP 注册鉴权：每次校验时读运行时配置。用常量的话改密码必须重启（中断所有录像与注册）。
+     * 必须实现 {@code isEnabled()}：密码留空 = 不鉴权，而「不鉴权」不能靠 {@code passwordOf}
+     * 返回 {@code null} 表达（那语义是「用户不存在 → 403」，会把所有设备挡在门外）。
      */
     private static CredentialProvider runtimeSipPassword(
             ObjectProvider<RuntimeConfigService> configProvider, Gb28181Properties props) {
@@ -141,13 +106,7 @@ public class Gb28181PlatformConfiguration {
         };
     }
 
-    /**
-     * 取当前生效的接入密码。
-     *
-     * @param configProvider 配置服务
-     * @param props          启动配置（配置服务未就绪时兜底）
-     * @return 密码；可能为空串
-     */
+    /** 取当前生效的接入密码；配置服务未就绪时回退 yml 值，绝不放空。 */
     private static String currentPassword(
             ObjectProvider<RuntimeConfigService> configProvider, Gb28181Properties props) {
         RuntimeConfigService cfg = configProvider.getIfAvailable();
@@ -161,12 +120,8 @@ public class Gb28181PlatformConfiguration {
     }
 
     /**
-     * 上级平台判定器（延迟取 bean）。
-     *
-     * <p>传的是 lambda 而不是当时取到的实例：媒体平台 bean 构造得很早，
-     * 那时 {@code CascadeParentRegistry} 可能还没被创建。
-     * 每次 INVITE 才去 {@code getIfAvailable()}，拿不到就返回 {@code false}
-     * （当作普通设备 INVITE 处理，与本功能不存在时一致）。
+     * 上级平台判定器（延迟取 bean）。传 lambda 而非当时的实例：媒体平台构造得很早，
+     * {@code CascadeParentRegistry} 可能还没创建。拿不到返回 {@code false}（当普通设备 INVITE 处理）。
      */
     private static java.util.function.Predicate<String> lazyUplinkChecker(
             ObjectProvider<CascadeParentRegistry> provider) {

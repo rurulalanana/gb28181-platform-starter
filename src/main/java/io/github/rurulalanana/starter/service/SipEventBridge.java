@@ -20,15 +20,11 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * 信令事件 → 持久化 的桥接器。
+ * 信令事件 → 持久化的桥接器：平台启动时通过 {@code setCallbackDelegate} 挂到
+ * {@code Gb28181MediaService} 上，即可不改依赖模块而感知注册、心跳、目录、报警、级联等事件。
  *
- * <p>{@code gb28181-sip-zlm} 的 {@code Gb28181MediaService} 是 SIP 回调的唯一接收者，
- * 平台启动时通过 {@code setCallbackDelegate} 挂上本类，即可在不改动依赖模块的前提下
- * 感知注册、心跳、目录应答、报警通知、级联注册等事件并落库。
- *
- * <p><b>线程模型</b>：回调在 SIP 协议栈线程上执行，禁止阻塞。
- * 因此这里只做「解析 + 单条 insert/update」，耗时操作（如全量目录同步）交给
- * {@link PlatformAsyncExecutor}。
+ * <p>回调在 SIP 协议栈线程上执行，禁止阻塞：这里只做「解析 + 单条 insert/update」，
+ * 耗时操作（如全量目录同步）交给 {@link PlatformAsyncExecutor}。
  */
 @Slf4j
 @Component
@@ -48,6 +44,8 @@ public class SipEventBridge implements SipCallback {
     private final CatalogPager catalogPager;
     /** 预置位查询应答的落缓存与回显。 */
     private final PresetService presetService;
+    /** 控制应答（A.2.6.2）的等待位，让控制类接口能拿到设备真实回话。 */
+    private final ControlAckService controlAckService;
 
     /** 平台启动后把本对象挂为信令回调委派。 */
     @PostConstruct
@@ -63,19 +61,10 @@ public class SipEventBridge implements SipCallback {
     // ==================== 注册 / 心跳 ====================
 
     /**
-     * 这个来源值不值得继续打交道。
-     *
-     * <p>SIP 端口开在公网后，扫描器会不断发 REGISTER / MESSAGE。它们的编号是
-     * 随手编的（{@code .} / {@code 059} / {@code 9999}），而平台原来会接着做
-     * 「自动采集」——向那个公网 IP 发 Catalog/DeviceInfo/DeviceStatus 的 MESSAGE，
-     * 对方不答应，每条都要等满 32 秒事务超时才罢休。
-     *
-     * <p><b>为什么不直接用 {@code registry} 判断</b>：注册表已经把那台「设备」
-     * 当合法来源收进去了，用它判断等于没判。
-     *
-     * <p><b>只在格式不合法时才查库</b>（合法 20 位编码直接放行）：扫描器每分钟
-     * 才几次，一次带索引的单行查询可忽略；而合法设备完全不增加开销。
-     * 这样手工添加的自定义编号（库里已有记录）仍然会被采集。
+     * 这个来源值不值得继续打交道。SIP 端口开在公网后扫描器会不断发 REGISTER / MESSAGE，
+     * 编号是随手编的（{@code .} / {@code 059} / {@code 9999}）；若照旧去自动采集，
+     * 每条 MESSAGE 都要等满 32 秒事务超时。不能用 {@code registry} 判断（它已把对方当合法来源收下）。
+     * 合法 20 位编码直接放行，只在格式非法时查一次库 —— 手工添加的自定义编号仍会被采集。
      */
     private boolean acceptable(String deviceId) {
         if (io.github.rurulalanana.gb28181.sip.constant.GbId.isValidDeviceId(deviceId)) {
@@ -140,26 +129,33 @@ public class SipEventBridge implements SipCallback {
             case "MobilePosition" -> asyncExecutor.run("移动位置落库",
                     () -> deviceService.savePosition(msg.getDeviceId(), msg.getDeviceId(), msg));
             /*
-             * 预置位查询应答（A.2.4.8）。
-             *
-             * <p><b>这里此前是空的</b>：能下发查询（ControlService#queryPresets），
-             * 但设备的应答落到 default 分支被静默丢弃，
-             * 表现为「点了查询预置位，什么都没发生」。数据解析与缓存见 PresetService。
-             *
-             * <p>传 {@code msg.getSn()}：设备会把预置位拆成多帧上报（实测 5 个预置位
-             * 发了两帧：4+1），同一次查询的各帧 SN 相同，PresetService 靠它区分
-             * 「同一批次的后续帧」与「新的一次查询」，否则后帧会把前帧覆盖掉。
-             *
-             * <p>传 {@code elements("PresetList")} 而不是 {@code items("PresetList")}：
-             * 后者只取第一个容器，一帧里若有多个容器就会漏。
+             * 预置位查询应答（A.2.4.8）。此前这里是空的：能下发查询但应答被 default 静默丢弃，
+             * 表现为「点了查询预置位，什么都没发生」。
+             * 传 {@code msg.getSn()}：设备会把预置位拆成多帧上报（实测 5 个发两帧 4+1），
+             * 同一次查询的各帧 SN 相同，PresetService 靠它区分后续帧与新查询，否则后帧覆盖前帧。
+             * 用 {@code elements("PresetList")} 而非 {@code items(...)}：后者只取第一个容器。
              */
             case "PresetQuery" -> asyncExecutor.run("预置位落缓存",
                     () -> presetService.onPresetList(msg.getDeviceId(),
                             msg.getSn(), msg.elements("PresetList")));
+            /*
+             * 设备控制应答（A.2.6.2）。{@code Result} 只表示「命令受不受理」，
+             * 不是「动作做完没有」；但它是平台唯一能拿到的设备回话。
+             * 目标跟踪、拉框缩放、设备升级靠它把「已下发」变成「设备说了什么」。
+             */
+            case "DeviceControl" -> controlAckService.onResponse(
+                    msg.getDeviceId(), msg.getSn(), msg.firstText("Result"));
+            /*
+             * 设备软件升级结果（A.2.5.9）。升级要下载固件再刷写，时长从几分钟到几十分钟，
+             * 没法同步等，只能靠这条通知收尾。
+             */
+            case "DeviceUpgradeResult" -> log.info(
+                    "设备升级结果: device={} session={} result={} firmware={} 失败原因={}",
+                    msg.getDeviceId(), msg.firstText("SessionID"), msg.firstText("UpgradeResult"),
+                    msg.firstText("Firmware"), msg.firstText("UpgradeFailedReason"));
             default -> {
-                // DeviceStatus / RecordInfo / ConfigDownload 等由各自的服务同步等待处理。
-                // 打一条 DEBUG：设备私有/未适配的命令能在这里被看见，
-                // 不然「设备明明回了、平台却说没有」这类问题只能靠抓包。
+                // DeviceStatus / RecordInfo / ConfigDownload 等由各自服务同步等待；打一条 DEBUG
+                // 让未适配的私有命令能被看见，否则「设备回了、平台说没有」只能靠抓包。
                 log.debug("未处理的 MANSCDP 应答: cmd={} device={} 子元素={}",
                         cmdType, msg.getDeviceId(), msg.childNames());
             }
@@ -174,11 +170,9 @@ public class SipEventBridge implements SipCallback {
         }
         List<CatalogItem> items = parseCatalog(msg);
         if (items.isEmpty()) {
-            // 空目录不等于「什么都不用做」：下级把所有通道都删了时，
-            // 应答就是 SumNum=0 + 空的 <DeviceList Num="0"/>。
-            // 此时必须当作全量快照去清理，否则库里会永远留着幽灵通道。
-            // 但只有当设备确实声明了 SumNum=0 才能确定是「真的空」；
-            // 没带 SumNum 的空应答可能只是分页的最后一帧，不能据此删数据。
+            // 空目录不等于「什么都不用做」：下级删光通道时就是 SumNum=0 + 空 DeviceList，
+            // 必须当全量快照清理，否则幽灵通道永远留着；但只有声明 SumNum=0 才能确定是真的空，
+            // 没带 SumNum 的空应答可能只是分页最后一帧。
             Integer declared = msg.intOf("SumNum");
             if (declared != null && declared == 0) {
                 log.info("收到空目录应答: device={} 按全量快照清理已下线通道", deviceId);
@@ -190,15 +184,15 @@ public class SipEventBridge implements SipCallback {
             return;
         }
         // 分页聚合：下级平台（如 LiveGBS）常按标准一帧一页上报，
-        // 不聚合会把「3 个通道」当成 3 次「只有 1 个通道的全量目录」
+        // 不聚合会把「3 个通道」读成 3 次「只有 1 个通道的全量目录」
         Integer sumNum = msg.intOf("SumNum");
         CatalogPager.Result merged = catalogPager.accept(deviceId, msg.getSn(), sumNum, items);
         if (merged == null) {
             return;
         }
         asyncExecutor.run("目录同步落库", () -> {
-            // 应答里混有 <Event>DELETE</Event> 时也要真正删通道：
-            // 收齐时全量快照逻辑本就会删掉未上报的通道，但没收齐时只能靠这里。
+            // 应答里混有 <Event>DELETE</Event> 时也要真正删：收齐时全量快照本就会删未上报通道，
+            // 没收齐时只能靠这里。
             for (String removedId : merged.removed()) {
                 deviceService.removeChannel(deviceId, removedId);
             }
@@ -255,19 +249,10 @@ public class SipEventBridge implements SipCallback {
     // ==================== 订阅推送（SIP NOTIFY） ====================
 
     /**
-     * 处理 SIP {@code NOTIFY}（标准 9.11 / RFC 6665）。
-     *
-     * <p><b>为什么必须在这里解析消息体</b>：国标订阅推送有两条完全不同的信令路径，
-     * 二者在协议栈里分派到不同回调，不能只实现其中一条：
-     * <ul>
-     *   <li>{@code MESSAGE} + MANSCDP 体 → {@link #onManscdpRequest}</li>
-     *   <li>{@code NOTIFY} + MANSCDP 体 → <b>本方法</b></li>
-     * </ul>
-     * 早先本方法是空实现（注释误以为 NOTIFY 体也会走 onManscdpRequest），
-     * 结果所有走 NOTIFY 的目录/报警推送被静默丢弃 —— 表现为
-     * 「下级点了推送通道，本级毫无反应」，只能靠重新注册触发全量目录才能看到变化。
-     *
-     * <p>NOTIFY 与 MESSAGE 的语义一致：都是<b>增量通知</b>，不能当全量快照删旧数据。
+     * 处理 SIP {@code NOTIFY}（标准 9.11 / RFC 6665）。国标订阅推送有两条信令路径，
+     * {@code MESSAGE} 走 {@link #onManscdpRequest}，{@code NOTIFY} 走本方法，不能只实现一条。
+     * 早先本方法为空（误以为 NOTIFY 体也走 onManscdpRequest），所有走 NOTIFY 的目录 / 报警推送
+     * 被静默丢弃。语义与 MESSAGE 一致：增量通知，不能当全量快照删旧数据。
      */
     @Override
     public void onNotify(io.github.rurulalanana.gb28181.sip.event.SubscribeEvent event) {
@@ -307,18 +292,22 @@ public class SipEventBridge implements SipCallback {
                     () -> alarmService.onAlarmNotify(from, msg));
             case "MobilePosition" -> asyncExecutor.run("移动位置落库",
                     () -> deviceService.savePosition(from, from, msg));
+            /*
+             * 升级结果也有厂家走 NOTIFY 而不是 MESSAGE（标准只规定它是 A.2.5 通知命令，
+             * 没规定承载在哪个 SIP 方法上），两条路都要接。
+             */
+            case "DeviceUpgradeResult" -> log.info(
+                    "设备升级结果: device={} session={} result={} firmware={} 失败原因={}",
+                    from, msg.firstText("SessionID"), msg.firstText("UpgradeResult"),
+                    msg.firstText("Firmware"), msg.firstText("UpgradeFailedReason"));
             default -> log.debug("NOTIFY 未处理的命令: cmd={} device={}", cmdType, from);
         }
     }
 
     /**
-     * 处理推送来的目录（MESSAGE 与 NOTIFY 共用）。
-     *
-     * <p>推送是<b>增量通知</b>：只包含发生变化的条目，因此恒以
+     * 处理推送来的目录（MESSAGE 与 NOTIFY 共用）：推送是增量通知，恒按
      * {@code fullSnapshot=false} 落库，只做 upsert，绝不清理未提到的通道。
-     *
-     * <p>唯一例外是 {@code <Event>DELETE</Event>}：它明确表示下级删除了该通道，
-     * 必须真正从库里删除，否则幽灵通道永远留着。
+     * 唯一例外是 {@code <Event>DELETE</Event>}：明确表示下级删了该通道，必须真删。
      */
     private void handlePushedCatalog(String deviceId, ManscdpMessage msg, String source) {
         List<CatalogItem> items = parseCatalog(msg);
@@ -334,8 +323,7 @@ public class SipEventBridge implements SipCallback {
         log.info("收到目录变更推送: device={} 来源={} 条目={} 删除={} 下级自报={} 帧数={}",
                 deviceId, source, merged.items().size(), merged.removed().size(),
                 merged.sumNum(), merged.frames());
-        // 先删后存：同一批次里若先 ADD 后 DELETE，聚合器已保证只剩删除项；
-        // 反之（先 DELETE 后 ADD）则只剩 upsert 项，两者不会同时命中同一编码。
+        // 先删后存：聚合器已保证同批次里删除项与 upsert 项不会命中同一编码
         asyncExecutor.run("目录推送落库", () -> {
             for (String removedId : merged.removed()) {
                 deviceService.removeChannel(deviceId, removedId);
@@ -362,17 +350,9 @@ public class SipEventBridge implements SipCallback {
             return null;
         } else if ("Catalog".equals(cmdType)) {
             /*
-             * 这里有两种语义不同的 MANSCDP，必须按 rootName 分流：
-             *
-             *   1) <Query>  —— 上级平台来查我们的目录。**必须应答**，
-             *      否则上级的目录页永远空白（它按 SN 等应答，等不到就超时）。
-             *
-             *   2) <Notify> —— 下级平台主动推送目录变更，只包含变化的条目，
-             *      必须按增量 upsert，绝不能当全量快照。
-             *
-             * <Response>（下级应答我们的目录查询）不在这里处理：
-             * 它走 onManscdpResponse 的 handleCatalog，才有分页聚合 ——
-             * LiveGBS 按标准一帧一页上报，走增量路径会被读成「只有 1 个通道」。
+             * 两种语义不同的 MANSCDP，必须按 rootName 分流：{@code <Query>} 是上级来查我们的目录，
+             * 必须应答（否则上级目录页永远空白）；{@code <Notify>} 是下级推目录变更，按增量 upsert。
+             * {@code <Response>} 走 onManscdpResponse 的 handleCatalog（才有分页聚合）。
              */
             if ("Query".equals(msg.getRootName())) {
                 handleCatalogQuery(event);
@@ -384,14 +364,9 @@ public class SipEventBridge implements SipCallback {
             }
         } else if ("DeviceControl".equals(cmdType)) {
             /*
-             * 上级对我们的通道下发控制（云台、预置位、拉框缩放、布撤防…）。
-             *
-             * 改造前这里没有任何分支 —— DeviceControl 直接落到方法末尾 return null，
-             * 既不给上级回 <Response>，也不把指令转给设备。表现出来的现象是：
-             * 上级点云台按钮一直转圈最后报「控制失败」，而设备完全没动。
-             *
-             * 只处理根元素为 <Control> 的请求：<Response> 形式的 DeviceControl
-             * 是设备对我们下发指令的应答，走 onManscdpResponse，不该在这里再回一次。
+             * 上级下发控制（云台、预置位、拉框缩放、布撤防）。此前这里没有分支：
+             * 既不给上级回 Response，也不转给设备，现象是上级点云台一直转圈报「控制失败」而设备没动。
+             * 只处理 {@code <Control>}：{@code <Response>} 形式的 DeviceControl 是设备对应答，走 onManscdpResponse。
              */
             if ("Control".equals(msg.getRootName())) {
                 handleCascadeControl(event);
@@ -401,17 +376,10 @@ public class SipEventBridge implements SipCallback {
     }
 
     /**
-     * 转发上级的控制指令给设备，并<b>立即</b>应答上级。
-     *
-     * <p>识别来源的方式与目录查询一致：上级永远不注册到本级，只能拿
-     * From 头的平台编码去比对配置里的 {@code parentId}。
-     *
-     * <p>应答时机很关键：设备对云台指令普遍不做应用层应答（国标未强制），
-     * 如果等设备回 {@code <Response>} 再回上级，上级必然超时报「控制失败」，
-     * 而云台其实已经动了。所以这里的 {@code OK} 语义是「已受理」。
-     *
-     * <p>整个流程放异步线程：转发要查库（找通道所属设备、判共享集合），
-     * 而本方法运行在 jain-sip 协议栈线程上，阻塞它会拖慢整个信令栈。
+     * 转发上级的控制指令给设备，并立即应答上级（{@code OK} 语义是「已受理」）。
+     * 识别来源靠 From 头的平台编码比对 {@code parentId}：上级永远不注册到本级。
+     * 不从设备应答再回上级：设备对云台指令普遍不做应用层应答，等它必然超时，而云台已经动了。
+     * 异步执行：转发要查库，而本方法跑在 jain-sip 协议栈线程上。
      */
     private void handleCascadeControl(ManscdpEvent event) {
         String fromId = event.getPeer() == null ? null : event.getPeer().getDeviceId();
@@ -447,15 +415,8 @@ public class SipEventBridge implements SipCallback {
     }
 
     /**
-     * 应答上级平台的目录查询。
-     *
-     * <p>靠 <b>From 头里的平台编码</b>识别来源：上级永远不注册到本级，
-     * 所以注册表里查不到它，只能拿「配置里的 parentId」去比对。
-     * 这一步不能省 —— 不校验来源就等于对任意 IP 开放本级通道清单，
-     * 是一个不该有的信息泄漏。
-     *
-     * <p>应答要放到异步线程：构建目录项可能涉及查库（共享通道列表），
-     * 而本方法运行在 jain-sip 协议栈线程上，阻塞它会拖慢整个信令栈。
+     * 应答上级的目录查询。靠 From 头的平台编码识别来源（上级不注册到本级，注册表查不到它），
+     * 不校验来源等于对任意 IP 开放本级通道清单；异步执行避免阻塞 jain-sip 线程。
      */
     private void handleCatalogQuery(ManscdpEvent event) {
         String fromId = event.getPeer() == null ? null : event.getPeer().getDeviceId();
@@ -495,20 +456,11 @@ public class SipEventBridge implements SipCallback {
     // ==================== 级联 ====================
 
     /**
-     * <b>下级平台</b>注册到本级。
-     *
-     * <p><b>这里绝不能去改 {@code gb_cascade.online}</b>。方向完全不同：
-     * <ul>
-     *   <li>本回调 = 有平台注册<b>进来</b>（它是我们的下级）；</li>
-     *   <li>{@code gb_cascade.online} = 我们注册<b>出去</b>是否成功（那是我们的上级）。</li>
-     * </ul>
-     * 改造前这里调 {@code setOnline(platformId, true)}，按 {@code parentId} 反查配置 ——
-     * 于是一个毫不相干的下级注册进来，只要我们恰好配了同编码的上级，
-     * 界面上就会显示「在线」，而实际上我们到上级的注册可能一直在失败。
-     * 这种<b>虚假在线</b>比不显示更糟：运维会据此判断「级联没问题」，
-     * 然后去别处找原因。
-     *
-     * <p>上行在线状态由 {@link CascadeLinkService} 根据注册结果自己维护。
+     * 下级平台注册到本级。绝不能改 {@code gb_cascade.online}：本回调是「有平台注册进来」（我们的下级），
+     * 而 {@code online} 是「我们注册出去」是否成功（我们的上级）。
+     * 改造前这里按 {@code parentId} 反查配置并置在线，于是不相干的下级注册进来、
+     * 只要恰好配了同编码的上级，界面就显示在线，掩盖了真实的上行注册失败。
+     * 上行状态由 {@link CascadeLinkService} 维护。
      */
     @Override
     public void onCascadePlatformRegister(CascadeEvents.PlatformRegistered event) {
@@ -523,11 +475,8 @@ public class SipEventBridge implements SipCallback {
     }
 
     /**
-     * 上级平台点播本级通道（级联上行）：启动本地流并把 RTP 推给上级。
-     *
-     * <p><b>必须异步</b>：启动流要邀请设备、等它推 PS 上来（实测 1~5 秒），
-     * 而本回调运行在 jain-sip 协议栈线程上 —— 在那里等几秒会把整个信令栈拖死，
-     * 表现是所有设备的心跳都超时。
+     * 上级平台点播本级通道：启动本地流并把 RTP 推给上级。必须异步：启动流要邀请设备并等它推 PS
+     * （实测 1~5 秒），在 jain-sip 协议栈线程上等几秒会把整个信令栈拖死，所有设备心跳都超时。
      */
     @Override
     public void onUplinkCascadePlay(CascadeEvents.UplinkPlay event) {

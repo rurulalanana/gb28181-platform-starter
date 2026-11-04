@@ -21,20 +21,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 接入控制（黑白名单）接口（{@code /api/v1/acl/*}）。
- *
- * <pre>
- * GET  /api/v1/acl/list     查询规则（可按 list_type 过滤）
- * POST /api/v1/acl/add      新增
- * POST /api/v1/acl/remove   删除
- * GET  /api/v1/acl/stats    两种名单各自的条数（界面提示用）
- * </pre>
- *
- * <p><b>保存后立即生效</b>，不需要重启：服务内部维护一份内存快照，
- * 增删后整体替换，SIP 信令线程读到的永远是一份完整规则。
- *
- * <p>只有管理员能改：一条错误的黑名单足以让整个平台的设备全部掉线，
- * 这不该是普通运维随手能做的事。
+ * 接入控制（黑白名单）接口（{@code /api/v1/acl/*}）：list / add / remove / stats。
+ * 保存后立即生效：服务内部维护内存快照，增删后整体替换，SIP 信令线程读到的永远是一份完整规则。
+ * 只有管理员能改：一条错误的黑名单足以让全平台设备掉线。
  */
 @Slf4j
 @RestController
@@ -45,11 +34,7 @@ public class AclController {
 
     private final AccessControlService aclService;
 
-    /**
-     * 查询规则。
-     *
-     * @param listType BLACK / WHITE；留空返回全部
-     */
+    /** 查询规则。{@code listType}：BLACK / WHITE，留空返回全部。 */
     @Operation(summary = "查询规则")
     @GetMapping("/list")
     public ApiResponse<AclListVo> list(
@@ -70,12 +55,8 @@ public class AclController {
     }
 
     /**
-     * 新增规则（立即生效）。
-     *
-     * @param listType BLACK / WHITE
-     * @param kind     DEVICE / PREFIX / IP / CIDR
-     * @param value    匹配值
-     * @param remark   备注（建议写明原因）
+     * 新增规则（立即生效）。{@code listType}：BLACK / WHITE；{@code kind}：DEVICE / PREFIX / IP / CIDR；
+     * {@code value} 为匹配值；{@code remark} 建议写明原因。
      */
     @Operation(summary = "新增规则（立即生效）")
     @PostMapping("/add")
@@ -88,7 +69,6 @@ public class AclController {
         return ApiResponse.ok(toVo(aclService.add(listType, kind, value, remark)));
     }
 
-    /** 删除规则（立即生效）。 */
     @Operation(summary = "删除规则（立即生效）")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam Long id) {

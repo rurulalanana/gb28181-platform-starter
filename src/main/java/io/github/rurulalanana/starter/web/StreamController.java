@@ -34,18 +34,8 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * 实时直播接口。
- *
- * <pre>
- * POST /api/v1/stream/start          开始直播
- * POST /api/v1/stream/stop           停止直播
- * GET  /api/v1/stream/list           直播流列表
- * GET  /api/v1/stream/info           单条直播流信息
- * POST /api/v1/stream/relay/start    转推
- * GET  /api/v1/stream/relay/list     转推列表
- * POST /api/v1/stream/relay/stop     停止转推
- * POST /api/v1/stream/osd            视频水印
- * </pre>
+ * 实时直播接口（{@code /api/v1/stream/*}）：start / stop / list / info，
+ * 以及转推 relay/start|list|stop 与水印 osd。
  */
 @Slf4j
 @RestController
@@ -61,9 +51,7 @@ public class StreamController {
     private final Gb28181Properties props;
 
     /**
-     * 开始直播。
-     *
-     * <p>{@code serial} = 设备编码，{@code code} = 通道编码（省略则视为设备直连，
+     * 开始直播。{@code serial} = 设备编码，{@code code} = 通道编码（省略则视为设备直连，
      * 即设备编码本身就是通道编码）。
      */
     @Operation(summary = "开始直播")
@@ -82,7 +70,6 @@ public class StreamController {
         return ApiResponse.ok(vo);
     }
 
-    /** 停止直播。 */
     @Operation(summary = "停止直播")
     @PostMapping("/stop")
     public ApiResponse<StreamStopVo> stop(@RequestParam String serial,
@@ -108,7 +95,6 @@ public class StreamController {
         return ApiResponse.ok(vo);
     }
 
-    /** 直播流列表。 */
     @Operation(summary = "直播流列表")
     @GetMapping("/list")
     public ApiResponse<StreamListVo> list(
@@ -122,7 +108,6 @@ public class StreamController {
                 streamService.liveList(), start, limit, serial, code, q));
     }
 
-    /** 单条直播流信息。 */
     @Operation(summary = "单条直播流信息")
     @GetMapping("/info")
     public ApiResponse<StreamVo> info(@RequestParam String streamid,
@@ -137,11 +122,7 @@ public class StreamController {
 
     // ==================== 转推 ====================
 
-    /**
-     * 直播转推。
-     *
-     * <p>用 ZLMediaKit 推流器把本地流推到外部 RTMP/RTSP 地址。
-     */
+    /** 直播转推：用 ZLMediaKit 推流器把本地流推到外部 RTMP/RTSP 地址。 */
     @Operation(summary = "直播转推")
     @PostMapping("/relay/start")
     public ApiResponse<RelayStartVo> relayStart(@RequestParam String serial,
@@ -158,7 +139,6 @@ public class StreamController {
         return ApiResponse.ok(vo);
     }
 
-    /** 转推列表。 */
     @Operation(summary = "转推列表")
     @GetMapping("/relay/list")
     public ApiResponse<RelayListVo> relayList(@RequestParam String serial,
@@ -172,7 +152,6 @@ public class StreamController {
         return ApiResponse.ok(vo);
     }
 
-    /** 停止转推。 */
     @Operation(summary = "停止转推")
     @PostMapping("/relay/stop")
     public ApiResponse<RelayStopVo> relayStop(@RequestParam String serial,
@@ -192,9 +171,7 @@ public class StreamController {
     }
 
     /**
-     * 视频水印。
-     *
-     * <p>嵌入式模式未注册 {@code /index/api/addFFmpegSource}，无法动态加水印；
+     * 视频水印。嵌入式模式未注册 {@code /index/api/addFFmpegSource}，无法动态加水印；
      * 需在独立部署的 MediaServer 上配置 {@code [ffmpeg]} 转码实现。
      */
     @Operation(summary = "视频水印")

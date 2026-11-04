@@ -36,14 +36,8 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 设备 / 通道的持久化与状态维护。
- *
- * <p>职责：
- * <ul>
- *   <li>把 SIP 侧的注册、心跳、目录应答落库（{@code gb_device} / {@code gb_channel}）</li>
- *   <li>把 ZLM 侧的流上下线映射到通道的 {@code status} / {@code streamId}</li>
- *   <li>提供在线统计等聚合查询</li>
- * </ul>
+ * 设备 / 通道的持久化与状态维护：SIP 注册 / 心跳 / 目录应答落库，
+ * ZLM 流上下线映射到通道的 {@code status} / {@code streamId}，以及在线统计等聚合查询。
  */
 @Slf4j
 @Service
@@ -60,13 +54,11 @@ public class DeviceService {
 
     // ==================== 查询 ====================
 
-    /** 全部设备。 */
     public List<GbDevice> allDevices() {
         return deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
                 .orderByAsc(GbDevice::getDeviceId));
     }
 
-    /** 按设备编号查询。 */
     public GbDevice findDevice(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) {
             return null;
@@ -76,11 +68,86 @@ public class DeviceService {
     }
 
     /**
-     * 设备是否在线。
+     * 批量查设备名 —— 给「列表里每条都要显示设备名」的场景用。
      *
-     * <p>为什么单独开一个方法而不是让调用方读 {@code device.getOnline()}：
-     * 通道列表要按设备批量判断，集中在这里可以让「设备在线」的判定口径
-     * 只有一处，避免各处各写一遍再慢慢走样。
+     * <p><b>为什么必须有这个方法</b>：列表逐条调 {@link #findDevice} 是典型 N+1。
+     * 实测报警列表 5819 条 × 2 次（设备名 + 通道名）= 11638 次跨网查询，
+     * 单次约 25ms → 整个接口 290 秒，页面直接超时打不开。
+     * 一次 {@code IN} 查询把整页需要的名字全取回来。
+     *
+     * @param deviceIds 设备编号集合（允许有空值/重复，内部去重）
+     * @return 设备编号 → 显示名；查不到的键不会出现在 Map 里
+     */
+    public java.util.Map<String, String> deviceNames(Collection<String> deviceIds) {
+        java.util.Set<String> ids = cleanIds(deviceIds);
+        if (ids.isEmpty()) {
+            // 必须用 emptyMap 而不是 Map.of()：报警行的 deviceId/channelId 可以是 null
+            // （SDK 上报的事件没有通道号），而不可变 Map 的 get(null) 会抛 NPE。
+            return java.util.Collections.emptyMap();
+        }
+        java.util.Map<String, String> out = new java.util.HashMap<>(ids.size() * 2);
+        for (GbDevice d : deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
+                .in(GbDevice::getDeviceId, ids))) {
+            if (d != null && d.getDeviceId() != null) {
+                out.put(d.getDeviceId(), d.displayName());
+            }
+        }
+        return out;
+    }
+
+    /** 批量查通道名，理由同 {@link #deviceNames}。 */
+    public java.util.Map<String, String> channelNames(Collection<String> channelIds) {
+        java.util.Set<String> ids = cleanIds(channelIds);
+        if (ids.isEmpty()) {
+            return java.util.Collections.emptyMap();
+        }
+        java.util.Map<String, String> out = new java.util.HashMap<>(ids.size() * 2);
+        for (GbChannel c : channelMapper.selectList(Wrappers.<GbChannel>lambdaQuery()
+                .in(GbChannel::getChannelId, ids))) {
+            if (c != null && c.getChannelId() != null) {
+                // 同一通道编码可能出现在多台设备下：保留先到的那条，列表里只是展示用
+                out.putIfAbsent(c.getChannelId(), c.displayName());
+            }
+        }
+        return out;
+    }
+
+    private static java.util.Set<String> cleanIds(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return java.util.Collections.emptySet();
+        }
+        java.util.Set<String> out = new java.util.LinkedHashSet<>(ids.size() * 2);
+        for (String id : ids) {
+            if (id != null && !id.isBlank()) {
+                out.add(id);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 按接入方式列设备。
+     *
+     * <p>判据写成 SQL 而不是在 Java 里过滤 {@code DeviceKind.of}：后者要遍历全表，
+     * 千台规模下每次调用都是一次全表扫描 + 对象构造。
+     *
+     * <p>{@code source} 的历史值很杂（{@code device} / {@code null} / {@code gb}），
+     * 所以这里用「明确属于 SDK 的值」正面匹配，而不是「不等于 gb28181」反面匹配 ——
+     * 反面匹配会把历史国标设备误判成 SDK 设备。
+     *
+     * @param source 接入方式取值（{@code DeviceKind#code()}}）
+     */
+    public List<GbDevice> findBySource(String source) {
+        if (source == null || source.isBlank()) {
+            return List.of();
+        }
+        // netsdk 是 dahua 的历史别名（DeviceKind.of 里两者等价），一起匹配
+        return deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
+                .in(GbDevice::getSource, source, "netsdk"));
+    }
+
+    /**
+     * 设备是否在线。集中在一处，使「设备在线」的判定口径只有一份。
      *
      * @return 设备不存在返回 {@code false}
      */
@@ -89,7 +156,6 @@ public class DeviceService {
         return device != null && Boolean.TRUE.equals(device.getOnline());
     }
 
-    /** 全部通道。 */
     public List<GbChannel> allChannels() {
         return channelMapper.selectList(Wrappers.<GbChannel>lambdaQuery()
                 .orderByAsc(GbChannel::getDeviceId)
@@ -97,10 +163,8 @@ public class DeviceService {
     }
 
     /**
-     * 按通道编号查询。
-     *
-     * <p><b>注意</b>：通道编号只在单设备内唯一，多设备环境请用
-     * {@link #findChannel(String, String)} 指定设备编码，否则可能拿到别的设备的同号通道。
+     * 按通道编号查询。通道编号只在单设备内唯一，多设备环境请用
+     * {@link #findChannel(String, String)}，否则可能拿到别的设备的同号通道。
      */
     public GbChannel findChannel(String channelId) {
         if (channelId == null || channelId.isBlank()) {
@@ -112,9 +176,7 @@ public class DeviceService {
 
     /**
      * 按「设备编码 + 通道编码」查询通道（推荐）。
-     *
-     * <p>通道编码跨设备可重复（GB/T 28181 只保证设备编码全局唯一），
-     * 只按通道编码查会随机命中别的设备的同号通道。
+     * 通道编码跨设备可重复（GB/T 28181 只保证设备编码全局唯一），只按通道编码查会随机命中别的设备。
      */
     public GbChannel findChannel(String deviceId, String channelId) {
         if (channelId == null || channelId.isBlank()) {
@@ -129,24 +191,14 @@ public class DeviceService {
     }
 
     /**
-     * 由通道编码反查其所属设备编码。
-     *
-     * <p><b>为什么需要</b>：GB/T 28181 的控制类命令（云台、预置位、录像、布防…）
-     * 的 {@code <DeviceID>} 是<b>通道编码</b>，而 SIP 的 {@code To}/{@code From}/
-     * 请求行必须是<b>设备编码</b>（设备才是注册实体）。业务侧接口只拿到通道编码，
-     * 必须经此反查才能正确寻址。
-     *
-     * <p>直连摄像机两者恰好相同（设备自身即通道），下级平台接入时则不同——
-     * 少了这一步，级联通道的所有控制命令都会报「设备未注册或会话已失效」。
-     *
-     * @return 所属设备编码；通道不存在时返回 {@code null}
+     * 由通道编码反查其所属设备编码：控制类命令的 {@code <DeviceID>} 是通道编码，
+     * 而 SIP 的 {@code To}/{@code From}/请求行必须是设备编码。直连摄像机二者相同，级联则不同。
      */
     public String deviceIdOfChannel(String channelId) {
         GbChannel channel = findChannel(channelId);
         return channel == null ? null : channel.getDeviceId();
     }
 
-    /** 某设备下的通道。 */
     public List<GbChannel> channelsOf(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) {
             return List.of();
@@ -157,10 +209,7 @@ public class DeviceService {
     }
 
     /**
-     * 定位一路「可点播通道」。
-     *
-     * <p>国标设备的点播对象可能是设备本身（直连摄像机，设备编号即通道编号），
-     * 也可能是其下挂通道，故此处按「通道 → 设备」顺序回退查找。
+     * 定位一路可点播通道：先按通道查，查不到再回退到把设备自身当通道（直连摄像机）。
      */
     public GbChannel resolveChannel(String serial, String code) {
         String id = DeviceRef.channelOf(serial, code);
@@ -183,7 +232,6 @@ public class DeviceService {
         return virtual;
     }
 
-    /** 设备总数 / 在线数。 */
     public long[] deviceStats() {
         long total = deviceMapper.selectCount(null);
         long online = deviceMapper.selectCount(Wrappers.<GbDevice>lambdaQuery()
@@ -191,7 +239,6 @@ public class DeviceService {
         return new long[]{total, online};
     }
 
-    /** 通道总数 / 在线数。 */
     public long[] channelStats() {
         long total = channelMapper.selectCount(null);
         long online = channelMapper.selectCount(Wrappers.<GbChannel>lambdaQuery()
@@ -203,20 +250,11 @@ public class DeviceService {
 
     /**
      * 未知设备是否可以落库。
-     *
-     * <p><b>为什么必须有这道闸</b>：SIP 端口开在公网后，扫描器会不停地往这里
-     * 发 REGISTER（实测一天几十次，来源分布在各国的云主机）。它们用的是
-     * 随手编的编号（{@code .} / {@code 059} / {@code 9999} / {@code 1000}），
-     * 而我们之前<b>照单全收</b>，于是设备列表里混进一堆指向公网 IP 的假设备，
-     * 在线统计被稀释，目录采集还会主动向这些 IP 发 MESSAGE（拿不到应答，
-     * 每台每次都要等满 32 秒事务超时）。
-     *
-     * <p>判据用 GB/T 28181 附录 E 的编码规则（20 位数字）—— 真实设备不可能
-     * 不满足。
-     *
-     * <p><b>只拦「新建」</b>：库里已有的记录一律放行，这样手工添加的自定义编号
-     * （{@code source} 不是 {@code device} 的历史数据）不会被这次收紧锁死，
-     * 也不会因为规则的引入把在用的设备踢出去。
+     * SIP 端口开在公网后扫描器会不停发 REGISTER（实测一天几十次），用的是随手编的编号
+     * （{@code .} / {@code 059} / {@code 9999}）；照单全收会让设备列表混进指向公网 IP 的假设备，
+     * 目录采集还会主动向这些 IP 发 MESSAGE，每台每次等满 32 秒事务超时。
+     * 判据用 GB/T 28181 附录 E 的 20 位编码规则；只拦新建，库里已有记录一律放行
+     * （手工添加的自定义编号不会被锁死）。
      */
     private boolean mayCreate(String deviceId, GbDevice existing) {
         if (existing != null) {
@@ -229,7 +267,6 @@ public class DeviceService {
         return valid;
     }
 
-    /** 设备注册或续注册。 */
     @Transactional
     public void onRegister(RegisterEvent event) {
         String deviceId = event.getDeviceId();
@@ -260,10 +297,8 @@ public class DeviceService {
         if (unregister) {
             device.setKeepaliveTime(null);
         } else {
-            // 注册本身就是设备存活的证据，必须一并刷新心跳时间。
-            // 否则会出现「刚注册就被判离线」：设备重启后只发 REGISTER 不发心跳，
-            // 而库里的 keepalive_time 还停在上次断线前，巡检一跑就按超时下线
-            // （表现为设备能收下行 MESSAGE，但点播报「设备不在线」）。
+            // 注册本身就是设备存活的证据，必须一并刷新心跳时间；否则设备重启后只发 REGISTER
+            // 不发心跳，库里的 keepalive_time 还停在断线前，巡检一跑就按超时下线。
             device.setKeepaliveTime(LocalDateTime.now());
         }
         device.setUpdateTime(LocalDateTime.now());
@@ -282,7 +317,6 @@ public class DeviceService {
                 unregister ? "设备注销" : "设备注册", null);
     }
 
-    /** 设备心跳。 */
     @Transactional
     public void onKeepAlive(KeepAliveEvent event) {
         String deviceId = event.getDeviceId();
@@ -295,8 +329,7 @@ public class DeviceService {
         }
         if (device == null) {
             // 心跳先于注册到达（平台重启后设备不会重新 REGISTER，只会继续心跳）：
-            // 直接建一条完整记录，地址、注册时间、心跳时间都要一并写入，
-            // 否则这些字段会永远为空——设备不会再发 REGISTER 来补。
+            // 直接建完整记录，地址 / 注册时间 / 心跳时间一并写入，否则这些字段永远为空。
             device = new GbDevice();
             device.setDeviceId(deviceId);
             device.setName(deviceId);
@@ -325,8 +358,7 @@ public class DeviceService {
                 device.setTransport(event.getPeer().getTransport());
             }
         }
-        // 平台重启后设备不会重新 REGISTER，register_time 会一直是空；
-        // 用首次心跳补上，保证「注册时间」字段有值
+        // 平台重启后设备不会重新 REGISTER，register_time 会一直是空；用首次心跳补上
         if (device.getRegisterTime() == null) {
             device.setRegisterTime(LocalDateTime.now());
         }
@@ -346,13 +378,26 @@ public class DeviceService {
         LocalDateTime deadline = LocalDateTime.now().minusSeconds(timeoutSeconds);
         List<GbDevice> silent = deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
                 .eq(GbDevice::getOnline, true)
+                /*
+                 * 只对「靠设备主动发心跳续命」的接入方式做静默判定。
+                 *
+                 * <p><b>SDK 直连设备（大华等）根本不发心跳</b>：它们只在注册/登录时
+                 * 更新一次 keepalive_time，之后无论设备多健康，这个时间都会一直变旧。
+                 * 不排除的话，设备接入 3 分钟后必然被判"心跳超时"下线，
+                 * 通道跟着变 OFF，点播直接报「通道不在线」—— 而设备其实完全正常。
+                 * 这类设备只能靠主动探测（见 PlatformScheduler#probeSdkDevices）。
+                 *
+                 * <p>判据与 {@code DeviceKind.of} 保持一致：只有 dahua / netsdk
+                 * 属于无心跳的直连接入，其余（含历史值 device、gb、sip、null）都按国标处理。
+                 */
+                .apply("lower(trim(coalesce(source, ''))) not in ('dahua', 'netsdk')")
                 .and(w -> w.isNull(GbDevice::getKeepaliveTime)
                         .or().lt(GbDevice::getKeepaliveTime, deadline)));
         if (silent.isEmpty()) {
             return 0;
         }
         // 千台规模下逐台 updateById + touchDeviceChannels + logStatus 是数千次数据库往返，
-        // 事务会一直挂着（实测能把落库线程拖到「看起来卡死」）。这里改成三条批量 SQL。
+        // 事务会一直挂着（实测能把落库线程拖到「看起来卡死」），故改成三条批量 SQL。
         List<String> deviceIds = silent.stream().map(GbDevice::getDeviceId).toList();
         deviceMapper.markOffline(deviceIds);
         channelMapper.offlineByDeviceIds(deviceIds);
@@ -377,7 +422,6 @@ public class DeviceService {
         return d != null && Boolean.TRUE.equals(d.getOnline());
     }
 
-    /** 通道是否在线。 */
     public boolean isChannelOnline(String channelId) {
         GbChannel c = findChannel(channelId);
         if (c != null) {
@@ -390,19 +434,10 @@ public class DeviceService {
 
     /**
      * 处理设备目录应答，落库设备与通道。
-     *
-     * <p><b>通道只由目录应答产生</b>：设备报了什么就存什么，没报就不存。
-     * 不做「等几秒没子通道就把设备自身登记为通道」的定时兜底 —— 目录应答是异步的，
-     * 兜底一旦抢跑就会和设备随后上报的真实子通道并存，留下两条脏数据。
-     *
-     * <p><b>例外：直连摄像机（IPC）</b>。这类设备的目录应答里只有一条，
-     * 且其 {@code DeviceID} 就是设备自身编号（IPC 没有下级通道，设备编号即通道编号）。
-     * 若按「自身那条只当设备属性」处理，界面上会一个通道都没有、也无法点播。
-     * 故当【本次响应只有自身这一条】且【库里还没有真实子通道】时，
-     * 把它同时登记为通道；设备一旦报出真实子通道，这条自身通道会被清理。
-     *
-     * @param parentDeviceId 应答来源设备（目录项归属该设备）
-     * @param items          目录项
+     * 通道只由目录应答产生：设备报了什么就存什么，不做「等几秒没子通道就把设备自身登记为通道」
+     * 的定时兜底 —— 目录应答是异步的，兜底抢跑会与随后上报的子通道并存，留下两条脏数据。
+     * 例外是直连摄像机（IPC）：目录只有一条且其 {@code DeviceID} 就是设备自身编号，
+     * 当「只有自身这一条」且「库里还没有真实子通道」时也登记为通道，设备报出子通道后自动清理。
      */
     @Transactional
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items) {
@@ -412,16 +447,10 @@ public class DeviceService {
 
     /**
      * 处理设备目录应答（带全量快照标记）。
+     * {@code fullSnapshot} 用于删掉下级已删除的通道：只有确认收齐（已收条数 &ge; {@code SumNum}）
+     * 才能当全量快照，否则分页中途会把还没收到的通道误删。
      *
-     * <p><b>{@code fullSnapshot} 的作用</b>：下级平台删掉通道后，新目录里不再包含它，
-     * 但库里那条记录不会被自动删——设备列表的「通道数」会一直偏大，
-     * 点播该通道也只会得到「设备未注册」的错。
-     * 只有在<b>确认收齐</b>（已收条数 &ge; {@code SumNum}）时才能把它当全量快照，
-     * 否则分页中途就会把还没收到的通道误删。
-     *
-     * @param parentDeviceId 应答来源设备
-     * @param items          聚合后的目录项
-     * @param fullSnapshot   是否为完整的全量目录（收齐且带了 SumNum）
+     * @param fullSnapshot 是否为完整的全量目录（收齐且带了 SumNum）
      */
     @Transactional
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
@@ -432,12 +461,8 @@ public class DeviceService {
     /**
      * 处理设备目录应答（带全量快照标记与下级自报信息）。
      *
-     * @param parentDeviceId 应答来源设备
-     * @param items          聚合后的目录项
-     * @param fullSnapshot   是否为完整的全量目录（收齐且带了 SumNum）
-     * @param sumNum         下级自报的总条数（{@code SumNum}），0 表示未提供；
-     *                       仅用于日志——出现「下级说有 N 个，库里只有 M 个」时能直接定位责任方
-     * @param frames         本次批次收到的应答帧数，仅用于日志
+     * @param sumNum 下级自报的 {@code SumNum}，0 表示未提供；仅用于日志定位「下级说 N 个、库里 M 个」
+     * @param frames 本批次收到的应答帧数，仅用于日志
      */
     @Transactional
     public void saveCatalog(String parentDeviceId, Collection<CatalogItem> items,
@@ -500,10 +525,8 @@ public class DeviceService {
             // 直连摄像机：设备自身就是唯一通道
             saveChannel(device, selfItem, true);
         }
-        // 通道数按【库里的实际行数】回填，不用本次目录项计数：
-        // 目录应答可能是分页/增量的（一次只报部分通道），累加会得到偏小的值。
-        // 早先直接用 channelCount++ 的结果覆盖，遇到「先 DeviceInfo 报 Channel=1、
-        // 后 Catalog 报 3 条」就会停在 1，与 gb_channel 的行数对不上。
+        // 通道数按库里的实际行数回填，不用本次目录项计数：目录可能是分页 / 增量的，
+        // 累加会偏小（实测先 DeviceInfo 报 Channel=1、后 Catalog 报 3 条，结果停在 1）。
         int channelCount = countChannels(parentDeviceId);
         device.setChannelCount(channelCount);
         device.setUpdateTime(LocalDateTime.now());
@@ -515,9 +538,7 @@ public class DeviceService {
 
     /**
      * 删除该设备下「本次目录未上报」的通道。
-     *
-     * <p>「设备自身即通道」那条不参与比较：它在有真实子通道时由
-     * {@link #removeSelfChannel} 单独处理，不依赖本次是否上报。
+     * 「设备自身即通道」那条不参与比较，它由 {@link #removeSelfChannel} 单独处理。
      *
      * @return 删除行数
      */
@@ -564,13 +585,9 @@ public class DeviceService {
 
     /**
      * 删除下级平台已删除的通道（{@code <Event>DELETE</Event>} 推送）。
+     * 国标附录 A.2.4：不处理会留下幽灵通道 —— 通道数偏大、点播报「设备未注册」、
+     * 级联共享时把已下线通道推给上级。
      *
-     * <p>国标附录 A.2.4：下级删除通道时推送 {@code <Event>DELETE</Event>}，
-     * 本级若不处理，这条通道会一直残留在库里（「幽灵通道」）：
-     * 通道数偏大、点播时得到「设备未注册」、级联共享时把已下线通道推给上级。
-     *
-     * @param deviceId  通道所属设备
-     * @param channelId 通道编码
      * @return 实际删除行数
      */
     @Transactional
@@ -608,10 +625,8 @@ public class DeviceService {
         applyText(msg, "Firmware", device::setFirmware);
         applyText(msg, "CivilCode", device::setCivilCode);
         applyText(msg, "Address", device::setAddress);
-        // 刻意不采纳 DeviceInfo 里的 <Channel>：那是设备自报的通道数，
-        // 与平台实际同步到的 gb_channel 行数常不一致（设备少报/多报、目录尚未同步完），
-        // 采纳会让「设备列表的通道数」与「通道列表的实际条数」对不上。
-        // 通道数一律以 gb_channel 的实际行数为准（见 saveCatalog / countChannels）。
+        // 刻意不采纳 DeviceInfo 里的 <Channel>：设备自报的通道数与平台实际同步到的
+        // gb_channel 行数常不一致，采纳会让「设备列表通道数」与「通道列表条数」对不上。
         applyDouble(msg, "Longitude", v -> device.setLongitude(BigDecimal.valueOf(v)));
         applyDouble(msg, "Latitude", v -> device.setLatitude(BigDecimal.valueOf(v)));
         device.setChannelCount(countChannels(deviceId));
@@ -622,12 +637,10 @@ public class DeviceService {
     /**
      * 保存通道。
      *
-     * @param selfChannel true 表示这是「设备自身即通道」（直连摄像机）那条，
-     *                    目录项缺 {@code Status} 时用设备状态兜底
+     * @param selfChannel true 表示「设备自身即通道」（直连摄像机），目录项缺 {@code Status} 时用设备状态兜底
      */
     private void saveChannel(GbDevice device, CatalogItem item, boolean selfChannel) {
-        // 必须按「设备编码 + 通道编码」查：通道编码跨设备可重复，
-        // 只按通道编码查会把第二台设备的同号通道当成已存在而覆盖掉
+        // 必须按「设备编码 + 通道编码」查：只按通道编码查会把第二台设备的同号通道当成已存在而覆盖掉
         GbChannel channel = findChannel(device.getDeviceId(), item.getDeviceId());
         if (channel == null) {
             channel = new GbChannel();
@@ -644,8 +657,7 @@ public class DeviceService {
         channel.setBlock(CharsetFix.repair(item.getBlock()));
         channel.setAddress(CharsetFix.repair(item.getAddress()));
         channel.setParental(item.getParental());
-        // ParentID 缺省时挂到所属设备下：通道树按 parentId 组装，
-        // 留空会让通道在树里找不到父节点而不显示
+        // ParentID 缺省时挂到所属设备下：通道树按 parentId 组装，留空会找不到父节点而不显示
         String parentId = item.getParentId();
         channel.setParentId(parentId == null || parentId.isBlank()
                 ? device.getDeviceId() : parentId);
@@ -653,10 +665,8 @@ public class DeviceService {
         channel.setSecrecy(item.getSecrecy());
         channel.setIpAddress(item.getIpAddress());
         channel.setPort(item.getPort());
-        // 云台类型：设备普遍不报或恒报 0（未知），而现场可能已手工在通道列表里改成
-        // 球机/半球以便开启云台控制。若每次目录同步都无条件写入，
-        // 手工值会在设备下一次注册（实测约 5 分钟）时被冲回 0，
-        // 表现为「改完一会儿又自己变回去了」。故只在设备报出非 0 值时采纳。
+        // 云台类型：设备普遍不报或恒报 0，而现场可能已手工改成球机 / 半球以便开启云台控制。
+        // 无条件写入会在下次目录同步（实测约 5 分钟）时把手值冲回 0，故只在设备报非 0 值时采纳。
         if (item.getPtzType() != null && item.getPtzType() != 0) {
             channel.setPtzType(item.getPtzType());
         } else if (channel.getId() == null) {
@@ -686,14 +696,9 @@ public class DeviceService {
     }
 
     /**
-     * 从通道国标编号推导通道序号。
-     *
-     * <p>GB/T 28181—2016 6.1 规定 20 位国标编码的末 7 位为序号，
-     * 设备侧习惯把其中的末 3 位当作「通道号」展示（如 {@code ...0001} → 1、
-     * {@code ...0102} → 102），与 LiveGBS 等平台的显示一致。
-     *
-     * <p>目录应答里没有独立的「通道号」字段，早先这一列恒为 0。
-     * 取不到数字时返回 0，不抛异常 —— 通道编码可能被自定义成非数字串。
+     * 从通道国标编号推导通道序号：GB/T 28181—2016 6.1 规定 20 位编码末 7 位为序号，
+     * 设备侧惯例取末 3 位展示（{@code ...0001} → 1、{@code ...0102} → 102），与 LiveGBS 一致。
+     * 目录应答没有独立的通道号字段；取不到数字返回 0，不抛异常（编号可能被自定义成非数字串）。
      */
     private static int channelNoOf(String channelId) {
         if (channelId == null || channelId.length() < 3) {
@@ -723,7 +728,7 @@ public class DeviceService {
         if (item.getAddress() != null) {
             device.setAddress(CharsetFix.repair(item.getAddress()));
         }
-        // 与通道同理：设备常恒报 0（未知），不要用它覆盖手工设置的类型
+        // 与通道同理：设备常恒报 0，不要用它覆盖手工设置的类型
         if (item.getPtzType() != null && item.getPtzType() != 0) {
             device.setPtzType(item.getPtzType());
         }
@@ -756,8 +761,7 @@ public class DeviceService {
 
     /**
      * 更新通道状态（按「设备编码 + 通道编码」精确定位）。
-     *
-     * <p>通道编码跨设备可重复，只按通道编码可能改到别的设备的同号通道。
+     * 通道编码跨设备可重复，只按通道编码可能改到别的设备的同号通道。
      */
     public void setChannelStatus(String deviceId, String channelId, String status) {
         GbChannel channel = findChannel(deviceId, channelId);
@@ -793,8 +797,7 @@ public class DeviceService {
 
     /**
      * 记录 / 清除通道的当前直播流（按「设备编码 + 通道编码」精确定位）。
-     *
-     * <p>通道编码跨设备可重复，只用通道编码可能改到别的设备的同号通道。
+     * 通道编码跨设备可重复，只用通道编码可能改到别的设备的同号通道。
      */
     @Transactional
     public void setChannelStream(String deviceId, String channelId, String streamId) {
@@ -820,15 +823,10 @@ public class DeviceService {
     }
 
     /**
-     * 单独设置通道的「自定义国标编号」，{@code null}/空串表示清除。
-     *
-     * <p><b>为什么不复用 {@link #updateChannel}</b>：它走 {@code updateById}，
-     * 而 MyBatis-Plus 默认的 {@code FieldStrategy.NOT_NULL} 会<b>跳过 null 字段</b>，
-     * 于是「清空自定义编号」永远不生效 —— 接口返回 200、界面也提示成功，
-     * 库里却还是旧值，下次刷新又变回去。要写 null 只能显式用 UpdateWrapper 的
-     * {@code set(...)}，那是无条件进 SQL 的。
-     *
-     * <p>定位必须用「设备 + 通道」：通道编码只在单设备内唯一。
+     * 单独设置通道的自定义国标编号，{@code null}/空串表示清除。
+     * 不能复用 {@link #updateChannel}：{@code updateById} 的 {@code FieldStrategy.NOT_NULL}
+     * 会跳过 null 字段，清空永远不生效（接口 200、界面提示成功，库里还是旧值）。
+     * 定位必须用「设备 + 通道」：通道编码只在单设备内唯一。
      *
      * @return 是否命中并更新了记录
      */
@@ -846,17 +844,9 @@ public class DeviceService {
     }
 
     /**
-     * 平台启动时收敛残留的通道状态。
-     *
-     * <p><b>为什么必须做</b>：通道的 {@code status=ON} 与 {@code stream_id} 都由
-     * 流上线事件写入，而「流下线」只在设备/流正常收敛时才触发。平台重启、
-     * 进程被杀、或某个流异常终止而没有走到下线分支时，这两个字段就永久留在
-     * 「在线/有流」状态 —— 界面显示通道在线、挂着 stream_id，实际一路都没有。
-     * 实测踩过：一个 11:01 就离线的设备，其通道被错误认领后显示 ON 达数小时。
-     *
-     * <p>判据用<b>设备是否在线</b>而不是「有没有会话」：设备离线则其所有通道
-     * 必然不可能有流；而设备在线时通道状态由后续真实的流事件驱动。
-     * 这样既清掉脏状态，又不会误伤「设备在线但暂时没推流」的正常通道。
+     * 平台启动时收敛残留的通道状态：{@code status=ON} 与 {@code stream_id} 由流上线事件写入，
+     * 而「流下线」只在正常收敛时触发，重启 / 进程被杀会让字段永久留在「在线有流」（实测数小时）。
+     * 设备离线则通道必然没流；设备在线时交给后续真实流事件。
      *
      * @return 收敛的通道数
      */
@@ -868,10 +858,9 @@ public class DeviceService {
                     .filter(d -> !Boolean.TRUE.equals(d.getOnline()))
                     .map(GbDevice::getDeviceId)
                     .toList();
-            // 离线设备的通道：状态置 OFF、清空 stream_id
+            // 离线设备的通道置 OFF 并清空 stream_id；在线设备只清 stream_id
+            // （内存会话已随重启清空，该字段必然过期），不动 status
             int off = channelMapper.resetByDeviceIds(offlineIds);
-            // 在线设备的通道：清空 stream_id（内存会话已随重启清空，这个字段必然过期），
-            // 但不动 status —— 设备在线时通道状态由真实流事件驱动
             int cleared = channelMapper.clearStreamIdsByDeviceIds(
                     all.stream().map(GbDevice::getDeviceId).toList());
             if (off > 0 || cleared > 0) {
@@ -884,7 +873,6 @@ public class DeviceService {
         }
     }
 
-    /** 设备属性更新。 */
     @Transactional
     public void updateDevice(GbDevice device) {
         device.setUpdateTime(LocalDateTime.now());
@@ -903,22 +891,15 @@ public class DeviceService {
     /**
      * 保存预置位自定义名称。
      *
-     * @param name 名称；<b>空或 {@code null} 表示清除</b>（删除预置位时用）
+     * @param name 名称；空或 {@code null} 表示清除（删除预置位时用）
      */
     @Transactional
     public void savePresetName(String channelId, Integer presetId, String name) {
         if (channelId == null || presetId == null) {
             return;
         }
-        /*
-         * 清除走 delete 而不是「把 name 更新成 null」。
-         *
-         * <p>MyBatis-Plus 默认 FieldStrategy.NOT_NULL，{@code updateById} 会
-         * <b>跳过 null 字段</b> —— 写 null 根本不会进 SQL，记录仍是旧名字。
-         * 这与「清空自定义通道编号」踩的是同一个坑（见
-         * DeviceService#setChannelCustomId 的注释）。
-         * 名称表本来就是「有自定义名才有行」，删掉比留一行空值更干净。
-         */
+        /* 清除走 delete 而不是把 name 更新成 null：MyBatis-Plus 的 FieldStrategy.NOT_NULL
+           会让 null 不进 SQL（与 setChannelCustomId 同一个坑）。名称表本来就是有自定义名才有行。 */
         if (name == null || name.isBlank()) {
             presetMapper.delete(Wrappers.<GbPreset>lambdaQuery()
                     .eq(GbPreset::getChannelId, channelId)
@@ -941,20 +922,38 @@ public class DeviceService {
         }
     }
 
-    /** 查询某通道的预置位名称映射。 */
     public List<GbPreset> presetsOf(String channelId) {
         return presetMapper.selectList(Wrappers.<GbPreset>lambdaQuery()
                 .eq(GbPreset::getChannelId, channelId)
                 .orderByAsc(GbPreset::getPresetId));
     }
 
+
     private void touchDeviceChannels(String deviceId, String status) {
         channelMapper.updateStatusByDeviceId(deviceId, status);
     }
 
+    /**
+     * 把设备与其全部通道一并置为指定在线状态（供主动探测类接入使用）。
+     *
+     * <p>SDK 直连设备没有 SIP 心跳，在线状态由探测结果决定，
+     * 通道状态必须跟着设备一起翻 —— 只改设备不改通道，
+     * 界面会显示「设备在线、通道离线」，点播仍报「通道不在线」。
+     */
+    @Transactional
+    public void setDeviceAndChannelsStatus(String deviceId, boolean online) {
+        String status = online ? "ON" : "OFF";
+        deviceMapper.update(null, Wrappers.<GbDevice>lambdaUpdate()
+                .eq(GbDevice::getDeviceId, deviceId)
+                .set(GbDevice::getOnline, online)
+                .set(GbDevice::getStatus, status)
+                .set(GbDevice::getUpdateTime, LocalDateTime.now())
+                .set(online, GbDevice::getKeepaliveTime, LocalDateTime.now()));
+        touchDeviceChannels(deviceId, status);
+    }
+
     // ==================== 状态日志 ====================
 
-    /** 写一条状态变更记录。 */
     public void logStatus(String deviceId, String channelId, String oldStatus,
                           String newStatus, String description, String reason) {
         GbStatusLog logEntry = new GbStatusLog();
@@ -969,13 +968,7 @@ public class DeviceService {
     }
 
     /**
-     * 清理超过保留期的状态变更记录。
-     *
-     * <p>{@code gb_status_log} 没有任何清理路径时，跑一年会积累几十万条，
-     * 而分页查询按 {@code create_time DESC} 排序，表越大越慢。
-     *
-     * <p>用单条 {@code DELETE ... WHERE create_time < ?} 而不是先 select 再删：
-     * 过期记录可能有上万条，全部读进内存没有必要。
+     * 清理超过保留期的状态变更记录（单条 {@code DELETE ... WHERE create_time < ?}，不先 select 再删）。
      *
      * @param retainDays 保留天数；{@code <=0} 直接跳过
      * @return 删除的行数
@@ -989,11 +982,8 @@ public class DeviceService {
     }
 
     /**
-     * 移动位置记录过期清理。
-     *
-     * <p>车载/单兵设备按固定周期上报 GPS，一台设备一天就有数百到上万条，
-     * 而这张表此前<b>没有任何清理路径</b>，跑几个月就能把库撑到几十 GB。
-     * 轨迹的用途是「回溯最近去过哪」，一周足够，没必要永久保留。
+     * 移动位置记录过期清理：车载 / 单兵设备一天数百到上万条，此前无任何清理路径。
+     * 轨迹只需回溯最近一周。
      *
      * @param retainDays 保留天数；{@code <=0} 直接跳过
      * @return 删除的行数
@@ -1007,11 +997,8 @@ public class DeviceService {
     }
 
     /**
-     * 设备侧录像索引（{@code gb_device_record}）过期清理。
-     *
-     * <p>它只是「设备录像检索」结果的缓存 —— 真实清单在设备上，
-     * 随时可以重新检索，所以保留期可以最短。不清的后果是
-     * 每次检索都要在越来越大的表里查重。
+     * 设备侧录像索引（{@code gb_device_record}）过期清理：它只是检索结果的缓存，
+     * 真实清单在设备上随时可重新检索，所以保留期最短。
      *
      * @param retainDays 保留天数；{@code <=0} 直接跳过
      * @return 删除的行数
@@ -1020,14 +1007,11 @@ public class DeviceService {
         if (retainDays <= 0) {
             return 0;
         }
-        // 注意用 updateTime 而不是 createTime：这张表没有 createTime 列，
-        // 每次重新检索会 upsert 同一批文件并刷新 updateTime，
-        // 所以「最近被检索过」的时间才是该不该清的判据。
+        // 用 updateTime 而不是 createTime：这张表没有 createTime 列，重新检索会 upsert 并刷新 updateTime
         return deviceRecordMapper.delete(Wrappers.<GbDeviceRecord>lambdaQuery()
                 .lt(GbDeviceRecord::getUpdateTime, LocalDateTime.now().minusDays(retainDays)));
     }
 
-    /** 状态变更记录查询。 */
     public List<GbStatusLog> statusLogs(String deviceId, String channelId,
                                         String startTime, String endTime) {
         LambdaQueryWrapper<GbStatusLog> q = Queries.deviceAndChannel(
@@ -1038,11 +1022,8 @@ public class DeviceService {
     }
 
     /**
-     * 记录一条移动位置。
-     *
-     * <p>位置由设备通过 {@code MobilePosition} 主动上报，或由报警附带坐标。
-     * 经纬度全为 0 的记录没有意义（设备未装 GPS），直接丢弃，
-     * 否则轨迹图上会出现一堆「在几内亚湾」的点。
+     * 记录一条移动位置（{@code MobilePosition} 主动上报，或报警附带坐标）。
+     * 经纬度全为 0 的记录直接丢弃（设备未装 GPS），否则轨迹图上全是「在几内亚湾」的点。
      */
     public void savePosition(String deviceId, String channelId, ManscdpMessage msg) {
         Double lon = firstDouble(msg, "Longitude");
@@ -1086,8 +1067,8 @@ public class DeviceService {
     private static void applyText(ManscdpMessage msg, String tag, java.util.function.Consumer<String> setter) {
         String v = msg.firstText(tag);
         if (v != null && !v.isBlank()) {
-            // 设备普遍以 GBK 字节发中文，而解码器仅在出现替换字符时才回退 GBK，
-            // 遇到「GBK 字节恰为合法 UTF-8」的情况会静默产出乱码（如「平台」→「ƽ̨」）
+            // 设备普遍以 GBK 字节发中文，解码器仅在出现替换字符时才回退 GBK，
+            // 「GBK 字节恰为合法 UTF-8」时会静默产出乱码（如「平台」→「ƽ̨」）
             setter.accept(CharsetFix.repair(v));
         }
     }
@@ -1109,7 +1090,6 @@ public class DeviceService {
                 .orElse(null);
     }
 
-    /** 全部设备编号（供批量查询使用）。 */
     public List<String> allDeviceIds() {
         List<String> ids = new ArrayList<>();
         for (GbDevice d : allDevices()) {

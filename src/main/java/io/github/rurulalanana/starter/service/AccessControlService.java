@@ -16,26 +16,15 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * 接入控制（黑白名单）：同时是 SIP 信令层的 {@link AccessControl} 实现与后台管理的业务服务。
+ * 接入控制（黑白名单）：同时是 SIP 信令层的 {@link AccessControl} 实现与后台管理服务。
  *
- * <p><b>为什要它</b>：平台原本只有「设备统一接入密码」一道闸门，只能回答
- * 「密码对不对」，回答不了「这个来源许不许进」。密码一旦泄露、或设备被批量
- * 写入弱口令，「谁知道密码谁就能注册」就成了现实风险。来源过滤不依赖密码，
- * 是密码失效时仍然有效的最后一道拦截。
+ * <p>统一接入密码只能回答「密码对不对」，回答不了「这个来源许不许进」；密码泄露或设备用弱口令时，
+ * 来源过滤是不依赖密码的最后一道拦截。检查发生在摘要认证之前 —— 否则黑名单里的设备只要密码对了就能进。
  *
- * <p><b>检查发生在摘要认证之前</b>：访问控制是网络层语义，不该以
- * 「密码是否正确」为前提；否则黑名单里的设备只要密码对了就能进，
- * 那它就不叫黑名单。
+ * <p>用不可变内存快照（{@code volatile} 引用 + 写时整体替换）而非每次查库：{@link #check} 在 jain-sip
+ * 协议栈线程上每个 REGISTER 调用一次，查库会把信令线程拖住，设备一多就是注册超时雪崩。
  *
- * <p><b>为什么用内存快照而不是每次查库</b>：{@link #check} 在 jain-sip 的
- * 协议栈线程上被调用，每收到一个 REGISTER 就走一次。在那里查数据库会让
- * 信令线程被 DB 延迟拖住，设备一多就是注册超时雪崩。所以这里维护一份
- * <b>不可变快照</b>（{@code volatile} 引用 + 写时整体替换）：
- * 读端完全无锁、无阻塞，写端（后台增删改）替换引用即可。
- *
- * <p><b>白名单为空时不限制</b>：这是刻意的。若把「白名单为空」当成
- * 「谁都不许进」，那么新增第一条白名单之前的所有设备都会被踢下线 ——
- * 一次误操作就能让整个平台失联。空白的语义取「未启用」，并在界面上明确提示。
+ * <p>白名单为空表示不限制（而非「谁都不许进」）：否则新增第一条白名单之前所有设备都会掉线。
  */
 @Slf4j
 @Service
@@ -54,25 +43,13 @@ public class AccessControlService implements AccessControl {
 
     private final GbAclMapper aclMapper;
 
-    /**
-     * 当前生效的规则快照。
-     *
-     * <p>整体替换、不原地修改 —— 读端可能正在遍历，改半个列表会读到中间态。
-     */
+    /** 当前生效的规则快照：整体替换、不原地修改（读端可能正在遍历，改半个列表会读到中间态）。 */
     private volatile Snapshot snapshot = Snapshot.EMPTY;
 
     /**
-     * 启动后加载一次。
-     *
-     * <p><b>必须监听 {@link ApplicationReadyEvent} 而不能用 {@code @PostConstruct}</b>：
-     * 建表是由 {@code SchemaInitializer} 的 {@code ApplicationRunner} 完成的，
-     * 它在 bean 初始化<b>之后</b>才跑。用 {@code @PostConstruct} 会在表还不存在时
-     * 就去查，首启必然报一次「读取接入控制规则失败」，而那次失败恰好
-     * 把「刚建好的空表」当成了「没有规则」—— 看起来无害，但会让日志里
-     * 留下一条永久性的误导告警。
-     *
-     * <p>失败不阻断启动：一个坏表不该让整个平台起不来。
-     * 此时快照为空 = 不限制来源，与「尚未配置名单」一致。
+     * 必须监听 {@link ApplicationReadyEvent} 而不能用 {@code @PostConstruct}：建表由
+     * {@code SchemaInitializer} 的 {@code ApplicationRunner} 完成，它在 bean 初始化之后才跑，
+     * 提前查会在首启时留下一条永久性的误导告警。失败不阻断启动（快照为空 = 不限制来源）。
      */
     @EventListener(ApplicationReadyEvent.class)
     void load() {
@@ -87,8 +64,7 @@ public class AccessControlService implements AccessControl {
             log.info("接入控制已加载：黑名单 {} 条，白名单 {} 条",
                     snapshot.blackRules.size(), snapshot.whiteRules.size());
         } catch (Exception e) {
-            // 表还没建好 / 数据源异常：保持现状（不因为读失败就把已有规则清空，
-            // 那会让「数据库抖一下 → 黑名单失效」变成可能）
+            // 表还没建好 / 数据源异常：保持现状，不因为读失败就把已有规则清空（否则「库抖一下 → 黑名单失效」）
             log.warn("读取接入控制规则失败，沿用现有规则: {}", e.getMessage());
         }
     }
@@ -218,10 +194,8 @@ public class AccessControlService implements AccessControl {
     }
 
     /**
-     * 规范化并校验匹配值。
-     *
-     * <p>校验放在这里是必要的：规则写错时设备会被无声地挡住（或放进来），
-     * 而现场排查往往先怀疑网络和密码，最后才想到名单 —— 所以宁可在录入时报错。
+     * 规范化并校验匹配值：规则写错时设备会被无声地挡住或放进，
+     * 而现场排查往往先怀疑网络和密码，所以宁可在录入时报错。
      */
     private static String normalizeValue(String kind, String value) {
         String v = value == null ? "" : value.trim();
@@ -308,7 +282,6 @@ public class AccessControlService implements AccessControl {
         final String kind;
         /** 展示用原文：DEVICE/PREFIX 是编码，IP 是地址，CIDR 是网段。 */
         final String text;
-        /** DEVICE / PREFIX 用 */
         final String devicePart;
         /** IP / CIDR 用 */
         final long ipBase;
@@ -323,10 +296,8 @@ public class AccessControlService implements AccessControl {
         }
 
         /**
-         * 编译一条规则；编译失败返回 {@code null}。
-         *
-         * <p>返回 null 而不是抛异常：这是从库里读出来的历史数据，
-         * 一条脏数据不该让整份名单加载失败 —— 那等于黑名单被一条错记录作废。
+         * 编译一条规则；失败返回 {@code null}。不抛异常：库里的历史脏数据不该让整份名单加载失败，
+         * 那等于黑名单被一条错记录作废。
          */
         static Rule compile(GbAcl row) {
             String kind = row.getKind() == null ? KIND_DEVICE

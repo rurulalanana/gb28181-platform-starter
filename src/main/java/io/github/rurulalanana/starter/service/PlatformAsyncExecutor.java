@@ -11,42 +11,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 平台异步任务执行器。
+ * 平台异步任务执行器：SIP 回调运行在协议栈线程上禁止阻塞，而落库是 I/O，故放到队列里异步执行。
  *
- * <p>SIP 回调运行在协议栈线程上，<b>禁止阻塞</b>（阻塞会导致 SIP 重传与超时）；
- * 但落库是 I/O 操作。因此把「回调 → 落库」这一段放到队列里异步执行。
+ * <p>两条独立队列：{@link #run} 轻量落库（心跳 / 状态 / 目录），单线程保序；
+ * {@link #runArchive} 录像归档，可并行且耗时长。不能混用：归档内部会轮询等 ZLM 写终态（最多 3 秒），
+ * 10 路同时掉线就是 30 秒，共用队列会把所有心跳落库堵住（表现为「设备离线了界面还在线」）。
  *
- * <h3>两条独立队列，不要混用</h3>
- *
- * <p>早先所有任务共用一个单线程，实测有问题：归档路径
- * （{@link RecordService#archiveRecording}）内部会<b>轮询等 3 秒</b>等 ZLM
- * 写终态（{@code awaitTerminalRecording}）。10 路通道同时掉线就是 30 秒，
- * 这期间所有设备的心跳、状态落库全被堵在队列里 ——
- * 表现为「设备离线了但界面还是在线」。
- *
- * <p>现在拆成两条：
- * <ul>
- *   <li>{@link #run}：轻量落库（心跳 / 状态 / 目录），单线程<b>保序</b>
- *       —— 同一设备的事件必须按序处理，多线程会状态竞争；</li>
- *   <li>{@link #runArchive}：录像归档。每路通道独立、可并行，且耗时长，
- *       绝不能占用保序队列。</li>
- * </ul>
- *
- * <p><b>两条队列都有界</b>（默认 2000 / 200）。原来用
- * {@code Executors.newSingleThreadExecutor()} 是<b>无界</b>队列：
- * 一旦下游阻塞（比如 ZLM 卡死导致每个任务都等满超时），队列会无限膨胀
- * 直到 OOM。有界 + 拒绝策略至少能保住进程，并留下可观测的日志。
+ * <p>两条队列都有界：无界队列在下游阻塞时会膨胀到 OOM，有界 + 拒绝至少能保住进程并留下日志。
  */
 @Slf4j
 @Component
 public class PlatformAsyncExecutor {
 
     /**
-     * 保序队列容量。
-     *
-     * <p>正常水位是几十条（心跳 5 分钟一次 × 设备数）。给到 2000 是为了容忍
-     * 突发：平台重启后设备集中注册，几百台 × (注册 + 心跳 + 目录 + 状态)
-     * 会瞬时涌入。真打满说明下游已经堵死，此时丢弃比 OOM 好。
+     * 保序队列容量：正常水位几十条，2000 是为了容忍重启后几百台设备集中注册的瞬时涌入。
+     * 真打满说明下游已堵死，此时丢弃比 OOM 好。
      */
     private static final int PERSIST_QUEUE_CAPACITY = 2000;
 
@@ -68,10 +47,8 @@ public class PlatformAsyncExecutor {
                     new RejectLogger("落库"));
 
     /**
-     * 归档队列（2 线程并行）。
-     *
-     * <p>为什么是 2：归档主要耗时在「等 ZLM 写终态」（最多 3 秒）+ 一次 INSERT。
-     * 2 个线程足够覆盖多路同时掉线，又不至于让并发事务数过多。
+     * 归档队列（2 线程）：主要耗时是等 ZLM 写终态（最多 3 秒）+ 一次 INSERT，
+     * 2 个线程够覆盖多路同时掉线，又不至于并发事务过多。
      */
     private final ExecutorService archiveExecutor =
             new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
@@ -83,25 +60,16 @@ public class PlatformAsyncExecutor {
     private final AtomicLong rejected = new AtomicLong();
 
     /**
-     * 提交一个保序异步任务；任务内部异常只记录日志，不影响调用方。
-     *
-     * <p><b>保序</b>：单线程 FIFO，同一设备的注册 / 心跳 / 目录按提交顺序执行。
-     *
-     * @param name 任务名（日志用）
-     * @param task 任务体
+     * 提交一个保序异步任务（单线程 FIFO，同一设备的注册 / 心跳 / 目录按提交顺序执行）；
+     * 任务内部异常只记日志，不影响调用方。
      */
     public void run(String name, Runnable task) {
         submit(persistExecutor, name, task);
     }
 
     /**
-     * 提交一个录像归档任务（独立队列，不阻塞 {@link #run}）。
-     *
-     * <p>各通道的归档彼此独立，无需保序；放这里可以并行，且不会把
-     * 心跳/状态落库拖在身后。
-     *
-     * @param name 任务名（日志用）
-     * @param task 任务体
+     * 提交一个录像归档任务（独立队列）：各通道归档彼此独立、无需保序，
+     * 并行执行且不会把心跳 / 状态落库拖在身后。
      */
     public void runArchive(String name, Runnable task) {
         submit(archiveExecutor, name, task);

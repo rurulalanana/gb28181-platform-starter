@@ -115,14 +115,51 @@ sa-token:
   # 录像文件播放（/cloudrecord/file/{id}）就靠这个通过鉴权。
   is-read-body: true
 
+# ==================== 行为验证码（tianai-captcha）====================
+# 前缀必须是顶层 captcha（库的 SpringImageCaptchaProperties 读它），不要挪到 gb28181 下面。
+# 这里只放库自己消费的参数；「要不要验证」的开关在 gb28181.login.captcha-enabled。
+captcha:
+  # 加载 jar 内置的滑块/旋转模板（凹槽/拼图块 png）。
+  # 注意：这一项同时决定「模板前缀」，不要用 default-resource-prefix 去改背景图目录 ——
+  # 那个前缀对模板同样生效，改了会让模板被拼到 resource 目录下而报「无法读到指定的资源」。
+  # 背景图由 CaptchaResourceConfiguration 自己注入，不靠配置。
+  init-default-resource: true
+  # 预生成缓存：用户点登录时已有现成图，少等一次生成
+  local-cache-enabled: true
+  local-cache-size: 20
+  # 单张验证码有效期（毫秒）
+  expire:
+    default: 60000
+
 gb28181:
+  # ==================== 登录防护 ====================
+  # 三层：行为验证码 + 账号维度计数 + IP 维度计数，见 LoginGuardService。
+  login:
+    # 失败计数窗口（分钟）：超过窗口重新计数
+    fail-window-minutes: 15
+    # 账号失败几次后临时锁定
+    lock-after-failures: 10
+    # IP 失败几次后临时锁定。门槛更高：办公网常整层楼共用一个出口 IP
+    ip-lock-after-failures: 50
+    # 锁定时长（分钟）。时间制而非永久：攻击者能故意锁死管理员，但 30 分钟自解，
+    # 重启进程即可立即清空内存计数
+    lock-minutes: 30
+    # 是否校验验证码。默认 true，每次登录都要。
+    # 保留这个开关只有一个用途：验证码本身坏掉时（图片生成依赖库/字体/资源）
+    # 可以改 false 重启应急，不至于全员登不进去。平时不要关。
+    #
+    # 注意：机器调用（业务平台/脚本）**不需要**关这个 —— 用 API 密钥登录即可，
+    # 密钥由每个用户在「设置 → 账号安全」里自行生成，每把绑一个账号、可随时撤销。
+    captcha-enabled: true
+
   # ==================== 接口文档（对外对接用） ====================
   # /doc.html 是 Knife4j 中文界面；/v3/api-docs 是原始 OpenAPI JSON。
   # 交付给业务平台时保持 true；纯内网生产可置 false 让文档端点彻底不注册。
   api-docs:
     enabled: true
-    # true 时文档要 HTTP Basic 口令（接口清单会暴露全部路径与参数，公网建议开启）
-    protect: false
+    # 默认为 true：接口清单会暴露全部路径与参数，裸奔等于给扫描器送地图。
+    # 开启后必须通过环境变量 GB_DOCS_PASSWORD 提供口令，否则启动直接失败。
+    protect: true
     basic-username: gb28181
     # 口令只从环境变量取（仓库里不放默认值）；protect=true 而这里为空时启动会直接失败
     basic-password: ${GB_DOCS_PASSWORD:}
@@ -149,6 +186,36 @@ gb28181:
 
   # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
   media-ip: "123.57.109.223"
+  # WebRTC 对外通告地址（ZLM 的 rtc.externIP），也是浏览器 ICE 报文要打到的地址。
+  # 留空 = 回退上面的 media-ip，同机部署时两者本就相同，所以通常不用配。
+  #
+  # 【什么时候必须单独配】服务与浏览器不在同一个「可达域」时：
+  #   · 本机/局域网调试，而 media-ip 还留着线上那套公网 IP（本项目当前就是这种：
+  #     media-ip=123.57.109.223）。此时 answer 里的 candidate 是那个公网 IP，
+  #     浏览器把 STUN 打过去收不到回包 → 【协商成功但画面全黑】，ZLM 15 秒后
+  #     打「接受rtp/rtcp/datachannel超时」关掉 transport。FLV 走 HTTP 回源不受影响，
+  #     所以现象是「FLV 能播、WebRTC 不能」。
+  #
+  #     本机跑请加启动参数：--gb28181.rtc-extern-ip=auto
+  #       auto = 自动取「默认路由所在网卡」的 IPv4，不用手工查 IP
+  #              （装了 VMware/VirtualBox 的机器上 ipconfig 第一条往往是 192.168.80.1
+  #               这类虚拟网卡，局域网里别的机器到不了）。
+  #     要固定成某个 IP 就直接写，例如 --gb28181.rtc-extern-ip=192.168.20.138。
+  #
+  #     ⚠️ 本地三个启动脚本都已带这个参数，直接跑即可：
+  #        scripts\restart-local.ps1（默认 auto，可 -RtcExternIp 192.168.x.x 覆盖）
+  #        start-local.bat / start-platform.bat（固定 auto）
+  #     核对方法：启动日志里搜 `ZLM 配置 rtc.externIP=`，看是不是本机局域网 IP。
+  #   · WebRTC 走独立入口（例如单独的反代/端口映射），对外地址与 media-ip 不同。
+  #
+  # 【线上不要改】NAT 部署时这个值必须是对外公网地址，改成内网地址会让公网浏览器连不上。
+  #
+  # 【浏览器还必须能解这个编码】ZLM 不做转码，answer 里的编码就是流本身的编码：
+  #   流是 H264 → 所有浏览器都能播；
+  #   流是 H265 → 只有 Chrome ≥136（需硬件 HEVC 解码）与 Safari 能播，
+  #               Edge / Firefox / 国产浏览器会协商失败或黑屏。现场若混用浏览器，
+  #               应把设备编码改成 H264（本平台大华设备当前主/子码流都是 H265）。
+  # rtc-extern-ip: "192.168.1.100"
   # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）
   http-port: 8081
   rtmp-port: 11935
@@ -319,6 +386,25 @@ dahua:
     # 太小 → 在线设备被误判离线（「明明在线却连不上」）；
     # 太大 → 僵尸地址拖慢巡检（每次都要等满登录超时）。
     expire-seconds: 180
+
+    # 注册即入库：注册上来的设备自动建成 gb_device 档案并拉一次通道目录。
+    # 关掉它意味着「注册只进内存注册表，设备表里看不到」——那不叫接入，
+    # 只有安全要求高、要人工审批白名单的现场才该关。
+    auto-provision: true
+
+    # 自动建档案用的设备账号。注册回调不带凭据，只能用这份默认值；
+    # 现场按设备分别授权时，入库后可在设备页单独改。
+    default-username: "admin"
+
+    # 自动建档案用的密码：【不要写在这里】，用环境变量 GB_DAHUA_PASSWORD 注入。
+    # 为空时自动接入会被跳过并打告警（不会静默失败）。
+    default-password: "${GB_DAHUA_PASSWORD:}"
+
+    # 设备 SDK 服务端口，用于「建档案」和后续直连操作。
+    # 注意它不是注册回调里那个源端口：源端口只在本次注册有效、下一分钟就变。
+    # 「把注册那条连接变成登录会话」平台已自动完成（注册回调后立刻用
+    # emSpecCap=2 + SN 登录），不需要在这里配什么。
+    sdk-port: 37777
 
 # 接口文档里展示的版本号：由 maven 资源过滤注入（spring-boot-starter-parent 用 @ 作定界符），
 # 这样 pom 改版本时文档自动跟着变，不需要手改常量。

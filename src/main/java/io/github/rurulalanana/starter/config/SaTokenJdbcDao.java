@@ -18,31 +18,12 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Sa-Token 会话持久层：PostgreSQL 实现（登录 token 落库，服务重启后登录态保留）。
+ * Sa-Token 会话持久层：PostgreSQL 实现。默认实现把会话放进程内存，每次重启都让所有用户掉登录；
+ * 这里改存 {@code sa_token_store}，重启后 token 仍有效。
  *
- * <p><b>为什么需要它</b>：Sa-Token 默认的 {@code SaTokenDaoDefaultImpl} 把会话放在
- * 进程内存里，服务每次重启（部署、崩溃拉起）都会让所有用户的登录态失效，
- * 被迫重新登录。本实现把会话改存 PostgreSQL 的 {@code sa_token_store} 表，
- * 重启后 token 依然有效。
- *
- * <p><b>实现要点</b>：
- * <ul>
- *   <li>实现 {@link SaTokenDaoByStringFollowObject} 分层接口——只需提供
- *       <b>Object 层</b>的读写，String 与 Session 的读写由接口 default 方法
- *       自动委托到这里（Sa-Token 1.41+ 的官方推荐写法）。</li>
- *   <li>值统一用 <b>JDK 序列化</b>存 BYTEA（{@code SaSession} 已实现
- *       {@code Serializable} 且显式声明了 serialVersionUID，跨版本兼容性好）。</li>
- *   <li>过期时间语义与官方内存实现保持一致：
- *       {@code -1} 永不过期（{@code expire_at} 为 NULL）、{@code -2}/0 视为空操作、
- *       {@code >0} 为剩余秒数；<b>时区计算全部在 SQL 侧</b>（{@code now()}），
- *       避免 JVM 与数据库时区不一致导致的偏移。</li>
- *   <li>反序列化失败（如 Sa-Token 大版本升级后类结构变化）时清除该条目并返回
- *       null（当作未登录），用户重新登录即可，不会让请求 500。</li>
- *   <li>过期数据清理：启动后 1 分钟首跑，之后每小时一次（daemon 线程，不阻塞停机）。
- *       读取路径本身也带 {@code expire_at > now()} 过滤与懒删除，清理只是防表膨胀。</li>
- * </ul>
- *
- * <p>表结构见 {@code db/schema.sql}（启动时由 SchemaInitializer 幂等创建）。
+ * <p>只实现 Object 层（String/Session 由 default 方法自动委托）；值用 JDK 序列化存 BYTEA；
+ * 过期语义 {@code -1} 永久、{@code -2}/0 空操作、{@code >0} 剩余秒，时区计算全在 SQL 侧（{@code now()}）；
+ * 反序列化失败（大版本升级后类结构变化）清条目返回 null，不让请求 500。
  */
 @Slf4j
 public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
@@ -62,8 +43,6 @@ public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
         // 延迟 1 分钟首跑（让应用先完成启动），之后每小时清理一次
         this.cleaner.scheduleWithFixedDelay(this::purgeExpired, 1, 60, TimeUnit.MINUTES);
     }
-
-    // ==================== Object 读写（String/Session 自动跟随） ====================
 
     @Override
     public Object getObject(String key) {
@@ -157,14 +136,6 @@ public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
         }
     }
 
-    // ==================== 会话搜索 ====================
-
-    /**
-     * 按键名搜索（前缀匹配 + 关键字包含 + 分页排序）。
-     *
-     * <p>语义对齐官方 {@code SaFoxUtil.searchList}：{@code start} 取非负，
-     * {@code size <= 0} 表示不限条数。
-     */
     @Override
     public List<String> searchData(String prefix, String keyword, int start, int size, boolean sortType) {
         String p = prefix == null ? "" : prefix;
@@ -182,9 +153,6 @@ public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
         return jdbc.queryForList(sql.toString(), String.class, args.toArray());
     }
 
-    // ==================== 生命周期与清理 ====================
-
-    /** Sa-Token 卸载本 Dao 时停止清理线程。 */
     @Override
     public void destroy() {
         cleaner.shutdownNow();
@@ -202,8 +170,6 @@ public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
             log.warn("清理过期 Sa-Token 会话失败：{}", e.toString());
         }
     }
-
-    // ==================== 序列化 ====================
 
     /** JDK 序列化；失败时记日志并返回 null（调用方跳过本次写入）。 */
     private byte[] serialize(Object object, String key) {
@@ -223,10 +189,8 @@ public class SaTokenJdbcDao implements SaTokenDaoByStringFollowObject {
     }
 
     /**
-     * JDK 反序列化。
-     *
-     * <p>失败时（典型场景：Sa-Token 大版本升级后旧数据不兼容）清除该条目并返回 null，
-     * 表现为「该 token 未登录」，用户重新登录即可，不影响服务可用性。
+     * JDK 反序列化。失败时（典型：Sa-Token 大版本升级后旧数据不兼容）清除该条目并返回 null，
+     * 表现为「该 token 未登录」，用户重新登录即可。
      */
     private Object deserialize(byte[] data, String key) {
         if (data == null || data.length == 0) {

@@ -16,26 +16,13 @@ import java.security.MessageDigest;
 import java.util.Base64;
 
 /**
- * 接口文档的 HTTP Basic 保护（{@code gb28181.api-docs.protect=true} 时生效）。
+ * 接口文档的 HTTP Basic 保护（{@code gb28181.api-docs.protect=true} 时生效）。不用 Knife4j 自带的 basic：
+ * 它在与 springdoc 2.6 字节码不兼容的 starter 里，自实现 30 行反而少一个会打架的依赖。
  *
- * <h3>为什么不用 Knife4j 自带的 basic</h3>
- *
- * <p>Knife4j 的 basic 在它的 starter 里，而那个 starter 与 springdoc 2.6 字节码不兼容
- * （见 {@code pom.xml} 里的说明）。这里用 30 行自己实现，反而少一个会互相打架的依赖。
- *
- * <h3>为什么保护文档而不是关掉它</h3>
- *
- * <p>接口清单会暴露全部路径、参数与出参结构，公网裸奔等于给扫描器送地图。
- * 但完全关掉又会让对接方没法自查（{@code /v3/api-docs} 是给 Postman/Apifox 导入用的）。
- * Basic 是个折中：浏览器会弹原生登录框，凭据只存在当次会话，不需要账号体系。
- *
- * <p><b>注意</b>：这里的 Basic 凭据与平台账号（Sa-Token）无关，是一次性的文档口令；
- * 真正的数据仍要登录 token 才能取。
- *
- * <h3>为什么比的是常量时间</h3>
- *
- * <p>用户名口令比对用 {@link MessageDigest#isEqual} 而不是 {@code equals}，
- * 避免通过响应时间差逐字节猜口令。
+ * <p>不直接关掉文档：接口清单会暴露全部路径与出参结构，公网裸奔等于给扫描器送地图；
+ * 但 {@code /v3/api-docs} 是给 Postman/Apifox 导入用的，完全关掉对接方没法自查。
+ * Basic 凭据与平台账号（Sa-Token）无关，是独立的文档口令；真正的数据仍要登录 token。
+ * 口令比对用常量时间，避免按响应时间差逐字节猜。
  */
 @Slf4j
 @Component
@@ -54,8 +41,7 @@ public class ApiDocsProtectionFilter extends OncePerRequestFilter {
             @Value("${gb28181.api-docs.basic-username:gb28181}") String username,
             @Value("${gb28181.api-docs.basic-password:}") String password) {
         if (password == null || password.isBlank()) {
-            // 开着保护却不给口令 = 任何人都能用空口令进文档；
-            // 与其静默放行，不如在启动时就断开，逼部署方补上 GB_DOCS_PASSWORD
+            // 开着保护却不给口令 = 任何人都能空口令进文档；启动就断开，逼部署方补 GB_DOCS_PASSWORD
             throw new IllegalStateException(
                     "已开启 gb28181.api-docs.protect，但 gb28181.api-docs.basic-password 为空："
                             + "请通过环境变量 GB_DOCS_PASSWORD 指定文档口令");
@@ -94,10 +80,8 @@ public class ApiDocsProtectionFilter extends OncePerRequestFilter {
     }
 
     /**
-     * 校验 {@code Authorization: Basic base64(user:pass)}。
-     *
-     * <p>只认 {@code Basic} 方案：Sa-Token 的 token 也走 {@code Authorization} 头，
-     * 但它是裸 token，不带方案前缀，这里自然不会误判。
+     * 校验 {@code Authorization: Basic base64(user:pass)}。只认 Basic 方案：Sa-Token 的 token
+     * 也走 {@code Authorization} 头，但它是裸 token，不带方案前缀，不会误判。
      */
     private boolean authorized(String header) {
         if (header == null || !header.regionMatches(true, 0, "Basic ", 0, 6)) {

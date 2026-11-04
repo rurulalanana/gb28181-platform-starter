@@ -46,6 +46,18 @@ public class GbUser implements Serializable {
     /** 是否因多次登录失败被锁定。 */
     private Boolean lock;
 
+    /**
+     * API 密钥的 SHA-256 十六进制（64 位）。
+     *
+     * <p>只存哈希：库被读走时不能直接拿去登录。明文仅在生成时返回一次。
+     */
+    private String apiKeyHash;
+
+    /** 密钥前 8 位，给用户辨认「是哪一把」用，不含敏感信息。 */
+    private String apiKeyHint;
+
+    private LocalDateTime apiKeyCreatedAt;
+
     private LocalDateTime lastLoginAt;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

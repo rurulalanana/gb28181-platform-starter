@@ -16,23 +16,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * HTTPS 证书管理接口（{@code /api/v1/tls/*}）。
+ * HTTPS 证书管理接口（{@code /api/v1/tls/*}）：status / install / regenerate / disable /
+ * gm-readiness / probe。
  *
- * <pre>
- * GET  /api/v1/tls/status           当前证书状态（域名、有效期、剩余天数）
- * POST /api/v1/tls/install          上传证书与私钥，校验后生成 nginx 配置并 reload
- * POST /api/v1/tls/regenerate       按当前端口等设置重新生成配置（不重传证书）
- * POST /api/v1/tls/disable          停用 HTTPS（保留证书文件）
- * GET  /api/v1/tls/gm-readiness     国密 35114 就绪度自检
- * GET  /api/v1/tls/probe            检测端口能否从公网访问（排查安全组）
- * </pre>
- *
- * <p><b>只有管理员可用</b>：这里能改整站的传输层安全配置，一次误操作
- * 就能让所有用户无法访问。更关键的是 install 会写入私钥，
- * 权限等同于「能冒充本站」。
- *
- * <p><b>私钥不会被读回</b>：出参 {@code TlsStatus} 里只有证书公开信息，
- * 任何接口都不返回私钥内容 —— 一旦返回，它就进了浏览器缓存与接口日志。
+ * <p><b>只有管理员可用</b>：这里改整站传输层配置，一次误操作就让所有用户无法访问；
+ * install 会写入私钥，权限等同于「能冒充本站」。
+ * <b>私钥不会被读回</b>：任何接口都不返回私钥，一旦返回就进了浏览器缓存与接口日志。
  */
 @Slf4j
 @RestController
@@ -43,7 +32,6 @@ public class TlsController {
 
     private final TlsCertificateService tlsService;
 
-    /** 当前 HTTPS 状态。 */
     @Operation(summary = "当前 HTTPS 状态")
     @GetMapping("/status")
     public ApiResponse<TlsCertificateService.TlsStatus> status() {
@@ -52,10 +40,8 @@ public class TlsController {
     }
 
     /**
-     * 安装证书并启用 HTTPS。
-     *
-     * <p>用 POST body 而不是表单参数：证书链 PEM 动辄 5~10KB，
-     * 带上中间证书后还会更长，塞进 URL 或表单字段都容易在中间环节被截断。
+     * 安装证书并启用 HTTPS。用 POST body 而非表单参数：证书链 PEM 常 5~10KB，
+     * 塞进 URL/表单字段容易在中间环节被截断。
      */
     @Operation(summary = "安装证书并启用 HTTPS")
     @PostMapping("/install")
@@ -72,7 +58,6 @@ public class TlsController {
         return ApiResponse.ok(tlsService.install(request.getCert(), request.getKey()));
     }
 
-    /** 停用 HTTPS。 */
     @Operation(summary = "停用 HTTPS")
     @PostMapping("/disable")
     public ApiResponse<TlsCertificateService.TlsStatus> disable() {
@@ -82,11 +67,8 @@ public class TlsController {
     }
 
     /**
-     * 按当前配置重新生成 nginx 配置并 reload（不重传证书）。
-     *
-     * <p>主要用途是改端口：端口是最常调的一项（备案限制、端口冲突），
-     * 而重新上传证书意味着把私钥再从本地贴一遍 —— 私钥经手次数越多，
-     * 泄漏风险越大。证书文件本来就在磁盘上，只重写配置就够。
+     * 按当前配置重新生成 nginx 配置并 reload（不重传证书）。主要用途是改端口：
+     * 重传意味着私钥再过一遍手，经手次数越多泄漏风险越大。
      */
     @Operation(summary = "按当前配置重新生成 nginx 配置并 reload（不重传证书）")
     @PostMapping("/regenerate")
@@ -96,11 +78,8 @@ public class TlsController {
     }
 
     /**
-     * 国密 35114 就绪度自检。
-     *
-     * <p>只读检测，不改变任何配置 —— 它回答的是「要上 35114 还缺什么」，
-     * 而不是提供一个「启用国密」的开关。原因见
-     * {@link TlsCertificateService#gmReadiness()}。
+     * 国密 35114 就绪度自检：只读检测，回答「要上 35114 还缺什么」，
+     * 不提供「启用国密」开关（原因见 {@link TlsCertificateService#gmReadiness()}）。
      */
     @Operation(summary = "国密 35114 就绪度自检")
     @GetMapping("/gm-readiness")
@@ -110,10 +89,8 @@ public class TlsController {
     }
 
     /**
-     * 检测 HTTPS 端口能否从公网访问。
-     *
-     * <p>专治「本机 curl 通、浏览器打不开」——九成是云安全组没放通端口。
-     * 检测走公网 IP（云环境下会经过网关，因而能命中安全组规则）。
+     * 检测 HTTPS 端口能否从公网访问，专治「本机 curl 通、浏览器打不开」——九成是云安全组没放通。
+     * 检测走公网 IP，云环境下会经过网关，因而能命中安全组规则。
      */
     @Operation(summary = "检测 HTTPS 端口能否从公网访问")
     @GetMapping("/probe")

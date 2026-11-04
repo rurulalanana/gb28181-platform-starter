@@ -22,9 +22,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * 级联配置服务（GB/T 28181—2022 第 8 章）。
- *
- * <p>本级作为下级向上级平台注册，并把选定通道的目录推送给上级。
+ * 级联配置服务（GB/T 28181—2022 第 8 章）：本级作为下级向上级注册，并把选定通道的目录推给上级。
  * 信令层由 {@code CascadeManager} 处理，本服务负责配置持久化与目录推送。
  */
 @Slf4j
@@ -75,15 +73,10 @@ public class CascadeService {
     }
 
     /**
-     * 更新在线状态与失败原因。
+     * 更新在线状态与失败原因。必须写失败原因：只置 offline 时运维无法区分「上级没开机」
+     * 「密码不对」「上级没加白名单」，三者处置方式完全不同。
      *
-     * <p><b>必须写失败原因</b>：只把 online 置 false 会让界面显示「离线」，
-     * 而运维无从判断是「上级没开机」「密码不对」还是「上级没加白名单」——
-     * 这三种原因的处置方式完全不同。{@code remark} 里带上具体原因，
-     * 现场就不用抓包了。
-     *
-     * @param online 是否在线
-     * @param error  失败原因；{@code null} 表示无错误（成功时清空）
+     * @param error 失败原因；{@code null} 表示无错误（成功时清空）
      */
     public void updateOnlineState(String cascadeId, boolean online, String error) {
         GbCascade cascade = find(cascadeId);
@@ -204,11 +197,8 @@ public class CascadeService {
 
     /**
      * 已共享通道的键集合，元素格式 {@code deviceId:channelId}。
-     *
-     * <p><b>为什么带设备编码</b>：通道编码只在单设备内唯一。现场实测有十几台
-     * 设备共用 {@code 34020000001320000001}，只用通道编码做键，
-     * 勾选其中一台会把其余同号通道全部标成「已共享」，
-     * 保存时又把它们当成「用户确认要共享」而写进库 —— 越权暴露。
+     * 必须带设备编码：通道编码只在单设备内唯一，实测十几台设备共用
+     * {@code 34020000001320000001}，只用通道编码做键会把其余同号通道全标成「已共享」并写进库。
      */
     public java.util.Set<String> sharedChannelKeys(String cascadeId) {
         java.util.Set<String> keys = new java.util.HashSet<>();
@@ -224,9 +214,7 @@ public class CascadeService {
     /**
      * 判断某通道是否已共享给该级联。
      *
-     * @param deviceId  设备编码；为空时退化为「只按通道编码匹配」，
-     *                  仅用于兼容老数据里的脏记录
-     * @param channelId 通道编码
+     * @param deviceId 设备编码；为空时退化为只按通道编码匹配（仅用于兼容老数据）
      */
     public boolean isChannelShared(String cascadeId, String deviceId, String channelId) {
         if (channelId == null) {
@@ -259,15 +247,10 @@ public class CascadeService {
             throw BizException.notFound("级联配置不存在：" + cascadeId);
         }
         /*
-         * 语义必须是「全量覆盖」，不是「追加」。
-         *
-         * <p>界面上是一个勾选框列表：用户取消勾选时，期望的是「这个通道不再共享」。
-         * 如果这里只做 upsert，取消勾选不会有任何效果 —— 而界面又会显示已保存成功，
-         * 于是「关掉了还在共享」这种越权会静默存在。级联共享的本质是
-         * 「把本级通道暴露给外部平台」，这个方向上的错误必须失败得明显。
-         *
-         * <p>所以先把本次未列出的关联全部删掉，再 upsert 本次列出的。
-         * 空列表表示「全部取消共享」，这也是一条合法操作。
+         * 语义必须是全量覆盖而不是追加：界面上是勾选框，取消勾选期望「不再共享」；
+         * 只做 upsert 会让取消勾选静默失效（界面还显示保存成功）。
+         * 级联共享是把本级通道暴露给外部平台，方向上的错误必须失败得明显。
+         * 空列表表示全部取消共享，也是合法操作。
          */
         java.util.Set<String> keep = new java.util.HashSet<>();
         for (String item : channels == null ? java.util.Collections.<String>emptyList() : channels) {
@@ -295,8 +278,7 @@ public class CascadeService {
         if (removed > 0) {
             log.info("级联 {} 取消共享 {} 路通道", cascadeId, removed);
         }
-        // 返回「当前共享总数」而不是「本次新增数」：界面需要显示最终结果，
-        // 返回新增数会让用户以为「我只共享了 1 路」而实际有 20 路。
+        // 返回「当前共享总数」而不是「本次新增数」：返回新增数会让用户以为「我只共享了 1 路」而实际有 20 路
         return count;
     }
 
@@ -322,7 +304,7 @@ public class CascadeService {
     /**
      * 共享 / 取消共享单个节点。
      *
-     * @param deviceId 设备编码；为 {@code null} 时按通道编码匹配（兼容老调用）
+     * @param deviceId 为 {@code null} 时按通道编码匹配（兼容老调用）
      */
     @Transactional
     public void shareNode(String cascadeId, String deviceId, String channelId, boolean share) {
@@ -359,10 +341,8 @@ public class CascadeService {
 
     // ==================== 目录推送 ====================
 
-    // 目录推送与上行注册都在 CascadeLinkService：那里持有真正的上行链路。
-    // 早先这两个方法直接调 client.sendMessage(parentId, ...)，而该方法要先在
-    // 会话表里查上级地址 —— 上级永远不会注册到本级，于是必然抛
-    // 「设备未注册或会话已失效」。留着只会误导，已移除。
+    // 目录推送与上行注册都在 CascadeLinkService（那里持有真正的上行链路）。
+    // 直接调 client.sendMessage(parentId, ...) 会失败：它要先在会话表里查上级地址，而上级从不注册到本级。
 
     /** 按上级编号解析级联配置（{@code id} 与 {@code serial} 二选一）。 */
     public GbCascade resolveCascade(String cascadeId) {
@@ -444,9 +424,7 @@ public class CascadeService {
                 .resolution(c.getResolution())
                 .downloadSpeed(c.getDownloadSpeed())
                 .businessGroupId(c.getBusinessGroupId())
-                // 事件类型：ON 首次全量、UPDATE 变更、DEL 删除。
-                // 上级据此决定是新增/更新还是移除该通道 —— 不写会导致
-                // 上级把每条都当成新增，删掉的通道永远留在它的目录里
+                // 事件类型：ON 首次全量、UPDATE 变更、DEL 删除；不写会让上级把每条都当新增，删掉的通道永远留着
                 .event(event == null || event.isBlank() ? "ON" : event)
                 .build();
     }

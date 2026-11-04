@@ -72,6 +72,15 @@
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
 
+    <!-- WebSocket：只用于大华双工对讲的音频下行（/api/v1/dahua/talk/audio）。
+         为什么不用 SSE / 分块 HTTP：下行是 8 kHz/16 bit 裸 PCM 的连续二进制流，
+         声明成 text/event-stream 要 base64（体积 +33%、编码开销），
+         而 WebSocket 原生就是二进制帧，浏览器侧 AudioBuffer 直接吃 ArrayBuffer。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+
     <!-- GB28181 信令模块。
          注意：jain-sip 1.2.344 硬依赖 log4j 1.x 的 API（org.apache.log4j.Priority / Layout），
          log4j-over-slf4j 不提供 Layout，缺失会直接抛 PeerUnavailableException，
@@ -181,14 +190,19 @@
       <version>${aws.sdk.version}</version>
     </dependency>
 
-    <!-- 二维码生成（直播分享页的「扫码直播」）。
-         只引 core：{@code MatrixToImageWriter} 在 javase 包里，
-         而那个包会拖进 jai-imageio，体积大且与 ImageIO 有冲突；
-         用 {@code QRCodeWriter} 拿到 BitMatrix 后自己写 PNG 即可。 -->
+    <!-- 二维码不再由后端生成：分享页用 qrcode 库在浏览器本地画。
+         原先引 zxing core（595KB）只为出一个 PNG，而分享页本身是懒加载路由，
+         前端引库不会撑大主包 —— 反而省掉一个免登录的图片编码端点。
+         详见 {@code LiveShareView.vue} 里 {@code buildQr()} 的注释。 -->
+    <!-- 行为验证码（滑块/旋转/点选），用于登录接口防爆破。
+         选 tianai-captcha 而不是 anji-plus/captcha：后者 2024 年后已基本停更，
+         而 tianai 是 dromara 社区在维护的项目（1.5.6，近两周仍有提交）。
+         starter 同时带 spring.factories 与 Boot 3 的 AutoConfiguration.imports，
+         且不引用 javax.servlet，可直接在 Boot 3 下使用。 -->
     <dependency>
-      <groupId>com.google.zxing</groupId>
-      <artifactId>core</artifactId>
-      <version>3.5.2</version>
+      <groupId>cloud.tianai.captcha</groupId>
+      <artifactId>tianai-captcha-springboot-starter</artifactId>
+      <version>1.5.6</version>
     </dependency>
 
     <!-- ==================== 接口文档（OpenAPI 3 + Knife4j UI） ====================

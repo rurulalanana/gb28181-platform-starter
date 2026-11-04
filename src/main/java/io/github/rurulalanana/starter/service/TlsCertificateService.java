@@ -31,50 +31,33 @@ import java.util.concurrent.TimeUnit;
 /**
  * HTTPS 证书管理：校验、安装、生成 nginx 站点配置并安全 reload。
  *
- * <p><b>为什么 TLS 放在 nginx</b>：标准部署是 {@code nginx(公网) → java(内网)}，
- * 录像由 nginx sendfile 直读。若在应用内开 HTTPS，nginx 回源要改成 https、
- * 证书更新还要重启连接器，两套东西互相打架。nginx 本来就该干这件事，
- * 本服务只负责「把证书放对位置、把配置写对、验证后 reload」。
+ * <p>TLS 放在 nginx（标准部署 {@code nginx(公网) → java(内网)}，录像由 nginx sendfile 直读），
+ * 应用内开 HTTPS 会让回源、证书更新都变成两套东西。本类只负责放证书、写配置、校验后 reload。
  *
- * <p><b>这个类里有三处是刻意保守的设计，改动前请先读完</b>：
- * <ol>
- *   <li><b>私钥永不返回给前端</b>，且落盘权限强制 600。私钥泄漏等于任何人
- *       都能冒充本站，后果比密码泄漏严重得多。</li>
- *   <li><b>{@code nginx -t} 失败绝不 reload，并回滚到旧配置</b>。一份坏配置
- *       reload 会让整站（含录像直读）全部不可用，而错误往往只在 reload
- *       之后才暴露 —— 先校验后 reload 是唯一安全的顺序。</li>
- *   <li><b>配对校验用「私钥签名 → 证书公钥验签」</b>，而不是比较公钥字节。
- *       后者对 RSA 可以做，对 EC 需要在 JDK 里实现点乘，算法一多就是坑；
- *       验签对所有算法通用，且顺便证明了私钥确实可用（能签出被验证的签名）。</li>
- * </ol>
+ * <p>三处刻意保守的设计：私钥永不返回前端且落盘 600；{@code nginx -t} 失败绝不 reload 并回滚旧配置；
+ * 配对校验用「私钥签名 → 证书公钥验签」而非比较公钥字节（对 EC 通用，且顺便证明私钥可用）。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TlsCertificateService {
 
-    /** 证书文件名。 */
     private static final String CERT_FILE = "server.crt";
-    /** 私钥文件名。 */
+
     private static final String KEY_FILE = "server.key";
-    /** 证书与私钥之间留多少天就开始在界面上提醒续期。 */
+    /** 剩余多少天开始在界面上提醒续期。 */
     private static final int EXPIRY_WARN_DAYS = 30;
 
     private final Gb28181Properties props;
 
     /**
-     * 运行时配置：端口与自动 reload 开关都在这里，改完即时生效。
-     *
-     * <p>这两个值为什么不像其它 tls.* 一样读 {@link Gb28181Properties}：
-     * 端口是运维最常调的一项（备案限制、端口冲突），
-     * 若写死在 yml 里，每换一次端口就要停机重启一次，
-     * 而重启会中断所有录像与设备注册。
+     * 运行时配置：端口与自动 reload 开关。不读 {@link Gb28181Properties} 是因为换端口
+     * 不该停机重启（会中断所有录像与设备注册）。
      */
     private final RuntimeConfigService config;
 
     // ==================== 状态查询 ====================
 
-    /** 当前 HTTPS 状态。 */
     public TlsStatus status() {
         TlsStatus st = new TlsStatus();
         st.setPort(currentPort());
@@ -101,13 +84,8 @@ public class TlsCertificateService {
             } else if (confExists) {
                 st.setMessage("HTTPS 已启用");
             } else {
-                /*
-                 * 证书在、配置不在 = 尚未启用，或被主动停用过。
-                 *
-                 * <p>不能写成「配置缺失，请重新上传」——那是故障口吻，
-                 * 而主动停用是一个正常操作，提示成「出错了」会让人以为
-                 * 停用没有真正生效，反复重试。这里如实描述状态即可。
-                 */
+                /* 证书在、配置不在 = 尚未启用或被主动停用。主动停用是正常操作，
+                   提示成「出错了」会让人以为停用没生效而反复重试。 */
                 st.setMessage("HTTPS 未启用（证书已保留，重新上传即可启用）");
             }
         } catch (Exception e) {
@@ -119,12 +97,10 @@ public class TlsCertificateService {
     // ==================== 安装 / 更新 ====================
 
     /**
-     * 安装（或更新）证书并启用 HTTPS。
-     *
-     * <p>流程严格按「解析 → 校验 → 落盘 → 写配置 → {@code nginx -t} → reload」，
+     * 安装（或更新）证书并启用 HTTPS：解析 → 校验 → 落盘 → 写配置 → {@code nginx -t} → reload，
      * 任何一步失败都不改变现有可用状态。
      *
-     * @param certPem 证书 PEM（可含中间证书链，服务器证书必须放在第一个）
+     * @param certPem 证书 PEM（服务器证书必须在第一个）
      * @param keyPem  私钥 PEM（支持 PKCS#8 与 RSA/EC 传统格式）
      * @return 安装后的状态
      */
@@ -190,14 +166,7 @@ public class TlsCertificateService {
 
     /**
      * 按当前配置重新生成 nginx 配置并 reload（不重新上传证书）。
-     *
-     * <p><b>为什么需要这个操作</b>：端口是最常调的一项配置（备案限制、
-     * 端口冲突、与别的站点争用）。若改端口必须重新上传证书，运维就得把
-     * 私钥再从本地翻出来贴一遍 —— 而私钥经手次数越多，泄漏风险越大。
-     * 证书文件本来就在磁盘上，只重写配置就够。
-     *
-     * <p>前置条件：证书文件必须已存在，否则生成出来的配置会让 nginx -t 失败
-     * （certificate file not found），直接报错比让用户猜更清楚。
+     * 端口是最常调的配置，若改端口必须重传证书，运维每次都要把私钥再贴一遍，泄漏风险因此上升。
      */
     public TlsStatus regenerate() {
         Path cert = certDir().resolve(CERT_FILE);
@@ -211,11 +180,7 @@ public class TlsCertificateService {
         return st;
     }
 
-    /**
-     * 停用 HTTPS（删除 nginx 站点配置）。
-     *
-     * <p><b>不删除证书文件</b>：运维可能只是临时排查，重新启用时不必再上传一次。
-     */
+    /** 停用 HTTPS（删 nginx 站点配置，保留证书文件以便重新启用）。 */
     public TlsStatus disable() {
         Path conf = Path.of(props.getTls().getNginxConfPath());
         if (Files.isRegularFile(conf)) {
@@ -242,17 +207,10 @@ public class TlsCertificateService {
 
     /**
      * 检测 HTTPS 端口是否真的能从公网访问。
-     *
-     * <p><b>为什么需要这个检测</b>：证书装好、nginx reload 成功、本机
-     * {@code curl https://127.0.0.1:端口} 也返回 200，但用户就是打不开 ——
-     * 这种「一切都对但用不了」的情况，九成是<b>云服务器安全组没有放通该端口</b>。
-     * 而安全组在运维视野之外（要登录云控制台才看得到），
-     * 于是现场排查会先去怀疑证书、nginx、防火墙，绕一大圈。
-     *
-     * <p><b>为什么用公网 IP 而不是 127.0.0.1</b>：云主机的流量走 NAT，
-     * 访问自己的公网 IP 也要经过云网关，<b>因此会命中安全组规则</b>。
-     * 这正是我们要测的：能连上说明放通了，连不上说明没放通。
-     * 用 127.0.0.1 测永远是通的，测不出问题。
+     * 「证书装好、reload 成功、本机 curl 200 但用户打不开」九成是云安全组没放通该端口，
+     * 而安全组要登录云控制台才看得到，现场会先去怀疑证书 / nginx / 防火墙。
+     * 必须用公网 IP 测：云主机访问自己的公网 IP 也要过云网关，因此会命中安全组规则；
+     * 用 127.0.0.1 测永远是通的。
      *
      * @param port 要检测的端口；{@code null} 表示当前 HTTPS 端口
      */
@@ -291,11 +249,8 @@ public class TlsCertificateService {
     }
 
     /**
-     * 尝试建立一次 TCP 连接。
-     *
-     * <p>只测 TCP 握手、不发数据：目的是判断「网络与端口是否可达」，
-     * 不是校验证书 —— 用 HTTPS 请求会因为自签证书而得到误导性的失败。
-     * 超时设得短（秒级）：运维点一下要立刻有结果。
+     * 尝试建立一次 TCP 连接：只测握手、不发数据，判断网络与端口是否可达。
+     * 不用 HTTPS 请求：自签证书会产生误导性的失败。
      */
     private static boolean canConnect(String host, int port, int timeoutMs) {
         try (java.net.Socket s = new java.net.Socket()) {
@@ -309,16 +264,9 @@ public class TlsCertificateService {
     // ==================== 国密就绪度自检 ====================
 
     /**
-     * GB/T 35114（国密）就绪度自检。
-     *
-     * <p><b>为什么是「自检」而不是「开关」</b>：35114 是一整套密码体系，
-     * 不是一个配置项。它要求设备与平台双向证书认证（CA 签发）、信令数字签名、
-     * 按 A/B/C 三级对视频做签名/加密，且通常需要国密局认证的密码硬件模块。
-     * 一个「启用国密」的勾选框背后如果没有真算法与真 CA，勾上之后
-     * <b>每台设备都会注册失败</b> —— 那比不提供这个开关糟糕得多。
-     *
-     * <p>本方法只回答问题：「如果现在要上 35114，已经具备什么、还缺什么」，
-     * 结果为纯只读检测，不改变任何配置。
+     * GB/T 35114（国密）就绪度自检，纯只读，不改变任何配置。
+     * 35114 是一整套密码体系而非一个开关：双向证书认证、信令签名、A/B/C 三级视频签名 / 加密，
+     * 通常需要国密局认证的密码硬件。没有真算法与真 CA 时勾上「启用国密」会让每台设备注册失败。
      */
     public GmReadiness gmReadiness() {
         GmReadiness r = new GmReadiness();
@@ -394,8 +342,7 @@ public class TlsCertificateService {
 
     // ==================== nginx ====================
 
-    /**
-     * 生成 nginx 配置并校验后 reload。
+    /** 生成 nginx 配置并校验后 reload。
      *
      * @param rollbackOnFailure 校验失败时是否回滚配置文件
      */
@@ -440,8 +387,7 @@ public class TlsCertificateService {
     private int currentPort() {
         int p = config.getInt(ConfigKeys.TLS_PORT);
         if (p < 1 || p > 65535) {
-            // 库里的脏数据：回落到 yml，绝不拼一个非法端口进 nginx 配置
-            // （listen 非法会让 nginx -t 失败，进而整站配置都改不了）
+            // 库里的脏数据：回落 yml，绝不拼非法端口进 nginx 配置（listen 非法会让 nginx -t 失败，整站配置都改不了）
             int fallback = props.getTls().getPort();
             log.warn("运行时配置 tls.port 非法（{}），改用 {} 重新生成", p, fallback);
             return fallback;
@@ -449,7 +395,6 @@ public class TlsCertificateService {
         return p;
     }
 
-    /** 是否允许自动 reload（优先运行时配置，回落 yml）。 */
     private boolean currentAutoReload() {
         try {
             return config.getBoolean(ConfigKeys.TLS_AUTO_RELOAD);
@@ -460,14 +405,9 @@ public class TlsCertificateService {
 
     /**
      * 渲染 HTTPS 站点配置。
-     *
-     * <p><b>必须把 HTTP 站点的 location 全部重复一遍</b>：nginx 的 location
-     * 是按 server 块匹配的，只写证书不写 location 会出现「页面能开、录像全 404」——
-     * 因为 {@code /record/} 的 sendfile 直读和 {@code /} 的反代都定义在
-     * HTTP 那个 server 块里。</p>
-     *
-     * <p>同理 {@code auth_request} 也要带过来，否则 HTTPS 下录像地址签名校验
-     * 会被绕过（这是上一轮刚修好的漏洞，不能在 SSL 配置里重新打开）。
+     * 必须把 HTTP 站点的 location 全部重复一遍：nginx 的 location 按 server 块匹配，
+     * 只写证书不写 location 会「页面能开、录像全 404」；{@code auth_request} 也要带过来，
+     * 否则 HTTPS 下录像地址签名校验被绕过。
      */
     private String renderNginxConf() {
         Path dir = certDir();
@@ -538,16 +478,10 @@ public class TlsCertificateService {
                 + "    }\n"
                 + "\n"
                 /*
-                 * 媒体流（ws-flv / http-flv / hls）必须在这里反代。
-                 *
-                 * ZLM 只监听 http/ws，不提供 TLS。HTTPS 页面若直连
-                 * ws://host:48089 会被浏览器判定为混合内容并阻止，
-                 * 表现为「实时预览一直转圈」——而登录、页面、录像都正常，
-                 * 极易误判成流服务坏了。
-                 *
-                 * 前端在 HTTPS 下已把媒体地址改成同源路径（见 resolvePlayUrls.js），
-                 * 由这里转到 ZLM，浏览器眼中就是同源 wss，没有混合内容问题。
-                 * 也不需要给媒体服务单独签证书或额外开放公网端口。
+                 * 媒体流（ws-flv / http-flv / hls）必须在这里反代：ZLM 只监听 http/ws，
+                 * HTTPS 页面直连 ws://host:48089 会被浏览器判定为混合内容并阻止，
+                 * 表现为「实时预览一直转圈」而登录 / 页面 / 录像都正常。
+                 * 前端在 HTTPS 下已把媒体地址改成同源（见 resolvePlayUrls.js），由这里转到 ZLM。
                  */
                 + "    # 媒体流：ws-flv / http-flv / hls（ZLM 不支持 TLS，由这里终结）\n"
                 + "    location /rtp/ {\n"
@@ -580,7 +514,6 @@ public class TlsCertificateService {
                 + "}\n";
     }
 
-    /** {@code nginx -t} 是否通过。 */
     private boolean confExists() {
         return Files.isRegularFile(Path.of(props.getTls().getNginxConfPath()));
     }
@@ -593,10 +526,8 @@ public class TlsCertificateService {
     }
 
     /**
-     * 执行外部命令并收集输出。
-     *
-     * <p>合并 stderr（{@code nginx -t} 把结果写在 stderr）并设超时：
-     * 外部命令卡住会把 HTTP 请求线程一起拖死。
+     * 执行外部命令并收集输出。合并 stderr（{@code nginx -t} 把结果写在 stderr）并设 15 秒超时，
+     * 否则命令卡住会把 HTTP 请求线程一起拖死。
      */
     private NginxResult runCommand(String... cmd) {
         try {
@@ -646,16 +577,9 @@ public class TlsCertificateService {
     }
 
     /**
-     * 解析私钥。
-     *
-     * <p>支持两种实际最常见的格式：
-     * <ul>
-     *   <li>PKCS#8（{@code BEGIN PRIVATE KEY}）—— JDK 直接吃；</li>
-     *   <li>PKCS#1 / SEC1（{@code BEGIN RSA PRIVATE KEY} / {@code BEGIN EC PRIVATE KEY}）
-     *       —— 这是 {@code openssl genrsa} 的默认输出，必须手工包一层 PKCS#8，
-     *       否则用户按最普通的 openssl 命令生成密钥后上传会直接报「解析失败」。</li>
-     * </ul>
-     * 算法由证书公钥决定（密钥必须与之配对，按证书算法尝试即可）。
+     * 解析私钥，支持 PKCS#8（{@code BEGIN PRIVATE KEY}）与 PKCS#1/SEC1
+     * （{@code BEGIN RSA/EC PRIVATE KEY}，{@code openssl genrsa} 的默认输出）。
+     * 后者必须手工包一层 PKCS#8，否则用户按最普通的 openssl 命令生成的密钥会直接报「解析失败」。
      */
     private static PrivateKey parsePrivateKey(String pem, X509Certificate cert) {
         String body = pem.replaceAll("-----BEGIN [^-]+-----", "")
@@ -708,15 +632,7 @@ public class TlsCertificateService {
     }
 
     /**
-     * 把 PKCS#1 / SEC1 私钥包装成 PKCS#8。
-     *
-     * <pre>
-     * PKCS#8 ::= SEQUENCE {
-     *   version             INTEGER (0),
-     *   privateKeyAlgorithm SEQUENCE { OID, 参数 },
-     *   privateKey          OCTET STRING   -- 里面就是原来的 PKCS#1/SEC1 字节
-     * }
-     * </pre>
+     * 把 PKCS#1 / SEC1 私钥包装成 PKCS#8：SEQUENCE { version(0), 算法 OID, OCTET STRING(原字节) }。
      * OID：rsaEncryption = 1.2.840.113549.1.1.1，id-ecPublicKey = 1.2.840.10045.2.1
      */
     private static byte[] wrapAsPkcs8(byte[] inner, String kind) {
@@ -734,7 +650,6 @@ public class TlsCertificateService {
         return derTlv((byte) 0x30, body);
     }
 
-    /** 编码一个 DER TLV。 */
     private static byte[] derTlv(byte tag, byte[] value) {
         int len = value.length;
         byte[] lenBytes;
@@ -770,15 +685,8 @@ public class TlsCertificateService {
     }
 
     /**
-     * 验证私钥与证书配对。
-     *
-     * <p>用「私钥签名 → 公钥验签」而不是比较公钥字节：后者对 RSA 可行，
-     * 对 EC 需要在 JDK 里自己实现点乘；验签对所有算法通用，
-     * 而且顺便证明了私钥确实可用于签名（不只是能被解析）。
-     *
-     * <p><b>上传错私钥是这里最常见的事故</b>（同名文件、多张证书混淆），
-     * 而 nginx 只在 reload 时才报 "key values mismatch"，此时站点已经不可用了。
-     * 提前到上传环节校验，代价是一次签名运算，收益是避免一次线上事故。
+     * 验证私钥与证书配对（签名 → 验签，而非比较公钥字节：后者对 EC 需自实现点乘）。
+     * 上传错私钥是这里最常见的事故，而 nginx 只在 reload 时才报 "key values mismatch"，此时站点已不可用。
      */
     private static void verifyKeyPair(X509Certificate cert, PrivateKey key) {
         String sigAlg;
@@ -813,7 +721,6 @@ public class TlsCertificateService {
         }
     }
 
-    /** 把证书信息填进状态对象。 */
     private static void fillCertInfo(TlsStatus st, X509Certificate x) {
         st.setSubject(x.getSubjectX500Principal().getName());
         st.setIssuer(x.getIssuerX500Principal().getName());
@@ -827,7 +734,7 @@ public class TlsCertificateService {
         st.setExpired(days < 0);
         st.setSelfSigned(x.getSubjectX500Principal().equals(x.getIssuerX500Principal()));
 
-        // CN 与 SAN：运维最关心「这张证书认哪些域名」，配错就是浏览器报 NET::ERR_CERT_COMMON_NAME_INVALID
+        // CN 与 SAN：配错就是浏览器报 NET::ERR_CERT_COMMON_NAME_INVALID
         List<String> names = new ArrayList<>();
         try {
             Collection<List<?>> sans = x.getSubjectAlternativeNames();
@@ -852,8 +759,6 @@ public class TlsCertificateService {
         }
         st.setDomainNames(names);
     }
-
-    // ==================== 工具 ====================
 
     private Path certDir() {
         String configured = props.getTls().getCertDir();

@@ -5,20 +5,11 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * 可热更新配置项注册表。
+ * 可热更新配置项注册表：每项声明默认值、类型、取值范围与界面说明，集中在此，
+ * 新增配置不用同时改 Service / Controller / 前端。
  *
- * <p><b>为什么需要注册表而不是直接读写 {[@code gb_config}</b>：
- * <ul>
- *   <li>每个配置需要知道<b>默认值</b>（yml 兜底）、<b>类型</b>（界面控件）、
- *       <b>取值范围</b>（防止把保留天数填成 0 把录像全删光）、
- *       <b>说明</b>（界面上要告诉运维「改这个会影响什么」）；</li>
- *   <li>集中在一处，新增配置只改这个文件，不用同时动 Service / Controller / 前端。</li>
- * </ul>
- *
- * <p><b>哪些配置可以放这里</b>：改了之后「下一次使用该值时自然生效」的
- * 运维参数 —— 保留天数、清理间隔、阈值、开关。
- * <b>不能放</b>：端口、文件路径、数据库连接、ZLM 启动参数等决定进程装配的项，
- * 它们改了必须重启，放进注册表只会造成「界面显示改了实际没生效」的误解。
+ * <p>只放「改了之后下一次用值时自然生效」的运维参数。端口、文件路径、数据库连接、
+ * ZLM 启动参数等决定进程装配的项不能放：它们必须重启，放进来只会让人以为「界面改了却没生效」。
  */
 public final class ConfigKeys {
 
@@ -28,11 +19,8 @@ public final class ConfigKeys {
     // ==================== 录像 ====================
 
     /**
-     * 录像保留天数。
-     *
-     * <p>超过就被清理任务删掉（跳过 important=true 的）。0 是特殊值：
-     * 表示「不按天数删」，只受磁盘水位约束 —— 但界面上必须显式提示，
-     * 否则运维填 0 会以为「永不删」，实际盘满时仍会被水位策略清掉。
+     * 录像保留天数。0 是特殊值：不按天数删，只受磁盘水位约束 —— 盘满时仍会被清掉，
+     * 界面上必须显式提示，否则运维填 0 会以为「永不删」。
      */
     public static final String RECORD_RETAIN_DAYS = "record.retain-days";
 
@@ -43,11 +31,8 @@ public final class ConfigKeys {
     public static final String RECORD_KEEP_MIN_DAYS = "record.keep-min-days";
 
     /**
-     * 单文件分片时长（秒）。
-     *
-     * <p>改这个值<b>不影响正在录制的分片</b>（ZLM 在 mk_recorder_start 时就定下了
-     * max_second），下一次开始录像才生效。界面上必须说明，否则运维会以为
-     * 「改小了当前文件马上切」。
+     * 单文件分片时长（秒）：不影响正在录制的分片（ZLM 在 mk_recorder_start 时就定下 max_second），
+     * 下一次开始录像才生效。
      */
     public static final String RECORD_MAX_SECOND = "record.max-second";
 
@@ -69,23 +54,14 @@ public final class ConfigKeys {
     // ==================== HTTPS ====================
 
     /**
-     * HTTPS 监听端口。
-     *
-     * <p><b>为什么端口要能改</b>：国内云服务器经常因备案限制而无法使用 80/443，
-     * 或者端口已被别的站点占用。写死在 yml 里意味着「为了换个端口得停机重启」，
-     * 而改端口本身就是运维最常做的一件事。
-     *
-     * <p>改成运行时配置后，在界面上改完 → 重新生成 nginx 配置并 reload → 立即生效，
-     * 不需要重启应用（也不需要重新上传证书 —— 证书文件还在原处）。
+     * HTTPS 监听端口。国内云服务器常因备案限制用不了 80/443，改成运行时配置后
+     * 界面上改完重新生成 nginx 配置并 reload 即生效，不需要重启或重传证书。
      */
     public static final String TLS_PORT = "tls.port";
 
     /**
-     * 是否允许应用自动 reload nginx。
-     *
-     * <p><b>这是一个提权面</b>：开启时应用能以 root 身份执行 {@code nginx -s reload}。
-     * 关闭后上传证书仍会生成配置并做 {@code nginx -t} 校验，只是不自动 reload，
-     * 界面会提示需要手工执行。高安全要求环境建议关闭。
+     * 是否允许应用自动 reload nginx。这是提权面（以 root 执行 {@code nginx -s reload}），
+     * 关闭后仍会生成配置并做 {@code nginx -t}，只是不自动 reload。高安全环境建议关闭。
      */
     public static final String TLS_AUTO_RELOAD = "tls.auto-reload";
 
@@ -135,24 +111,14 @@ public final class ConfigKeys {
     // ==================== 信令接入 ====================
 
     /**
-     * 设备统一接入密码（SIP 注册鉴权）。
-     *
-     * <p>留空 = 不鉴权（任何设备都能注册）。设置后所有设备的 REGISTER
-     * 都要通过 Digest 校验，密码错误返回 401。
-     *
-     * <p><b>只校验密码、不校验用户名</b>：各厂商在 Authorization 里填的
-     * username 五花八门（SIP 域 / 平台编码 / 设备编号），强制校验会让
-     * 大量正常设备注册失败。
+     * 设备统一接入密码（SIP 注册鉴权）。留空 = 不鉴权。只校验密码、不校验用户名：
+     * 各厂商在 Authorization 里填的 username 五花八门，强制校验会让大量正常设备注册失败。
      */
     public static final String SIP_PASSWORD = "sip.password";
 
     // ==================== 注册表 ====================
 
-    /**
-     * 全部可配置项。
-     *
-     * <p>顺序即界面展示顺序（按 group 分组，组内保持声明顺序）。
-     */
+    /** 全部可配置项：顺序即界面展示顺序（按 group 分组，组内保持声明顺序）。 */
     public static final List<Def> ALL = List.of(
             intDef(RECORD_RETAIN_DAYS, "7", "record", 0, 3650,
                     "云端录像保留天数。超过则被清理任务删除（跳过「重要」标记的录像）。"
@@ -286,21 +252,12 @@ public final class ConfigKeys {
         return new Def(key, def, group, "LONG", min, max, desc);
     }
 
-    /**
-     * 布尔项。
-     *
-     * <p>min/max 传 0：{@code Def#validate} 对 BOOLEAN 走的是
-     * true/false、1/0、on/off 归一化，不看范围。
-     */
+    /** 布尔项：min/max 传 0，{@code Def#validate} 对 BOOLEAN 走 true/false、1/0、on/off 归一化。 */
     private static Def boolDef(String key, String def, String group, String desc) {
         return new Def(key, def, group, "BOOLEAN", 0, 0, desc);
     }
 
-    /**
-     * 字符串项（如密码）。
-     *
-     * <p>min/max 传 0：不参与数值校验。
-     */
+    /** 字符串项（如密码）：min/max 传 0，不参与数值校验。 */
     private static Def strDef(String key, String def, String group, String desc) {
         return new Def(key, def, group, "STRING", 0, 0, desc);
     }
@@ -308,13 +265,10 @@ public final class ConfigKeys {
     /**
      * 一项配置的定义。
      *
-     * @param key     配置键
-     * @param def     默认值（与 application.yml 保持一致；yml 缺失时的兜底）
-     * @param group   分组（前端分区展示）
-     * @param type    INT / LONG / BOOLEAN / STRING
-     * @param min     数值下限（非数值类型填 0）
-     * @param max     数值上限（非数值类型填 0）
-     * @param desc    界面说明
+     * @param def   默认值（与 application.yml 一致，yml 缺失时的兜底）
+     * @param type  INT / LONG / BOOLEAN / STRING
+     * @param min   数值下限（非数值类型填 0）
+     * @param max   数值上限（非数值类型填 0）
      */
     public record Def(String key, String def, String group, String type,
                       long min, long max, String desc) {
@@ -325,10 +279,8 @@ public final class ConfigKeys {
                 throw new IllegalArgumentException("配置值不能为空：" + key);
             }
             String v = raw.trim();
-            // STRING 允许空串：空是该类型的一个合法取值，不是「没填」。
-            // 例如 sip.password 的语义就是「留空 = 关闭注册鉴权」——
-            // 若在这里一并拒绝，鉴权开关会变成单向门（能开不能关），
-            // 运维只能去库里手改，极其危险。
+            // STRING 允许空串：sip.password 的语义就是「留空 = 关闭注册鉴权」，
+            // 一并拒绝会让鉴权变成单向门（能开不能关），运维只能去库里手改。
             if (v.isEmpty() && !"STRING".equals(type)) {
                 throw new IllegalArgumentException("配置值不能为空：" + key);
             }

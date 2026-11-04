@@ -4,13 +4,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
 /**
- * 直播分享页的通道信息与播放地址。
- *
- * <p>只暴露「看这一路直播」所需的最小字段，不复用 {@link StreamVo} ——
- * 那个出参带着 SSRC、callId、端口等信令内部状态，分享页是<b>免登录</b>的，
- * 没有必要也不该把这些细节暴露给任何拿到链接的人。
- *
- * <p>字段与前端 {@code LiveShareView.vue} 一一对应。
+ * 直播分享页的通道信息与播放地址。只暴露「看这一路直播」的最小字段，不复用 {@link StreamVo}：
+ * 后者带 SSRC、callId、端口等信令内部状态，而分享页<b>免登录</b>，拿到链接的人不该看到这些。
  */
 @Data
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -22,13 +17,7 @@ public class LiveShareVo {
     /** 通道编码。 */
     private String channelId;
 
-    /**
-     * 展示用名称。
-     *
-     * <p>优先取通道的自定义名（{@code customName}），其次设备目录里的原始名，
-     * 都没有时退回通道编码 —— 分享页顶部要有一个能认人的标题，
-     * 只显示一串 20 位编码等于没有标题。
-     */
+    /** 展示名：平台自定义名 > 设备目录原始名 > 通道编码（顶部总得有个能认人的标题）。 */
     private String name;
 
     /** 设备是否在线。离线时页面直接提示，不必白等一次 INVITE 超时。 */
@@ -36,38 +25,28 @@ public class LiveShareVo {
 
     /**
      * 云台类型：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机。
-     *
-     * <p>取值与 {@code gb_channel.ptz_type} 一致。分享页据此决定是否显示
-     * 云台控制块 —— 固定枪机物理上不能转，把控制浮层摆上去只会让人
-     * 反复点而怀疑平台坏了。
+     * 固定枪机不显示云台控制块 —— 物理上不能转，摆上浮层只会让人以为平台坏了。
      */
     private Integer ptzType;
 
-    /** 通道状态（{@code ON} / {@code OFF}）。 */
     private String status;
 
     /** 流是否已就绪（{@code ONLINE} 表示设备已在推流）。 */
     private Boolean streaming;
 
-    /** WebSocket-FLV 地址。 */
     private String wsFlv;
 
-    /** HTTP-FLV 地址。 */
     private String flv;
 
     /** HLS 地址（兜底协议）。 */
     private String hls;
 
-    /** RTMP 地址。 */
     private String rtmp;
 
-    /** RTSP 地址。 */
     private String rtsp;
 
     /**
-     * 业务提示（通道不存在、设备离线、点播被拒等）。
-     *
-     * <p>与错误码不同：这些是「页面能打开、但放不出来」的情形，
+     * 业务提示（通道不存在、设备离线、点播被拒等）。与错误码不同：这些是「页面能打开、但放不出来」，
      * 前端据此在播放区显示具体原因，而不是给一块黑屏。
      */
     private String notice;

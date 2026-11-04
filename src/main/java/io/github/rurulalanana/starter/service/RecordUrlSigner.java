@@ -12,32 +12,19 @@ import java.security.SecureRandom;
 import java.util.HexFormat;
 
 /**
- * 录像播放/下载地址的签名与校验。
+ * 录像播放 / 下载地址的签名与校验。
  *
- * <p><b>为什么需要它</b>：标准部署里 {@code /record/**} 由 nginx（sendfile）
- * 直接读磁盘发出，<b>请求根本不经过 Spring</b>，所以 Sa-Token 拦截器对它毫无作用。
- * 结果是「知道路径就能下载」——而路径是可推断的：
- * {@code /record/<通道编码>/record/rtp/<流ID>/<日期>/<时间>-N.mp4}。
- * 实测过一条 60MB 的录像，不带任何凭据 {@code curl} 就能完整拉走。
- * 对一个部署在公网的平台来说，这等于全部录像对匿名用户开放。
+ * <p>必须做：{@code /record/**} 由 nginx sendfile 直读，<b>请求根本不经过 Spring</b>，Sa-Token
+ * 拦截器毫无作用，而路径可推断（{@code /record/<通道>/record/rtp/<流ID>/<日期>/<时间>-N.mp4}）——
+ * 实测一条 60MB 的录像不带凭据 {@code curl} 就能完整拉走。
  *
- * <p><b>做法</b>：服务端在回填 {@code playUrl} / {@code downloadUrl} 时，
- * 追加 {@code ?e=<过期秒>&t=<签名>}，签名为
- * {@code HMAC-SHA256(secret, "路径|过期秒")} 的十六进制前 32 位。
- * nginx 侧用 {@code auth_request} 把每个请求（含每次 Range 续传）转给
- * {@code /api/v1/record/auth} 校验。
+ * <p>做法：回填地址时追加 {@code ?e=<过期秒>&t=<签名>}，签名为 {@code HMAC-SHA256(secret, 路径|过期秒)}
+ * 的前 32 位 hex；nginx 用 {@code auth_request} 把每个请求（含每次 Range 续传）转给
+ * {@code /api/v1/record/auth} 校验。不用 nginx 的 {@code secure_link}：那要求两边持有同一密钥，
+ * 不一致时全部录像打不开，而这类故障发生在部署环节。
  *
- * <p><b>为什么不直接把密钥写进 nginx 用 {@code secure_link}</b>：
- * 那样 nginx 与 Java 必须持有同一个密钥，两边不一致时<b>全部录像打不开</b>，
- * 而这类故障发生在部署环节、排查成本极高。走子请求校验则没有任何需要同步的配置。
- *
- * <p><b>为什么密钥是进程级随机而不是落库持久化</b>：
- * 落库意味着一次数据库泄露就永久丧失伪造防护；进程级密钥无法从存储中窃取。
- * 代价是服务重启后旧链接失效 —— 可以接受：链接本来就短命（默认 12 小时），
- * 且前端每次加载列表都会重新取址。
- *
- * <p>校验在 nginx 的鉴权子请求与本地静态资源映射（{@code record-static-enabled}）
- * 两处共用同一套逻辑，不会因为换部署形态而漏掉一侧。
+ * <p>密钥进程级随机不落库：落库意味着库一泄露就失去伪造防护；代价是重启后旧链接失效，
+ * 而链接本来就短命（默认 12 小时）、列表每次加载都重新取址。
  */
 @Slf4j
 @Service
@@ -76,12 +63,8 @@ public class RecordUrlSigner {
     }
 
     /**
-     * 给录像地址追加签名参数。
+     * 给录像地址追加签名参数。非录像地址、签名关闭时原样返回，调用方不必判断。
      *
-     * <p>非录像地址、或签名功能关闭时原样返回 —— 调用方不必判断，
-     * 直接把返回值交给前端即可。
-     *
-     * @param url 形如 {@code /record/<...>.mp4} 的同源相对路径
      * @return 带 {@code ?e=..&t=..} 的地址
      */
     public String sign(String url) {
@@ -100,13 +83,9 @@ public class RecordUrlSigner {
     }
 
     /**
-     * 校验一个录像请求是否放行。
+     * 校验一个录像请求是否放行。签名关闭时恒为 {@code true}：nginx 侧可始终配置鉴权子请求，
+     * 开关完全由服务端决定，不需要改 nginx 或重启。
      *
-     * <p>签名功能关闭时恒为 {@code true}：这样 nginx 侧可以<b>始终</b>
-     * 配置鉴权子请求，开关完全由服务端决定，不需要改 nginx 或重启。
-     *
-     * @param requestUri 原始请求 URI（可含 query），即 nginx 传来的
-     *                   {@code X-Original-URI} 或本进程的 {@code getRequestURI() + query}
      * @return 是否允许访问
      */
     public boolean allow(String requestUri) {

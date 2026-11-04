@@ -1,6 +1,7 @@
 package io.github.rurulalanana.starter.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbOperationLog;
 import io.github.rurulalanana.starter.mapper.GbOperationLogMapper;
 import io.github.rurulalanana.starter.vo.OpLogVo;
@@ -222,7 +223,9 @@ public class OperationLogService {
         vo.setOperator(e.getOperator());
         // 请求参数：审计的核心信息（改了什么），不返回出去等于没记
         vo.setParams(e.getParams());
-        vo.setCreateTime(e.getCreateTime() == null ? null : e.getCreateTime().toString().replace('T', ' '));
+        // 只 replace('T',' ') 不够：纳秒会留着（2026-11-02 15:48:51.624609865），
+        // 所以必须走 TimeFormats 统一成 yyyy-MM-dd HH:mm:ss
+        vo.setCreateTime(TimeFormats.toDisplay(e.getCreateTime()));
         return vo;
     }
 }

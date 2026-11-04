@@ -12,54 +12,27 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 分页目录聚合器。
+ * 分页目录聚合器。GB/T 28181 附录 A.2.4 的 Catalog 应答支持分页：{@code <SumNum>} 是总条数，
+ * {@code <DeviceList Num>} 只带一页。实测 LiveGBS 有 3 个通道会连发 3 个 Response，
+ * 每帧 {@code SumNum=3} 但只含 1 个 Item；不聚合则每帧都被当全量落库，只留最后一帧的结果。
  *
- * <p><b>为什么需要它</b>：GB/T 28181 附录 A.2.4 的 Catalog 应答支持分页 ——
- * 一个 {@code Response} 里的 {@code <SumNum>} 是本次查询的<b>总条数</b>，
- * 而 {@code <DeviceList Num="...">} 只携带其中一页。下级平台（实测 LiveGBS v250103）
- * 就是按这种标准行为上报的：有 3 个通道时它会连发 3 个独立的 Catalog Response，
- * 每帧 {@code SumNum=3} 但只含 1 个 {@code <Item>}。
- *
- * <p><b>不聚合会怎样</b>：每帧都被当成一次完整的全量目录去落库，
- * 于是「本次目录项」恒为 1，而设备实际有 3 个通道时库里只会留下被最后一帧覆盖的结果。
- * 用户看到的就是「下级平台推了 4 个通道上来，这边只显示 2 个」。
- *
- * <p><b>聚合策略</b>：按「设备编码 + 会话序号（SN）」分组累积，满足任一条件即收口：
- * <ul>
- *   <li>已累积条数 &ge; {@code SumNum}（正常收齐）</li>
- *   <li>距首帧超过 {@link #WINDOW_MS}（设备少报 / 丢包，不能无限等）</li>
- * </ul>
- * 收口后一次性交给 {@code DeviceService.saveCatalog}，由它按实际行数回填通道数。
- *
- * <p><b>为什么用 SN 分组</b>：同一台设备可能被并发查询（定时采集 + 手动刷新目录），
- * 两批应答交错到达时按 SN 分开累积，不会把两批的条目混成一份。
- * SN 在标准里是 1~9999 循环使用，因此分组会在收口时立即清除，避免长期占用内存。
+ * <p>按「设备编码 + SN」分组累积，收齐（已收 &ge; SumNum）或超 {@link #WINDOW_MS} 即收口。
+ * 按 SN 分组是为了不让并发查询（定时采集 + 手动刷新）的两批应答混成一份；SN 是 1~9999 循环的，
+ * 所以收口即清除。
  */
 @Slf4j
 @Component
 public class CatalogPager {
 
-    /**
-     * 聚合窗口（毫秒）。
-     *
-     * <p>取 8 秒：实测下级平台连续上报 3 帧耗时不到 1 秒，
-     * 留足余量覆盖跨网抖动，又不至于让用户点「刷新目录」后干等。
-     */
+    /** 聚合窗口（毫秒）：实测下级连发 3 帧不到 1 秒，8 秒足够覆盖跨网抖动又不至于让人干等。 */
     static final long WINDOW_MS = 8_000L;
 
     /**
      * 收口结果。
      *
-     * @param items    累积到的全部目录项
-     * @param complete 是否已收齐（已收条数 &ge; {@code SumNum}）。
-     *                 仅当收齐时才能当作「全量快照」去清理已下线的旧通道。
-     * @param sumNum   设备自报的总条数（{@code SumNum}），0 表示设备未提供。
-     *                 带上它才能从日志区分「下级只共享了 2 个」和「下级共享 4 个但我们只收到 2 个」。
-     * @param frames   本次批次实际收到的应答帧数（诊断分页上报风格）。
-     * @param removed  本批次内被 {@code <Event>DELETE</Event>} 标记的通道编码，
-     *                 需要从库里删除。<b>与 {@code items} 互斥</b>：
-     *                 同一编码若先 ADD 后 DELETE，最终只出现在 removed 里；
-     *                 先 DELETE 后 ADD 则只出现在 items 里（后到的状态覆盖先前的）。
+     * @param complete 是否已收齐（已收 &ge; {@code SumNum}）；只有收齐才能当全量快照清理旧通道
+     * @param sumNum   设备自报总条数，0 表示未提供；带上它才能区分「下级只共享 2 个」与「共享 4 个只收到 2 个」
+     * @param removed  被 {@code <Event>DELETE</Event>} 标记的通道，与 {@code items} 互斥（后到的状态覆盖先前的）
      */
     public record Result(List<CatalogItem> items, boolean complete, int sumNum, int frames,
                          List<String> removed) {
@@ -72,27 +45,19 @@ public class CatalogPager {
     private static final class Batch {
         /** 设备自报的总条数（{@code SumNum}），0 或 null 视为未知。 */
         private final int sumNum;
-        /** 首帧到达时间。 */
         private final long startedAt = System.currentTimeMillis();
         /** 已累积的条目，按设备编码去重（标准要求设备编码全局唯一）。 */
         private final Map<String, CatalogItem> items = new LinkedHashMap<>();
         /** 被 {@code <Event>DELETE</Event>} 标记、待删除的通道编码。 */
         private final java.util.LinkedHashSet<String> removed = new java.util.LinkedHashSet<>();
         /**
-         * 已处理过的条目标记，格式 {@code 通道编码|类型}，用于计算收口进度。
-         *
-         * <p><b>为什么不能直接用 {@code items.size()}</b>：同一批次内先 ADD 后 DELETE
-         * 同一通道时，净状态数始终是 1（先在 items 里，后被移进 removed），
-         * 用它判断进度会导致「永远收不齐」，只能等 8 秒超时。
-         * 而完全不去重又会退化成「设备重传同一帧就算进度」，
-         * 使重复条目把 SumNum 撑爆。两级语义必须分开：
-         * <ul>
-         *   <li>{@code items} / {@code removed} —— <b>净状态</b>，同一通道只留最终状态</li>
-         *   <li>{@code seen} —— <b>处理计数</b>，同一 (通道, 变更类型) 只算一次</li>
-         * </ul>
+         * 已处理过的条目标记（{@code 通道编码|类型}），用于计算收口进度。
+         * 不能直接用 {@code items.size()}：同一批次先 ADD 后 DELETE 同一通道时净状态恒为 1，
+         * 用它判断进度会永远收不齐、只能等超时；完全不去重又会让重传帧把 SumNum 撑爆。
+         * 所以净状态（items / removed）与处理计数（seen）必须分开。
          */
         private final java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
-        /** 收到的应答帧数（诊断用：可区分「单帧多条」与「多帧各一条」两种上报风格）。 */
+        /** 收到的应答帧数（诊断「单帧多条」与「多帧各一条」两种风格）。 */
         private int frames;
 
         Batch(int sumNum) {
@@ -103,10 +68,8 @@ public class CatalogPager {
     /**
      * 投递一帧目录应答。
      *
-     * @param deviceId 应答来源设备（{@code Response} 里的 {@code DeviceID}）
-     * @param sn       会话序号，用于区分同一设备的并发查询
-     * @param sumNum   本次查询的总条数（{@code <SumNum>}），未知传 {@code null}
-     * @param items    本帧携带的目录项
+     * @param sn     会话序号，用于区分同一设备的并发查询
+     * @param sumNum 本次查询的总条数，未知传 {@code null}
      * @return 已收齐时返回累积结果；未收齐返回 {@code null}
      */
     public Result accept(String deviceId, int sn, Integer sumNum,
@@ -131,9 +94,7 @@ public class CatalogPager {
                         continue;
                     }
                     if (del) {
-                        // <Event>DELETE</Event>：下级已删除该通道。
-                        // 若仍当 upsert 处理，下级删掉的通道会被本级「加回来」，
-                        // 形成永远删不掉的幽灵通道。
+                        // <Event>DELETE</Event>：当 upsert 处理会把下级删掉的通道加回来，形成幽灵通道
                         batch.items.remove(it.getDeviceId());
                         batch.removed.add(it.getDeviceId());
                     } else {
@@ -143,9 +104,8 @@ public class CatalogPager {
                     }
                 }
             }
-            // 没有 SumNum 的设备（大量国标 IPC / NVR 都不带这个字段）无从判断是否还有后续帧。
-            // 若按「等超时」处理，这类设备的目录同步会被无谓拖慢 8 秒，
-            // 而它们实际上都是单帧全量上报，直接收口即可。
+            // 没有 SumNum 的设备（大量国标 IPC / NVR 不带此字段）无从判断是否还有后续帧，
+            // 它们实际都是单帧全量上报，直接收口，不要白等 8 秒。
             if (batch.sumNum <= 0) {
                 pending.remove(key);
                 return new Result(new ArrayList<>(batch.items.values()), false, 0,
@@ -161,8 +121,7 @@ public class CatalogPager {
             }
             pending.remove(key);
             if (!complete) {
-                // 少报通常意味着设备侧过滤（权限/离线通道不报），不是错误；
-                // 但需要在日志里留痕，便于排查「通道数与设备侧不一致」
+                // 少报通常意味着设备侧过滤（权限 / 离线通道不报），不是错误，但要在日志里留痕
                 log.info("目录分页未收齐即收口: device={} sn={} 已收={}/{} 帧数={}",
                         deviceId, sn, batch.seen.size(), batch.sumNum, batch.frames);
             }
@@ -180,11 +139,8 @@ public class CatalogPager {
     }
 
     /**
-     * 判断目录项是否为删除通知。
-     *
-     * <p>GB/T 28181 附录 A.2.4：{@code <Event>} 取 {@code ADD}/{@code UPDATE}/
-     * {@code DELETE}/{@code ON}/{@code OFF}，仅在通知类报文中出现。
-     * 大小写不敏感——实测平台（LiveGBS、大华）两种写法都出现过。
+     * 判断目录项是否为删除通知：附录 A.2.4 的 {@code <Event>} 取 ADD/UPDATE/DELETE/ON/OFF，
+     * 仅在通知类报文中出现；大小写不敏感（实测 LiveGBS、大华两种写法都出现过）。
      */
     private static boolean isDelete(CatalogItem item) {
         String event = item.getEvent();
@@ -192,11 +148,8 @@ public class CatalogPager {
     }
 
     /**
-     * 清理超时未收口的批次。
-     *
-     * <p>由定时任务调用。正常情况下每帧都会在 {@link #accept} 里被收口，
-     * 但若某批次只来了一帧且 {@code SumNum} 恒大于实际条数（设备少报），
-     * 后续再无帧到达，就不会再有人来收口 —— 这个批次会永久占着内存。
+     * 清理超时未收口的批次：若某批次只来一帧且 {@code SumNum} 恒大于实际条数，后续再无帧到达，
+     * 就没人来收口，会永久占内存。
      */
     public int purgeExpired() {
         long now = System.currentTimeMillis();

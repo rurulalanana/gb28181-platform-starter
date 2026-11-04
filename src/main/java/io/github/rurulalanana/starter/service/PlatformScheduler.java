@@ -12,20 +12,9 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 平台定时任务。
- *
- * <p>职责（按调度周期从短到长）：
- * <ul>
- *   <li>系统指标采样（3 秒）；</li>
- *   <li>孤儿流认领（15 秒）；</li>
- *   <li>空闲流回收（20 秒）；</li>
- *   <li>目录分页批次回收（30 秒）、云端录像保活（30 秒）；</li>
- *   <li>心跳超时设备标记离线（60 秒）、录像对账（60 秒）；</li>
- *   <li>录像磁盘清理（10 分钟）；</li>
- *   <li>操作日志清理（1 小时）、状态日志清理（1 小时）。</li>
- * </ul>
- *
- * <p>通道只由设备上报的目录应答产生，这里不做任何兜底登记。
+ * 平台定时任务：指标采样（3s）、孤儿流认领（15s）、空闲流回收（20s）、目录分页回收 / 录像保活（30s）、
+ * 心跳超时与录像对账（60s）、磁盘清理（10min）、日志清理（1h）。
+ * 通道只由设备上报的目录应答产生，这里不做兜底登记。
  */
 @Slf4j
 @Component
@@ -44,49 +33,30 @@ public class PlatformScheduler {
     private final StreamService streamService;
     private final CatalogPager catalogPager;
     private final RecordPlanService recordPlanService;
+    /** SDK 直连设备探测（它们没有心跳，只能主动探）。 */
+    private final DeviceProvisionService provisionService;
     private final Gb28181Properties props;
 
     /**
-     * 可热更新配置的来源（<b>数据库优先、application.yml 兜底</b>）。
-     *
-     * <p>所有「用户可能在界面上改」的参数都从这里读，<b>不要用 {@code @Value}</b>：
-     * {@code @Value} 只在启动时解析一次，改 yml 或改库都不生效，必须重启 ——
-     * 而这正是要消灭的运维成本。
+     * 可热更新配置的来源（数据库优先、application.yml 兜底）。
+     * 用户可能在界面上改的参数都从这里读，不用 {@code @Value}：它只在启动时解析一次。
      */
     private final RuntimeConfigService config;
 
     /**
      * 各动态任务上一次实际执行的时刻（任务名 → 毫秒）。
-     *
-     * <p><b>为什么需要它</b>：{@code @Scheduled(fixedDelayString = "${...}")}
-     * 的占位符只在<b>启动时</b>解析一次，改了 yml 或数据库都不会生效。
-     * 为了支持「界面上改间隔立即生效」，做法是：
-     * <ul>
-     *   <li>{@code @Scheduled} 固定高频 tick（{@link #TICK_MS}）；</li>
-     *   <li>任务内部用 {@link #due} 判断「距上次执行是否已达最新配置的间隔」。</li>
-     * </ul>
-     * 代价是每个 tick 一次 HashMap 查找，相对任务本身耗时可以忽略。
-     *
-     * <p>附带好处：间隔调小<b>立刻</b>体现（下一 tick 就判定到期），
-     * 调大则自然延后，都不需要重启。
+     * {@code @Scheduled(fixedDelayString = "${...}")} 的占位符只在启动时解析一次，
+     * 所以固定高频 tick，任务内部用 {@link #due} 判断「距上次执行是否已达最新配置的间隔」。
      */
     private final Map<String, Long> lastRunAt = new ConcurrentHashMap<>();
 
-    /**
-     * 动态任务的调度心跳（毫秒）。
-     *
-     * <p>取 5 秒：抱证实际间隔误差不超过 5 秒，又不至于空转太频繁。
-     * 现有可配置间隔的下限都是 5~10 秒级，5 秒 tick 足够表达。
-     */
+    /** 动态任务的调度心跳（毫秒）：5 秒使实际间隔误差不超过 5 秒，又不至于空转太频繁。 */
     private static final long TICK_MS = 5_000;
 
     /**
-     * 判断某个周期任务本次是否该执行。
+     * 判断某个周期任务本次是否该执行：首次调用直接返回 {@code true}，
+     * 之后按 {@link RuntimeConfigService} 的当前间隔判断。
      *
-     * <p>首次调用直接返回 {@code true}（允许立刻跑一次），之后按
-     * {@link RuntimeConfigService} 里的<b>当前</b>间隔判断。
-     *
-     * @param taskId     任务标识（{@link #lastRunAt} 的 key）
      * @param intervalMs 间隔（毫秒，调用方从 config 实时读取）
      */
     private boolean due(String taskId, long intervalMs) {
@@ -101,38 +71,18 @@ public class PlatformScheduler {
 
     /**
      * 会话停在 {@code NEGOTIATING} 多久才允许重建一次（毫秒）。
-     *
-     * <p>取值权衡：太短等于没退避（30 秒一轮照旧轰炸设备），
-     * 太长会让「设备刚恢复」的通道多等很久。2 分钟是折中 ——
-     * 正常设备收到 INVITE 后 1~2 秒就开始推流，
-     * 能拖过 2 分钟的基本是设备侧真有问题，慢点重试无妨。
+     * 正常设备收到 INVITE 后 1~2 秒就开始推流，能拖过 2 分钟的基本是设备侧真有问题。
      */
     private static final long STUCK_RETRY_MS = 120_000;
 
     /**
-     * 通道 → 首次观察到「协商中」的时间戳（毫秒）。
-     *
-     * <p>用来判断会话是「刚发起、还在等设备推流」还是「卡死了」。
+     * 通道 → 首次观察到「协商中」的时间戳（毫秒）：判断会话是等设备推流还是卡死。
      * 会话转 {@code ONLINE} 或消失时清除，避免长期占用内存。
      */
     private final Map<String, Long> negotiatingSince = new ConcurrentHashMap<>();
 
-    /*
-     * 保留天数 / 磁盘水位 / 任务间隔一律从 {@link RuntimeConfigService} 实时读取，
-     * 不在这里用 {@code @Value} 缓存一份。
-     *
-     * <p>早先这里确实有 5 个 {@code @Value} 字段（oplogRetainDays 等），
-     * 但自从配置改为存库热更新后它们就再没被读过 ——
-     * 留着只会让人以为「改 yml 能生效」，与类注释里的说明恰好相反。
-     */
-
     /**
-     * 心跳超时巡检。
-     *
-     * <p><b>间隔也走运行时配置</b>：{@code device.offline-scan-interval-ms}
-     * 在界面上可改，所以不能用 {@code @Scheduled(fixedDelayString=...)} 固定
-     * （那表达式只在启动时求值一次，改完不生效）。改成「固定 tick + due 判断」，
-     * 与其它可调间隔的任务保持一致。
+     * 心跳超时巡检（间隔走运行时配置，故不能用 {@code @Scheduled(fixedDelayString)} 固定）。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void scanOfflineDevices() {
@@ -140,15 +90,8 @@ public class PlatformScheduler {
             return;
         }
         try {
-            /*
-             * 必须从 {@link RuntimeConfigService} 实时读取，不能用
-             * {@code props.getStarter().getDeviceOfflineSeconds()}。
-             *
-             * <p>后者是启动时绑定的 yml 快照：`device.offline-seconds` 在界面上
-             * 是可热更新的（存库 + 立即生效），但这里读 props 就永远不会变，
-             * 表现为「界面上保存成功、阈值实际没变」。实测过这个坑 ——
-             * 其余清理任务都已改成 config.getXxx()，唯独这一处漏了。
-             */
+            /* 阈值必须从 config 实时读，不能用 props 里的 yml 快照：device.offline-seconds 界面可热更新，
+               读 props 会表现为「保存成功但阈值没变」。 */
             int timeoutSeconds = config.getInt(ConfigKeys.DEVICE_OFFLINE_SECONDS);
             int count = deviceService.offlineSilentDevices(timeoutSeconds);
             if (count > 0) {
@@ -161,12 +104,52 @@ public class PlatformScheduler {
     }
 
     /**
-     * 系统指标采样（默认每 3 秒，与前端轮询间隔一致）。
+     * SDK 直连设备（大华等）在线探测。
      *
-     * <p><b>为什么由服务端定时采而不是等前端请求</b>：历史曲线要的是
-     * 「过去 3 分钟」，而请求只在有人开页面时才发生。若靠请求驱动，
-     * 第一个打开概览页的人只能看到一个点，得等 3 分钟才成线。
-     * 这里恒定频率积累，页面打开即有完整曲线。
+     * <p><b>为什么必须有这一步</b>：这类设备不发 SIP 心跳，
+     * {@link #scanOfflineDevices} 的「心跳超时」判据对它们完全不适用 ——
+     * 已经把它们的排除逻辑放在 {@code DeviceService#offlineSilentDevices} 里，
+     * 但排除之后它们就<b>再没有任何机制更新在线状态</b>。
+     * 结果是：设备明明在线，界面却一直是接入那一刻的状态；
+     * 设备真的断电了，界面也不会变。
+     *
+     * <p>间隔取 60 秒：SDK 登录 + 登出是毫秒级操作，但设备端的登录会话数有限，
+     * 探得太勤会挤掉正常业务的会话。
+     */
+    @Scheduled(fixedDelay = TICK_MS)
+    public void probeSdkDevices() {
+        if (!due("sdk-probe", SDK_PROBE_INTERVAL_MS)) {
+            return;
+        }
+        java.util.List<String> ids;
+        try {
+            ids = provisionService.sdkDeviceIds();
+        } catch (Exception e) {
+            log.warn("SDK 设备巡检读取设备列表失败: {}", e.getMessage());
+            return;
+        }
+        int online = 0;
+        for (String id : ids) {
+            try {
+                if (provisionService.probeOnly(id)) {
+                    online++;
+                }
+            } catch (Exception e) {
+                // 单台设备探测失败不能影响其余设备
+                log.debug("SDK 设备探测失败: {} {}", id, e.toString());
+            }
+        }
+        if (!ids.isEmpty()) {
+            log.debug("SDK 设备巡检完成：{} / {} 在线", online, ids.size());
+        }
+    }
+
+    /** SDK 设备探测间隔（毫秒）：60 秒，见 {@link #probeSdkDevices()}。 */
+    private static final long SDK_PROBE_INTERVAL_MS = 60_000L;
+
+    /**
+     * 系统指标采样（默认每 3 秒，与前端轮询间隔一致）。
+     * 必须由服务端定时采：历史曲线要「过去 3 分钟」，靠前端请求驱动的话第一个开页面的人只能看到一个点。
      */
     @Scheduled(fixedDelayString = "${gb28181.starter.metrics-sample-interval-ms:3000}")
     public void sampleSystemMetrics() {
@@ -174,11 +157,8 @@ public class PlatformScheduler {
     }
 
     /**
-     * 目录分页批次回收（默认每 30 秒）。
-     *
-     * <p>正常情况下每帧都会在 {@code CatalogPager.accept} 里被收口。
-     * 但若设备少报 {@code SumNum}（报了 3 实际只发 2 帧）后续再无帧到达，
-     * 该批次就没人来收口，会永久占着内存。这里定期扫掉超时批次。
+     * 目录分页批次回收（默认每 30 秒）：设备少报 {@code SumNum}（报 3 实际只发 2 帧）后
+     * 再无帧到达，批次没人收口会永久占内存，这里定期扫掉超时批次。
      */
     @Scheduled(fixedDelayString = "${gb28181.starter.catalog-pager-purge-interval-ms:30000}")
     public void purgeCatalogPager() {
@@ -211,15 +191,9 @@ public class PlatformScheduler {
 
     /**
      * 级联上行链路维护（每个 tick 都跑，内部自己限流）。
-     *
-     * <p><b>为什么不做成 {@code due(...)} 限流</b>：这条链路的状态机是
-     * 「未注册 → 注册」「快过期 → 重注册」「到点 → 心跳」，
-     * 三种状态的判定都依赖当前时刻与上次成功时间，用一个粗粒度的
-     * 「每 N 秒跑一次」会把重注册窗口推后，导致上级眼里出现离线空档。
-     *
-     * <p>{@code CascadeLinkService#tick()} 本身每次只处理一条链路：
-     * 注册是同步阻塞（最长 5 秒等响应），十条不可达的上级会把调度线程
-     * 占住 50 秒。分摊到多个 tick 不影响实时性（tick 间隔 5 秒）。
+     * 不用 {@code due(...)} 限流：状态机依赖当前时刻与上次成功时间，粗粒度的「每 N 秒跑一次」
+     * 会把重注册窗口推后，上级眼里出现离线空档。
+     * {@code tick()} 每次只处理一条链路：注册同步阻塞最长 5 秒，十条不可达的上级会占住调度线程 50 秒。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void maintainCascadeLinks() {
@@ -231,16 +205,10 @@ public class PlatformScheduler {
     }
 
     /**
-     * 状态变更日志过期清理（默认每小时一次，保留 30 天）。
-     *
-     * <p><b>为什么需要</b>：{@code gb_status_log} 记录设备/通道的在线离线变更，
-     * 每次心跳超时、每次重连都写一条。实测 10 天积累了 1 万条 ——
-     * 量不大但<b>没有任何清理路径</b>，跑一年就是 36 万条，
-     * 而它参与 {@code ORDER BY create_time DESC} 的分页查询，
-     * 表越大翻页越慢。
-     *
-     * <p>保留期比操作日志（7 天）长得多：状态变更是排查
-     * 「某天设备为什么掉线」的关键证据，比谁点了哪个按钮更值得留。
+     * 状态变更日志过期清理（每小时，保留 30 天）。
+     * {@code gb_status_log} 每个心跳超时 / 重连都写一条（实测 10 天 1 万条），此前没有任何清理路径；
+     * 它参与 {@code ORDER BY create_time DESC} 的分页查询，表越大翻页越慢。
+     * 保留期比操作日志长：状态变更是排查「某天设备为什么掉线」的关键证据。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void purgeStatusLogs() {
@@ -263,20 +231,9 @@ public class PlatformScheduler {
 
     /**
      * 报警 / 移动位置 / 设备录像索引的过期清理（每小时一次）。
-     *
-     * <p><b>这三张表此前完全没有清理路径</b>，是比操作日志更严重的隐患：
-     * <ul>
-     *   <li>{@code gb_alarm}：移动侦测类报警在高频点位上每天上千条；</li>
-     *   <li>{@code gb_position_log}：车载/单兵设备按固定周期上报 GPS，
-     *       一台设备一天就有数百到上万条；</li>
-     *   <li>{@code gb_device_record}：每次「设备录像检索」都写入设备侧文件清单。</li>
-     * </ul>
-     * 跑几个月就能把库撑到几十 GB，而这些表都参与按时间倒序的分页查询 ——
-     * 表现是「报警页面越用越慢，最后打不开」，且清理只能靠 DBA 手工 DELETE。
-     *
-     * <p>保留期与报警/位置的实际用途挂钩：
-     * 报警通常按「季度复盘」看，位置轨迹更短（一周足够回溯），
-     * 设备录像索引只是缓存（设备端的录像清单随时可以重新检索），所以最短。
+     * 这三张表此前完全没有清理路径：移动侦测报警每天上千条，车载 / 单兵 GPS 一天数百到上万条，
+     * 设备录像索引每次检索都写，跑几个月就能把库撑到几十 GB，且都参与按时间倒序的分页。
+     * 保留期：报警按季度复盘，位置一周足够回溯，设备录像索引只是缓存所以最短。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void purgeUnboundedTables() {
@@ -313,22 +270,9 @@ public class PlatformScheduler {
     }
 
     /**
-     * 录像磁盘清理（默认每 10 分钟一次，启动 2 分钟后首跑）。
-     *
-     * <p>两级策略：
-     * <ol>
-     *   <li><b>按保留天数</b>：超过 {@link ConfigKeys#RECORD_RETAIN_DAYS} 的非重要录像删掉；</li>
-     *   <li><b>按磁盘水位</b>：用完 1 之后若仍超过
-     *       {@link ConfigKeys#RECORD_DISK_MAX_USED_PERCENT}，继续删最老的
-     *       （跳过 important 与最近 {@link ConfigKeys#RECORD_KEEP_MIN_DAYS} 天）。</li>
-     * </ol>
-     *
-     * <p><b>为什么必须有</b>：云端录像 24 小时不停写，单通道约 8GB/天。
-     * 服务器只有 30G 盘，没有清理就是一颗定时炸弹 —— 磁盘写满后
-     * ZLM 分片写失败、PostgreSQL（同盘）也可能写失败，整个平台瘫痪。
-     *
-     * <p>跑在 Spring 的调度线程上，不与 {@code gb28181-persist} 抢（删文件是 I/O，
-     * 落库是事务，混在一个线程会互相拖慢）。
+     * 录像磁盘清理（默认每 10 分钟，启动 2 分钟后首跑）：先按保留天数删非重要录像，
+     * 再按磁盘水位删最老的（跳过 important 与最近 {@link ConfigKeys#RECORD_KEEP_MIN_DAYS} 天）。
+     * 必须存在：单通道约 8GB/天，服务器只有 30G 盘，盘满后 ZLM 分片与同盘的 PostgreSQL 都可能写失败。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void purgeRecordings() {
@@ -362,40 +306,13 @@ public class PlatformScheduler {
 
     /**
      * 录像计划执行（默认每 30 秒）。
-     *
-     * <p><b>为什么必须有</b>：{@link RecordPlanService} 原先只提供 CRUD，
-     * <b>没有任何地方真正执行计划</b> —— 用户在界面上配好时段、关联通道后
-     * 什么都不会发生。这是功能缺失，不是配置问题。
-     *
-     * <h3>语义：只产生一个内存信号，绝不改用户的配置</h3>
-     *
-     * <p>本方法<b>不写数据库、不改 {@code cloud_record}、不改 {@code on_demand}</b>，
-     * 只把「此刻计划判定应录」的通道集合写进
-     * {@link ChannelRecordPolicy#replacePlanActive}。
-     *
-     * <p>早先的实现让计划直接改这两个字段，后果：
-     * <ul>
-     *   <li>用户手动设的开关被计划反复覆盖，界面上看到状态自己变，无法维护；</li>
-     *   <li>计划把 {@code on_demand} 设成 false 后，空闲流永远不被回收
-     *       （见 {@code StreamService#channelsRequiringStream}），
-     *       设备被一直拉着推流、白占带宽。</li>
-     * </ul>
-     * 现在「是否录像」= 用户手动开关 ∪ 计划信号，两者独立，
-     * 用户的持久配置完全由用户掌握。
-     *
-     * <p><b>优先级</b>：用户手动开启优先。计划关闭时不会关掉用户手动开的通道 ——
-     * 判定是并集，见 {@link ChannelRecordPolicy#isEnabled}。
-     *
-     * <p><b>多个计划包含同一通道</b>：取<b>并集</b>——任一计划处于时段内即应录制。
-     * 这比「取交集」更符合直觉：用户给同一通道配了「白班 8-18」和「夜班 20-6」
-     * 两个计划，期望是两段都录，而不是只在重叠时段录。
-     * 该逻辑在 {@link RecordPlanService#scopeAt} 里，天然是 union。
-     *
-     * <p><b>只决策、不拉流</b>：开录由 {@link #keepCloudRecordStreams()} 保活任务
-     * 负责（它保证流在线，流上线回调自动开录），避免两个任务同时发 INVITE 打架。
-     *
-     * <p>30 秒周期：计划最小粒度是「分钟」，30 秒足以在一个分钟内跟上，
-     * 又不至于频繁查库（每轮 2 次查询）。
+     * 只产生内存信号，绝不改用户配置：不写库、不改 {@code cloud_record} / {@code on_demand}，
+     * 只把此刻计划判定应录的通道集合交给 {@link ChannelRecordPolicy#replacePlanActive}。
+     * 早先直接改这两个字段，后果是用户开关被计划反复覆盖，且计划把 {@code on_demand} 设为 false 后
+     * 空闲流永不被回收（见 {@code StreamService#channelsRequiringStream}），设备一直被拉着推流。
+     * 「是否录像」= 用户开关 ∪ 计划信号，两者独立。
+     * 多个计划包含同一通道取并集（白班 8-18 + 夜班 20-6 期望两段都录），逻辑在 {@link RecordPlanService#scopeAt}。
+     * 只决策不拉流：开录由 {@link #keepCloudRecordStreams()} 负责，避免两个任务同时发 INVITE 打架。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void applyRecordPlans() {
@@ -437,10 +354,8 @@ public class PlatformScheduler {
 
     /**
      * 后台下载收尾巡检（每 5 秒）。
-     *
-     * <p><b>为什么必须由服务端扫</b>：用户点完下载通常会关掉页面去干别的，
-     * 此时没有任何前端在轮询 {@code download/progress}。若收尾只发生在
-     * 轮询里，ZLM 会一直录到 {@code max_second} 上限，任务永远拿不到文件路径。
+     * 用户点完下载通常会关掉页面，没有前端轮询 {@code download/progress}；
+     * 若收尾只在轮询里做，ZLM 会一直录到 {@code max_second} 上限，任务永远拿不到文件路径。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void finishDownloads() {
@@ -455,12 +370,8 @@ public class PlatformScheduler {
     }
 
     /**
-     * 自动录像对账（默认每 60 秒）。
-     *
-     * <p><b>为什么需要</b>：自动录像的归档挂在「流下线」事件上，但事件可能丢 ——
-     * 平台重启（ZLM 内存索引清空）、设备拔线超时（直接 BYE 超时而非正常下线）。
-     * 丢了事件的录像在 ZLM 侧已经结束，但库里永远缺一条终态记录。
-     * 这里周期性把「已结束却未落库」的录像补归档，保证云端录像列表完整。
+     * 自动录像对账（默认每 60 秒）：把「已结束却未落库」的录像补归档。
+     * 归档挂在「流下线」事件上，但事件可能丢 —— 平台重启（ZLM 索引清空）、设备拔线超时（直接 BYE 超时）。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void reconcileRecordings() {
@@ -479,32 +390,10 @@ public class PlatformScheduler {
 
     /**
      * 云端录像保活：确保开了录像开关的通道持续有流（默认每 30 秒）。
-     *
-     * <p><b>为什么需要</b>：云端录像的前提是「有流可录」，而流的建立只发生在
-     * 用户主动点播时。用户打开开关后不点播、或平台重启（ZLM 与 SIP 会话表都清空），
-     * 这些通道就永远不会开始录 —— 表现为「开了云端录像却什么都没发生」。
-     * 开关的语义是「平台持续把这段录像存下来」，不应依赖用户手动拉流。
-     *
-     * <p><b>不重复拉流</b>：会话已 {@code ONLINE} 时直接跳过，
-     * 不产生任何信令。
-     *
-     * <p><b>失败要退避，不能每轮硬重建</b>：这是踩过的坑 ——
-     * 设备侧不推流时（级联下级平台掉线、设备不认 INVITE），会话会长期停在
-     * {@code NEGOTIATING}。{@code startLive} 的复用判断要求「ZLM 确实在收 RTP」，
-     * 于是每轮都判定「不可复用」→ 关旧会话 → 重新 INVITE。
-     * 实测表现为每 30 秒一次 BYE + INVITE，SSRC 逐次递增
-     * （{@code 0100020013 → 0100020014 → …}），日志里刷满
-     * 「已有会话，先关闭旧会话」，而录像一段都没生成。
-     *
-     * <p>现在按会话状态分三档处理：
-     * <ul>
-     *   <li>{@code ONLINE} → 跳过，什么都不做；</li>
-     *   <li>{@code NEGOTIATING} 且停留时间 &lt; {@link #STUCK_RETRY_MS}
-     *       → 跳过（给设备留出推流时间，正常设备 1~2 秒就开始推）；</li>
-     *   <li>{@code NEGOTIATING} 超时或压根没会话 → 才重建一次，并重置计时。</li>
-     * </ul>
-     * 重试频率因此从「每 30 秒」降到「每 2 分钟」，对设备的压力小 4 倍，
-     * 恢复速度也够用（设备一恢复，下一个周期就能建上）。
+     * 流只在用户主动点播时才建立，平台重启后也全清，不保活就表现为「开了云端录像却什么都没发生」。
+     * 会话 {@code ONLINE} 时直接跳过；{@code NEGOTIATING} 未超 {@link #STUCK_RETRY_MS} 也跳过，超时才重建一次。
+     * 必须退避：{@code startLive} 的复用判断要求「ZLM 确实在收 RTP」，设备不推流时每轮都会
+     * 关旧会话 + 重新 INVITE（实测每 30 秒一次 BYE + INVITE、SSRC 逐次递增而录像一段都没生成）。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void keepCloudRecordStreams() {
@@ -550,31 +439,15 @@ public class PlatformScheduler {
                 log.debug("云端录像保活拉流失败: channel={} {}", channelId, e.getMessage());
             }
         }
-        // 反向对账：正在录、但此刻不该录的通道 → 停录并归档。
-        //
-        // 【为什么必须在这里做】录像计划的「退出时段」只更新内存信号
-        // （ChannelRecordPolicy#replacePlanActive），不直接停录 ——
-        // 若两处都停会撞车。这里统一按「应录集合」对账，
-        // 无论是计划退出、用户关了开关、还是计划被删除/停用，都在这一处收尾。
+        // 反向对账：正在录但此刻不该录的通道停录并归档。
+        // 必须集中在这一处：计划退出只更新内存信号，两处都停会撞车。
         stopRecordingsNotNeeded();
     }
 
     /**
-     * 停掉「正在录但此刻不该录」的通道。
-     *
-     * <p>触发场景：
-     * <ul>
-     *   <li>录像计划退出时段（内存信号消失）；</li>
-     *   <li>用户关掉通道的云端录像开关；</li>
-     *   <li>计划被删除 / 停用，或通道从计划里移除。</li>
-     * </ul>
-     *
-     * <p><b>为什么覆盖全部会话而不是只查计划通道</b>：
-     * {@code recordPolicy.enabledChannels()} 是「应该录」的权威集合，
-     * 拿它与「实际在录」比对即可，不必关心是哪个原因导致不该录。
-     *
-     * <p>停录会顺带归档（{@code stopCloudRecord} 内部落库），
-     * 所以计划退出时段的最后一段不会丢。
+     * 停掉「正在录但此刻不该录」的通道（计划退出时段、用户关开关、计划删除 / 停用）。
+     * 拿 {@code recordPolicy.enabledChannels()} 与「实际在录」比对即可，不必关心是哪个原因；
+     * 停录会顺带归档（{@code stopCloudRecord} 内部落库），最后一段不会丢。
      */
     private void stopRecordingsNotNeeded() {
         java.util.Set<String> shouldRecord = recordPolicy.enabledChannels();
@@ -614,17 +487,9 @@ public class PlatformScheduler {
 
     /**
      * 孤儿流巡检：把「设备仍在推、平台却没会话」的流重新纳管。
-     *
-     * <p><b>为什么需要定时巡检</b>：{@code on_mk_media_publish} 回调只在流
-     * <b>首次注册</b>时触发一次。而平台启动时设备可能已经开始推流了 ——
-     * 实测恢复 SSRC 映射（{@code StreamEventBridge#restoreSsrcMappings}）完成于
-     * 17:53:06.5，而设备推流触发回调在 17:53:05.1，<b>早了 1.4 秒</b>。
-     * 回调错过就是永久错过：这路流会一直停在「未匹配到会话」状态，
-     * 表现为「级联那边还在推流、平台这边一路都看不到」，直到设备自己超时。
-     *
-     * <p>巡检按 ZLM 里实际存在的媒体源（流名是 SSRC 十六进制串 = 未被纳管的标志）
-     * 反查墓碑，重建会话。周期短（默认 15 秒）是因为孤儿流既占带宽又让用户
-     * 看不到画面，越早恢复越好。
+     * {@code on_mk_media_publish} 只在流首次注册时触发一次 —— 实测 SSRC 映射恢复完成于 17:53:06.5，
+     * 而设备推流回调在 17:53:05.1（早 1.4 秒），错过就是永久错过。
+     * 周期短（默认 15 秒）是因为孤儿流既占带宽又让用户看不到画面。
      */
     @Scheduled(fixedDelayString = "${gb28181.starter.orphan-adopt-interval-ms:15000}",
             initialDelayString = "${gb28181.starter.orphan-adopt-initial-delay-ms:20000}")
@@ -641,21 +506,9 @@ public class PlatformScheduler {
 
     /**
      * 空闲流巡检：关掉没有任何观看者的会话（默认每 20 秒）。
-     *
-     * <p><b>为什么必须自己巡检而不能只靠 ZLM 的无人观看回调</b>：
-     * {@code on_mk_media_no_reader} <b>每个媒体源只触发一次</b>
-     * （ZLM 内部 {@code _none_reader} 标志位），且只在读者数由非零降为零的那一刻触发。
-     * 而下面两种场景回调都已经错过、且永不补发：
-     * <ol>
-     *   <li>平台重启后设备仍在推流 —— 回调在会话重建<b>之前</b>就已触发
-     *       （实测相差 2 秒）；</li>
-     *   <li>{@link #adoptOrphanStreams()} 重新纳管孤儿流时，流早已注册。</li>
-     * </ol>
-     * 实测后果：一路流挂了几十分钟不关、一直占带宽，用户反馈
-     * 「这个脏的流没有走无人观看关流」。
-     *
-     * <p>与孤儿流巡检配合成闭环：孤儿流巡检负责「让它可见」，
-     * 本任务负责「没人看就关掉」，两者都以 ZLM 的实际媒体源为准。
+     * 不能只靠 ZLM 的 {@code on_mk_media_no_reader}：每个媒体源只触发一次，且只在读者数由非零降为零时触发，
+     * 平台重启后回调在会话重建前已触发（实测相差 2 秒）、{@link #adoptOrphanStreams()} 纳管时流早已注册，都不补发。
+     * 与孤儿流巡检成闭环：前者让流可见，本任务在没人看时关掉，两者都以 ZLM 实际媒体源为准。
      */
     @Scheduled(fixedDelay = TICK_MS)
     public void reapIdleStreams() {

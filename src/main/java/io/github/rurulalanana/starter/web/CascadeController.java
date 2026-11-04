@@ -39,21 +39,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 级联配置接口。
- *
+ * 级联配置接口。路由：
  * <pre>
- * GET  /api/v1/cascade/list                级联配置列表
- * GET  /api/v1/cascade/info                单条配置
- * GET  /api/v1/cascade/channellist         级联通道列表
- * POST /api/v1/cascade/save                保存配置
- * POST /api/v1/cascade/setenable           启用/停用
- * POST /api/v1/cascade/setshareallchannel  共享全部通道
- * POST /api/v1/cascade/savechannels        保存共享通道
- * POST /api/v1/cascade/removechannels      移除共享通道
- * POST /api/v1/cascade/sharenode           共享节点
- * POST /api/v1/cascade/pushcatalog         推送全部共享通道目录
- * POST /api/v1/cascade/pushchannelcatalog  推送单条通道目录
- * POST /api/v1/cascade/remove              删除配置
+ * GET  /api/v1/cascade/list / info / channellist
+ * POST /api/v1/cascade/save / setenable / setshareallchannel / savechannels / removechannels
+ * POST /api/v1/cascade/sharenode / pushcatalog / pushchannelcatalog / remove
  * </pre>
  */
 @Slf4j
@@ -72,19 +62,10 @@ public class CascadeController {
     private final io.github.rurulalanana.starter.service.SnapService snapService;
 
     /**
-     * 保存请求体。
-     *
-     * <p><b>字段名为什么是 PascalCase</b>：青瓜 GBS 的 {@code /cascade/save}
-     * 契约用大写开头（{@code Serial} / {@code Host} / {@code Port}），
-     * 前端 {@code CascadeView.vue} 也按该契约提交，这里保持一致。
-     *
-     * <p><b>为什么必须加 {@code @JsonNaming}</b>：Jackson 的属性名是从
-     * <b>getter</b> 推导的，不是字段名 —— {@code getSerial()} 推导出的属性名是
-     * {@code serial}（首字母小写）。只把字段写成 {@code Serial} 完全无效，
-     * 前端提交的 {@code {"Serial":"..."}} 会被静默丢弃，后端接着报
-     * 「上级平台编号（Serial）不能为空」——调用方明明传了值却提示没传。
-     * 这里用 {@code UpperCamelCaseStrategy} 把规范名统一成 PascalCase，
-     * 再靠每个字段上的 {@code @JsonAlias} 兼容 camelCase / 全小写写法。
+     * 保存请求体。字段名用 PascalCase，对齐青瓜 GBS 的 {@code /cascade/save} 契约（{@code Serial}/{@code Host}/{@code Port}）。
+     * 必须加 {@code @JsonNaming}：Jackson 属性名由 getter 推导，{@code getSerial()} → {@code serial}，
+     * 只把字段写成 {@code Serial} 无效，前端传的 {@code {"Serial":"..."}} 会被静默丢弃，
+     * 后端接着报「Serial 不能为空」。各字段的 {@code @JsonAlias} 兼容 camelCase / 全小写。
      */
     @Data
     @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
@@ -147,7 +128,6 @@ public class CascadeController {
         private String MediaTransport;
     }
 
-    /** 级联配置列表。 */
     @Operation(summary = "级联配置列表")
     @GetMapping("/list")
     public ApiResponse<CascadeListVo> list(
@@ -168,7 +148,6 @@ public class CascadeController {
         return ApiResponse.ok(vo);
     }
 
-    /** 单条级联配置。 */
     @Operation(summary = "单条级联配置")
     @GetMapping("/info")
     public ApiResponse<CascadeVo> info(@RequestParam String id) {
@@ -180,7 +159,6 @@ public class CascadeController {
         return ApiResponse.ok(cascadeView(cascade));
     }
 
-    /** 级联状态记录。 */
     @Operation(summary = "级联状态记录")
     @GetMapping("/statuslog")
     public ApiResponse<StatusLogListVo> statusLog(
@@ -212,14 +190,8 @@ public class CascadeController {
     }
 
     /**
-     * 级联通道列表（共享通道选择弹窗的数据源）。
-     *
-     * <p>参数对齐上级平台（LiveGBS）的「选择通道」弹窗：
-     * 关键字搜索、通道类型筛选、只看已选、在线筛选、排序、分页。
-     *
-     * @param channelType {@code all} / {@code video} / {@code audio} / {@code alarm} / {@code other}
-     * @param sort        排序字段：{@code deviceId} / {@code channelId} / {@code customId} / {@code name}
-     * @param order       {@code asc} / {@code desc}
+     * 级联通道列表（共享通道选择弹窗的数据源），参数对齐上级平台 LiveGBS。
+     * channelType：all / video / audio / alarm / other；sort：deviceId / channelId / customId / name；order：asc / desc。
      */
     @Operation(summary = "级联通道列表（共享通道选择弹窗的数据源）")
     @GetMapping("/channellist")
@@ -235,13 +207,11 @@ public class CascadeController {
             @RequestParam(defaultValue = "asc") String order) {
         StpUtil.checkLogin();
         GbCascade cascade = cascadeService.resolveCascade(id);
-        // 用「设备编码:通道编码」集合：通道编码只在单设备内唯一，
-        // 只用通道编码会把十几台设备的同号通道全标成已共享
+        // 用「设备编码:通道编码」集合：通道编码只在单设备内唯一，只用通道编码会把同号通道全标成已共享
         java.util.Set<String> sharedKeys = cascadeService.sharedChannelKeys(cascade.getCascadeId());
         List<GbChannel> all = deviceService.allChannels();
 
-        // 设备在线状态按设备编码缓存：同一个下级平台下几百路通道共用一个状态，
-        // 逐条查库会变成 N 次查询（N = 通道总数），这里一次批量取。
+        // 设备在线状态按设备编码缓存：同一下级平台下几百路通道共用一个状态，逐条查库会变成 N 次查询
         java.util.Map<String, Boolean> deviceOnline = deviceOnlineMap(all);
 
         String type = channelType == null ? "all" : channelType.trim().toLowerCase();
@@ -278,8 +248,8 @@ public class CascadeController {
 
         CascadeChannelListVo vo = new CascadeChannelListVo();
         vo.setChannelCount(list.size());
-        // 「全部共享」时实际共享数就是全部通道数，不是 gb_cascade_channel 里的记录数
-        // （那个开关会让显式列表失效，界面上显示 0 路会被误读成「什么都没共享」）
+        // 「全部共享」时实际共享数就是全部通道数，不是 gb_cascade_channel 的记录数
+        // （该开关让显式列表失效，显示 0 路会被误读成「什么都没共享」）
         vo.setChannelRelateCount(Boolean.TRUE.equals(cascade.getShareAllChannel())
                 ? list.size() : sharedCount);
         vo.setShareAllChannel(cascade.getShareAllChannel());
@@ -287,12 +257,6 @@ public class CascadeController {
         return ApiResponse.ok(vo);
     }
 
-    /**
-     * 组装一行级联通道视图。
-     *
-     * @param cascadeId    已共享时传级联 ID，未共享传 {@code null}
-     * @param onlineByDev  设备编码 → 是否在线（本批次批量查出）
-     */
     private CascadeChannelVo toCascadeChannel(GbChannel c, String cascadeId,
                                               java.util.Map<String, Boolean> onlineByDev) {
         CascadeChannelVo row = new CascadeChannelVo();
@@ -303,8 +267,8 @@ public class CascadeController {
         row.setCustomName(c.getCustomName());
         row.setCustomId(c.getCustomId());
         row.setDeviceOnline(onlineByDev.get(c.getDeviceId()));
-        // 通道可用 = 设备在线 && 通道自身 Status=ON。
-        // 只看 status 会误报：设备掉线后它上报的通道 status 仍是最后一次的 ON。
+        // 通道可用 = 设备在线 && 通道自身 Status=ON。只看 status 会误报：
+        // 设备掉线后它上报的通道 status 仍是最后一次的 ON。
         row.setOnline(Boolean.TRUE.equals(row.getDeviceOnline()) && c.isOnline());
         row.setChannel(c.getChannelNo());
         String typeCode = typeCodeOf(c.getChannelId());
@@ -330,7 +294,6 @@ public class CascadeController {
         return row;
     }
 
-    /** 一次性取出这批通道所属设备的在线状态。 */
     private java.util.Map<String, Boolean> deviceOnlineMap(List<GbChannel> channels) {
         java.util.Map<String, Boolean> map = new java.util.HashMap<>();
         for (GbChannel c : channels) {
@@ -357,11 +320,7 @@ public class CascadeController {
         return value != null && value.toLowerCase().contains(needle);
     }
 
-    /**
-     * 从 20 位国标编码取类型编码（第 11~13 位，GB/T 28181 附录 D）。
-     *
-     * @return 如 {@code 131}；编码不足 13 位或非数字返回 {@code null}
-     */
+    /** 从 20 位国标编码取类型编码（第 11~13 位，GB/T 28181 附录 D）；不足 13 位或非数字返回 {@code null}。 */
     private static String typeCodeOf(String channelId) {
         if (channelId == null || channelId.length() < 13) {
             return null;
@@ -376,15 +335,9 @@ public class CascadeController {
     }
 
     /**
-     * 类型编码 → 大类。
-     *
-     * <p>归并成四类而不是照搬国标 20 多种细类：现场筛选的真实需求就是
-     * 「只看视频」「只看报警」，列 20 个选项反而没人用（上级平台同样只分三类）。
-     *
-     * <p>编码含义（GB/T 28181—2016 附录 D）：
-     * 131 摄像机 / 132 网络摄像机 / 133 网络硬盘录像机 → 视频；
-     * 134 音频输入 / 135 音频输出 → 音频；
-     * 137 报警输入 / 138 报警输出 / 139 报警控制器 → 报警。
+     * 类型编码 → 大类。归并成四类而非照搬国标 20 多种细类：现场筛选只需「视频/报警」。
+     * GB/T 28181—2016 附录 D：131 摄像机 / 132 网络摄像机 / 133 NVR → 视频；
+     * 134 音频输入 / 135 音频输出 → 音频；137 报警输入 / 138 报警输出 / 139 报警控制器 → 报警。
      */
     private static String channelTypeOf(String typeCode) {
         if (typeCode == null) {
@@ -407,12 +360,7 @@ public class CascadeController {
         }
     }
 
-    /**
-     * 按指定字段排序。
-     *
-     * <p>与上级平台一致，默认按<b>设备编码</b>升序：同一个下级平台的通道聚在一起，
-     * 找「某台设备下的通道」比按通道编码散排直观得多。
-     */
+    /** 按指定字段排序。默认按设备编码升序：同一下级平台的通道聚在一起，比按通道编码散排直观。 */
     private static void sortChannels(List<CascadeChannelVo> list, String sort, String order) {
         java.util.Comparator<CascadeChannelVo> cmp;
         String key = sort == null ? "deviceId" : sort.trim();
@@ -447,7 +395,6 @@ public class CascadeController {
         return s == null ? "\uFFFF" : s;
     }
 
-    /** 保存级联配置。 */
     @Operation(summary = "保存级联配置")
     @PostMapping("/save")
     public ApiResponse<IdVo> save(@RequestBody CascadeSaveRequest req) {
@@ -482,16 +429,9 @@ public class CascadeController {
         cascade.setMediaTransport(normalizeTransport(req.getMediaTransport()));
         cascade.setEnabled(req.getEnable());
         String cascadeId = cascadeService.save(cascade);
-        /*
-         * 保存后立即重建链路。
-         *
-         * <p>地址、端口、密码、本级编号任何一项改了，旧链路都是错的，
-         * 而它仍在按旧配置发心跳 —— 表现是「界面上改对了但还是离线」，
-         * 运维会反复重保存。这里直接重启一遍，让配置改动立刻反映到信令上。
-         *
-         * <p>只重建、不报错：上级不可达时保存仍然应该成功（配置是对的），
-         * 失败原因会写进 remark 供界面展示。
-         */
+        // 保存后立即重建链路：地址/端口/密码/本级编号任一改动后旧链路仍在按旧配置发心跳，
+        // 表现为「界面上改对了但还是离线」。只重建、不报错：上级不可达时保存仍应成功，
+        // 失败原因写进 remark。
         cascadeLinkService.restart(cascadeId);
         // 上级编码可能变了（新建或改地址），必须刷新判定表，
         // 否则它点播时会被当成普通设备 INVITE，永远拿不到流
@@ -499,7 +439,6 @@ public class CascadeController {
         return ApiResponse.ok(IdVo.of(cascadeId));
     }
 
-    /** 启用 / 停用。 */
     @Operation(summary = "启用 / 停用")
     @PostMapping("/setenable")
     public ApiResponse<Void> setEnable(@RequestParam String id,
@@ -507,9 +446,8 @@ public class CascadeController {
         StpUtil.checkLogin();
         boolean on = Boolean.TRUE.equals(enable);
         cascadeService.setEnable(id, on);
-        // 启用 → 立即注册；停用 → 向上级注销。
-        // 停用时不发 Expires:0，上级会一直认为本级在线直到注册有效期自然过期，
-        // 期间它点播本级通道会全部失败，且上级侧看不到任何原因。
+        // 启用 → 立即注册；停用 → 向上级注销。停用时不发 Expires:0，上级会一直认为本级在线
+        // 直到注册有效期自然过期，期间点播本级通道全部失败且看不到原因。
         if (on) {
             cascadeLinkService.enable(id);
         } else {
@@ -520,7 +458,6 @@ public class CascadeController {
         return ApiResponse.ok();
     }
 
-    /** 共享全部通道。 */
     @Operation(summary = "共享全部通道")
     @PostMapping("/setshareallchannel")
     public ApiResponse<Void> setShareAllChannel(
@@ -534,11 +471,8 @@ public class CascadeController {
     }
 
     /**
-     * 保存共享通道（<b>全量覆盖</b>）。
-     *
-     * <p>传空数组表示取消全部共享 —— 所以 {@code channels[]} 必须是
-     * {@code required = false}：前端「清空后保存」时不会带这个参数，
-     * 若声明为必填，这个合法操作会被 400 挡住。
+     * 保存共享通道（<b>全量覆盖</b>）。传空数组表示取消全部共享，所以 {@code channels[]} 必须
+     * {@code required = false}：前端「清空后保存」不带该参数，声明必填会把这个合法操作 400 挡住。
      */
     @Operation(summary = "保存共享通道（全量覆盖）")
     @PostMapping("/savechannels")
@@ -550,7 +484,6 @@ public class CascadeController {
         return ApiResponse.ok(DeletedVo.ofSaved(count));
     }
 
-    /** 移除共享通道。 */
     @Operation(summary = "移除共享通道")
     @PostMapping("/removechannels")
     public ApiResponse<DeletedVo> removeChannels(@RequestParam String id,
@@ -560,7 +493,6 @@ public class CascadeController {
         return ApiResponse.ok(DeletedVo.ofRemoved(count));
     }
 
-    /** 共享 / 取消共享节点。 */
     @Operation(summary = "共享 / 取消共享节点")
     @PostMapping("/sharenode")
     public ApiResponse<Void> shareNode(@RequestParam String serial,
@@ -576,7 +508,6 @@ public class CascadeController {
         return ApiResponse.ok();
     }
 
-    /** 推送全部共享通道目录。 */
     @Operation(summary = "推送全部共享通道目录")
     @PostMapping("/pushcatalog")
     public ApiResponse<DeletedVo> pushCatalog(
@@ -591,7 +522,6 @@ public class CascadeController {
         return ApiResponse.ok(DeletedVo.ofPushed(pushed));
     }
 
-    /** 推送单条共享通道目录。 */
     @Operation(summary = "推送单条共享通道目录")
     @PostMapping("/pushchannelcatalog")
     public ApiResponse<Void> pushChannelCatalog(
@@ -608,13 +538,11 @@ public class CascadeController {
         return ApiResponse.ok();
     }
 
-    /** 删除级联配置。 */
     @Operation(summary = "删除级联配置")
     @PostMapping("/remove")
     public ApiResponse<Void> remove(@RequestParam String id) {
         StpUtil.checkLogin();
-        // 先注销再删：先删就查不到上级地址，Expires:0 发不出去，
-        // 上级会一直认为本级在线直到自然过期
+        // 先注销再删：先删就查不到上级地址，Expires:0 发不出去，上级会一直认为本级在线
         cascadeLinkService.forget(id);
         cascadeService.remove(id);
         cascadeLinkService.refreshParentRegistry();
@@ -624,10 +552,8 @@ public class CascadeController {
     // ==================== 内部 ====================
 
     /**
-     * 归一化「上行推流传输方式」入参。
-     *
-     * <p>非法值一律落到 {@code auto}（跟随上级 SDP），避免因为前端传了个
-     * 不认识的字符串就把推流卡死。
+     * 归一化「上行推流传输方式」入参：非法值一律落到 {@code auto}（跟随上级 SDP），
+     * 避免前端传个不认识的字符串就把推流卡死。
      */
     private static String normalizeTransport(String v) {
         if (v == null) {

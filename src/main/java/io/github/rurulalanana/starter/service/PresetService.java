@@ -19,30 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 预置位列表服务：承接设备的 {@code PresetQuery} 应答，供界面回显。
  *
- * <h3>为什么需要它（原实现为什么「查不到」）</h3>
- * 平台早就能<b>下发</b>预置位查询（{@code ControlService#queryPresets}），
- * 但链路上有两处断点，合起来就是「点了查询什么都没发生」：
- * <ol>
- *   <li>设备回的 MANSCDP {@code Response(CmdType=PresetQuery)} 在
- *       {@code SipEventBridge#onManscdpResponse} 里<b>没有分支</b>，
- *       落到 {@code default} 被静默丢弃 —— 数据到进程里就没了；</li>
- *   <li>{@code GET} 侧也没有任何接口暴露预置位列表
- *       （{@code DeviceService#presetsOf} 写了却无人调用），
- *       前端更没有入口发起查询。</li>
- * </ol>
- * 本服务补第 1 步的落地与第 2 步的数据源。
- *
- * <h3>为什么只放内存、不落库</h3>
- * 设备预置位是<b>设备自身的配置</b>，平台只做展示与转发：
- * <ul>
- *   <li>它随时可能在设备侧被改（现场调试、设备恢复出厂），
- *       落库得到的是一份会过期的副本，反而误导用户；</li>
- *   <li>查询本身很便宜（一条 SIP {@code MESSAGE}，设备通常几百毫秒内应答），
- *       打开面板时重查一次比维护同步逻辑更可靠；</li>
- *   <li>名称维度的持久化需求已经由 {@code gb_preset}（平台自定义名称）覆盖，
- *       两张表存同一个东西只会产生「以谁为准」的歧义。</li>
- * </ul>
- * 因此这里用带时间戳的内存缓存，进程重启后为空 —— 界面会重新查询，用户无感。
+ * <p>只放内存、不落库：预置位是设备自身的配置，随时可能在设备侧被改，落库只是一份会过期的副本；
+ * 查询本身很便宜（一条 SIP MESSAGE，几百毫秒应答），打开面板时重查比维护同步逻辑可靠；
+ * 名称维度的持久化由 {@code gb_preset}（平台自定义名称）覆盖。
  */
 @Service
 public class PresetService {
@@ -54,48 +33,23 @@ public class PresetService {
 
     private final DeviceService deviceService;
 
-    public PresetService(DeviceService deviceService) {
+    /** SDK 直连设备的预置位走同步读，与国标「下发+等应答」是两条路。 */
+    private final DahuaCapabilityService dahuaCapability;
+
+    public PresetService(DeviceService deviceService, DahuaCapabilityService dahuaCapability) {
         this.deviceService = deviceService;
+        this.dahuaCapability = dahuaCapability;
     }
 
     /**
-     * 处理设备的 {@code PresetQuery} 应答。
+     * 处理设备的 {@code PresetQuery} 应答（标准 A.2.4.8）。
      *
-     * <p>解析的是标准 A.2.4.8 的应答体：
-     * <pre>
-     * &lt;Response&gt;
-     *   &lt;CmdType&gt;PresetQuery&lt;/CmdType&gt;
-     *   &lt;DeviceID&gt;34020000001320000001&lt;/DeviceID&gt;
-     *   &lt;PresetList Num="3"&gt;
-     *     &lt;Item&gt;&lt;PresetID&gt;1&lt;/PresetID&gt;&lt;PresetName&gt;大门&lt;/PresetName&gt;&lt;Status&gt;OK&lt;/Status&gt;&lt;/Item&gt;
-     *   &lt;/PresetList&gt;
-     * &lt;/Response&gt;
-     * </pre>
+     * <p>必须按 SN 累积，不能逐帧覆盖：设备会把预置位拆成多帧且没有总数字段
+     * （{@code PresetList@Num} 只是本帧条数）—— 实测 5 个预置位发两帧 4 + 1，
+     * 逐帧替换会让界面只剩最后 1 个。同一次查询的各帧 SN 相同，SN 变化才清空重来。
      *
-     * <h3>⚠️ 必须按 SN 累积，不能逐帧覆盖</h3>
-     * 设备会把预置位<b>拆成多帧</b>上报，且<b>没有 {@code SumNum} 之类的总数字段</b>
-     * （{@code PresetList@Num} 只是本帧条数）。实测一台球机有 5 个预置位时发了两帧：
-     * <pre>
-     * 第一帧: &lt;PresetList Num="4"&gt; 1 2 3 4 &lt;/PresetList&gt;
-     * 第二帧: &lt;PresetList Num="1"&gt; 5 &lt;/PresetList&gt;
-     * </pre>
-     * 早先实现是「收到一帧就用它替换缓存」，于是第二帧的 {@code [5]} 把
-     * {@code [1,2,3,4]} 覆盖掉 —— 界面只显示 1 个预置位，
-     * 看上去像「设置新预置位把其他的都清了」，实际上设备上 5 个都在。
-     *
-     * <p>用应答里的 {@code <SN>} 区分批次：同一次查询的所有帧 SN 相同（SN 本来就用于
-     * 匹配请求与应答），SN 变化就是新的一次查询，此时才清空重来。
-     *
-     * <p><b>{@code PresetList} 缺失也要记录</b>：部分设备用「空应答」表示"我一个预置位都没有"，
-     * 与"设备没回"是两件事 —— 前者要让用户看到「设备上没有预置位」，
-     * 后者要继续等。所以这里无条件下写一条快照（哪怕 items 为空）。
-     *
-     * <p><b>编号解析失败的条目直接跳过</b>：厂商私有扩展里偶尔会出现
-     * 非数字的 {@code PresetID}（如 {@code "A1"}），一个坏条目不该让整表作废。
-     *
-     * @param channelId  通道编码（设备的 {@code <DeviceID>}）
-     * @param sn         应答的 {@code <SN>}，同一批次的帧相同；{@code null} 表示无法区分批次
-     * @param containers 全部 {@code <PresetList>} 容器（一帧里也可能有多个）
+     * <p>无 {@code PresetList} 也要写一条空快照（表示「设备上没有预置位」，与「没回」不同）；
+     * 编号解析失败的条目直接跳过，一个坏条目不该让整表作废。
      */
     public void onPresetList(String channelId, Integer sn, List<Element> containers) {
         if (channelId == null || channelId.isBlank()) {
@@ -141,8 +95,7 @@ public class PresetService {
     /**
      * 取某通道的预置位列表（设备快照 + 平台自定义名称合并）。
      *
-     * @return 恒返回非 {@code null} 的对象；{@code queriedAt} 为 {@code null}
-     *         表示还没收到过设备应答
+     * @return 恒非 {@code null}；{@code queriedAt} 为 {@code null} 表示还没收到过设备应答
      */
     public PresetListVo list(String channelId) {
         PresetListVo vo = new PresetListVo();
@@ -150,8 +103,7 @@ public class PresetService {
         Snapshot snap = channelId == null ? null : cache.get(channelId);
         List<PresetListVo.Item> items = snap == null ? new ArrayList<>() : copy(snap.items());
         if (snap != null) {
-            // 用项目统一的时间格式：LocalDateTime#toString 会带上纳秒
-            // （2026-10-26 16:23:30.991820635），既难看又会让前端字符串比较失效
+            // 用项目统一的时间格式：LocalDateTime#toString 会带纳秒，既难看又会让前端字符串比较失效
             vo.setQueriedAt(TimeFormats.toDisplay(snap.at()));
         }
         // 合并平台自定义名称：编号以设备为准，名称优先用自定义的
@@ -172,9 +124,100 @@ public class PresetService {
         return vo;
     }
 
+    /**
+     * 向 SDK 直连设备<b>实时</b>读取预置点（大华等）。
+     *
+     * <p>与国标路径的区别：国标是「下发查询 → 等设备应答 → 落内存快照」，
+     * 设备可能几秒不答甚至永不答；SDK 是同步调用，直接拿回结果，
+     * 因此不需要缓存，也就不存在「查到的是上一次的」。
+     *
+     * <h3>清单只来自设备</h3>
+     * 早期平台自己存过坐标做兜底，那是因为误判了「设备不支持预置点」。
+     * 实际上设备完全支持（{@code QueryDevState(0x57)} 能读到名称与坐标），
+     * 平台那份副本只会带来「两边不同步」和「设备上没有却显示存在」的假数据，已移除。
+     *
+     * <p>平台唯一保留的预置点数据是<b>名称</b>（{@code gb_preset.name}）——
+     * 设备不存这个，只有平台知道，用于给编号起一个本域内的别名。
+     *
+     * @param deviceId    设备编号（SDK 会话按它取）
+     * @param channelCode 通道编码
+     * @param channelId   通道编码（与 channelCode 相同；保留参数名以对齐国标口径）
+     */
+    public PresetListVo listBySdk(String deviceId, String channelCode, String channelId) {
+        var session = dahuaCapability.requireSession(deviceId);
+        int sdkChannel = dahuaCapability.sdkChannel(session, deviceId, channelCode);
+        Map<Integer, String> custom = customNames(channelId);
+
+        List<PresetListVo.Item> items = new ArrayList<>();
+        try {
+            for (var p : dahuaCapability.ext().listPresets(session, sdkChannel)) {
+                PresetListVo.Item item = new PresetListVo.Item();
+                item.setPresetId(p.index());
+                /*
+                 * 名称优先级：平台自定义名 > 设备名 > 默认名。
+                 * 设备名来自 QueryDevState(0x57)（GBK 解码），这是唯一能拿到
+                 * 「用户在设备 Web 界面起的名字」的途径。
+                 */
+                String alias = custom.get(p.index());
+                if (alias != null && !alias.isBlank()) {
+                    item.setName(alias);
+                    item.setCustomName(true);
+                } else {
+                    item.setName(p.name() != null && !p.name().isBlank()
+                            ? p.name() : "预置点 " + p.index());
+                    item.setCustomName(false);
+                }
+                item.setStatus(p.hasPosition()
+                        ? ("设备坐标 " + p.pan() + "," + p.tilt() + "," + p.zoom())
+                        : (p.staySeconds() > 0 ? ("停留 " + p.staySeconds() + "s") : null));
+                items.add(item);
+            }
+        } catch (io.github.rurulalanana.dahua.ext.DahuaSdkException e) {
+            /*
+             * 读不到清单只有两种原因：型号不支持这三条接口，或会话失效。
+             * 后者 requireSession 已经拦掉，所以这里必然是前者 —— 返回空表，
+             * 并如实告知，而不是编一份数据出来。
+             */
+            log.info("读不到设备预置点清单: device={} channel={} {}",
+                    deviceId, channelCode, e.getMessage());
+        }
+
+        items.sort(Comparator.comparing(PresetListVo.Item::getPresetId));
+
+        PresetListVo vo = new PresetListVo();
+        vo.setChannelId(channelId);
+        vo.setItems(items);
+        vo.setCount(items.size());
+        // SDK 是同步读，读到即此刻 —— 填当前时间，前端据此知道这是实时值而不是缓存
+        vo.setQueriedAt(TimeFormats.toDisplay(LocalDateTime.now()));
+        return vo;
+    }
+
     /** 设备已应答过的通道集合（排障用）。 */
     public int cachedChannelCount() {
         return cache.size();
+    }
+
+    /**
+     * 该 SDK 错误是否表示「型号不支持这个配置项」。
+     *
+     * <p><b>实测关键事实</b>：{@code CLIENT_GetNewDevConfig} 失败时
+     * <b>不会</b>填错误码 —— 实测返回 {@code false} 且 {@code nError=0}。
+     * 所以不能靠错误码判断，只能按「读不到配置项」这个事实本身来判。
+     *
+     * <p>这是可以接受的近似：读配置失败只有两种原因 ——
+     * 型号不支持该配置项，或会话已失效。后者在调用前
+     * {@code requireSession} 已经拦掉（会抛「设备未登录」），
+     * 走到这里的必然是前者。
+     */
+    private static boolean isConfigUnsupported(
+            io.github.rurulalanana.dahua.ext.DahuaSdkException e) {
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        // 已知的「配置项不存在 / 不支持」错误码，或错误码为 0（SDK 未填）
+        return e.sdkError() == 0
+                || e.sdkError() == 0x80000018
+                || e.sdkError() == 0x8000004F
+                || msg.contains("读取配置失败");
     }
 
     private Map<Integer, String> customNames(String channelId) {
@@ -197,12 +240,8 @@ public class PresetService {
     }
 
     /**
-     * 拷贝一份再交给调用方。
-     *
-     * <p>缓存里的对象会被后续应答整体替换，但其中的 {@code Item}
-     * 在合并名称时是原地修改的 —— 不拷贝就会把「本次合并结果」写回缓存，
-     * 用户改了自定义名称后旧值仍留在 {@code deviceName} 之外的字段上，
-     * 表现为「名称改不回来」。
+     * 拷贝一份再交给调用方：缓存里的 {@code Item} 在合并名称时是原地修改的，
+     * 不拷贝会把本次结果写回缓存，用户改完自定义名称后会「改不回来」。
      */
     private static List<PresetListVo.Item> copy(List<PresetListVo.Item> src) {
         List<PresetListVo.Item> out = new ArrayList<>(src.size());
@@ -234,7 +273,7 @@ public class PresetService {
     /**
      * 一次设备应答的快照。
      *
-     * @param sn 应答的 {@code <SN>}，用于区分「同一次查询的多帧」与「新的一次查询」
+     * @param sn 应答的 {@code <SN>}，用于区分同一次查询的多帧与新的一次查询
      */
     private record Snapshot(Integer sn, LocalDateTime at, List<PresetListVo.Item> items) {
 
@@ -247,9 +286,7 @@ public class PresetService {
     }
 
     /**
-     * 取元素的直接子元素。
-     *
-     * <p>不用 {@code getElementsByTagName}：那是深度遍历，容器里若嵌了同名节点会多取。
+     * 取元素的直接子元素。不用 {@code getElementsByTagName}：那是深度遍历，容器里嵌了同名节点会多取。
      */
     private static List<Element> childrenNamed(Element parent, String name) {
         List<Element> out = new ArrayList<>();
