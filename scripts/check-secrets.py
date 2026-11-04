@@ -70,13 +70,20 @@ def is_placeholder(value: str, quoted: bool = False) -> bool:
         return True
     # cmd/bat 的 %ENV_VAR% 引用
     #
-    # 少了这条，`--spring.datasource.password=%GB_DB_PASSWORD%` 会被当成明文：
-    # 去掉 % 之后的 GB_DB_PASSWORD 本来就命中下面的全大写规则，但带 % 就对不上
-    # 任何一条，于是报成硬编码 —— 而这恰恰是「改对了」的写法。
-    if re.fullmatch(r"%[A-Za-z_][A-Za-z0-9_]*%", v):
+    # 少了这条，`--spring.datasource.password=%GB_DB_PASSWORD%` 会被当成明文 ——
+    # 而这恰恰是「改对了」的写法。
+    # 只判开头不用 fullmatch：.bat 的一行是一串空格分隔的参数，上面的正则会把
+    # `%GB_DB_PASSWORD%` 后面的 `--dahua.xxx=true ...` 一起捕进 val，
+    # fullmatch 永远不成立。
+    if re.match(r"%[A-Za-z_][A-Za-z0-9_]*%", v):
         return True
     # *** / xxx 之类的掩码
     if set(v) <= {"*", "x", "X", "#"}:
+        return True
+    # 掩码后面还粘着引号/括号/逗号的情况：
+    #   log.warn("...default-password=***");
+    # 值的捕获会在「, ; } 」之前停下，而 `")` 不在停止符里，于是拿到 `***")`。
+    if set(v.strip("\"'`();,: ")) <= {"*", "x", "X", "#"}:
         return True
     # 尖括号占位：<token>、<your-password>（多见于文档与 SQL 注释）
     if re.search(r"<[^>\s][^>]*>", v):
@@ -92,6 +99,12 @@ def is_placeholder(value: str, quoted: bool = False) -> bool:
         return True
     # 取值表达式：localStorage.getItem('gb_token') || ''、row.token 等
     if re.search(r"\w+\s*\([^)]*\)", v):
+        return True
+    # 函数调用的前半截：值的捕获在逗号处就停了，拿不到完整参数表。
+    #   String token = queryParam(session, "token");
+    # → val = `queryParam(session`，上面的完整括号匹配落空。
+    # 真实口令不会以 `标识符(` 开头。
+    if re.match(r"[A-Za-z_$][\w$]*\s*\(", v):
         return True
     if re.search(r"\w+\s*(\|\||&&)\s*", v):
         return True

@@ -52,6 +52,21 @@ public class DahuaProperties {
     private int rtspPort = 554;
 
     /**
+     * 设备 Web（HTTP CGI）端口，默认 80。
+     *
+     * <p><b>为什么需要它</b>：部分型号的<b>场景数组</b>类配置项
+     * （{@code VideoColor} / {@code VideoInSharpness} / {@code VideoInExposure} …）
+     * 通过 {@code CLIENT_SetNewDevConfig} 写不进去 —— 设备一律返回 {@code err=12}，
+     * 连原样写回都被拒；而设备自己的 Web 界面走
+     * {@code /cgi-bin/configManager.cgi?action=setConfig} 改得好好的。
+     *
+     * <p>所以参数写入在 SDK 被拒时会改走 CGI（见 {@code DahuaCgiAccess}）。
+     * 该端口与 SDK 端口（37777）和 RTSP 端口（554）是三个不同的东西。
+     * 设备改了 Web 端口时改这里。
+     */
+    private int httpPort = 80;
+
+    /**
      * 单台设备的通道总数。
      *
      * <p><b>为什么需要它</b>：大华的 RTSP 把子码流排在主码流之后
@@ -110,5 +125,86 @@ public class DahuaProperties {
          * 太大则僵尸地址会拖慢巡检（每次都要等满登录超时）。
          */
         private int expireSeconds = 180;
+
+        /**
+         * 注册上来的设备是否<b>自动建档案进设备表</b>。
+         *
+         * <p>默认开启：设备主动注册的目的就是「不用人工录地址」，
+         * 如果注册完还要人手填一遍 IP/端口，这个模式就失去了意义。
+         *
+         * <p>关掉它的场景：现场设备多、只想让白名单里的设备入表（安全要求高的机房），
+         * 这时注册记录只出现在注册表里，由人工确认后再纳管。
+         */
+        private boolean autoProvision = true;
+
+        /**
+         * 自动建档案时使用的设备账号。
+         *
+         * <p>注册回调只带序列号与地址，<b>不带凭据</b>，所以必须有一份
+         * 「本平台在大华设备上用的只读/操作账号」作为默认值。
+         * 现场若按设备分别授权，注册后可在设备页单独改。
+         */
+        private String defaultUsername = "admin";
+
+        /**
+         * 自动建档案时使用的设备密码。
+         *
+         * <p><b>不要写进 application.yml</b>（会被打进 jar 并提交到仓库），
+         * 用环境变量注入，见 yml 里的 {@code GB_DAHUA_PASSWORD}。
+         * 为空时自动建档案会被跳过，只打一条告警 —— 不静默失败。
+         */
+        private String defaultPassword = "";
+
+        /**
+         * 设备 SDK 端口（不是注册回调里的端口）。
+         *
+         * <p><b>为什么不能用回调里的端口</b>：大华注册回调给的是设备的
+         * <b>TCP 源端口</b>（每次重连都变，实测 54536 / 54612 / 55636…），
+         * 拿它当连接目标必然失败。SDK 端口是设备侧固定配置，默认 37777。
+         */
+        private int sdkPort = 37777;
     }
+
+    /**
+     * 设备主动上传抓图的接收配置。
+     *
+     * <p><b>为什么需要它</b>：默认的抓图是「平台向设备要图」，每要一次就要建立
+     * 一次会话往返。而报警联动抓图（人形/越界触发）是设备<b>主动</b>产生的 ——
+     * 让设备把图直接 POST 上来，平台既不用轮询也不用拉流解码，
+     * 这是流量最低、延迟最小的形态。
+     *
+     * <p>设备侧需要配置 {@code NET_EM_CFG_PICTURE_HTTP_UPLOAD(1609)}，
+     * 填写本平台的接收地址。不同型号的配置入口不一样（网页 / ConfigTool / SDK 写配置）。
+     */
+    @Data
+    public static class SnapUpload {
+
+        /**
+         * 是否开启接收端点。
+         *
+         * <p>默认关闭：它是对外开放的写入口（设备要能 POST 进来），
+         * 没配令牌就开等于给了任何人一个写文件的口子。
+         */
+        private boolean enabled = false;
+
+        /**
+         * 上传令牌。设备侧地址里带 {@code ?token=xxx}。
+         *
+         * <p><b>不要写进 application.yml</b>，用环境变量 {@code GB_SNAP_TOKEN} 注入。
+         * 设备不支持自定义 HTTP 头，只能把令牌放 URL 里 —— 这是设备侧的限制，
+         * 所以令牌要足够长（建议 32 位随机），并且只授予「写图片」这一项能力。
+         */
+        private String token = "";
+
+        /**
+         * 单张图片大小上限（字节）。
+         *
+         * <p>默认 8 MB：4K JPEG 通常 1~2 MB，留足余量；
+         * 但不设上限的话，一个错误配置或恶意请求就能把磁盘写满。
+         */
+        private long maxBytes = 8L * 1024 * 1024;
+    }
+
+    /** 抓图直传接收配置。 */
+    private SnapUpload snapUpload = new SnapUpload();
 }
