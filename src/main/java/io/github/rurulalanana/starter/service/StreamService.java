@@ -75,6 +75,27 @@ public class StreamService {
     /** 非国标设备的接入实现（大华 SDK 等）：点播要拿它的 RTSP 地址。 */
     private final DeviceAccessRegistry accessRegistry;
 
+    /**
+     * 大华 SDK 取流（NAT 场景下唯一能出图的路径）。
+     *
+     * <p>用 {@code ObjectProvider} 注入而不是直接构造参数：没有大华 SDK 的部署
+     * 不该因为这个 bean 缺失而起不来（同 {@code DeviceAccessRegistry} 的策略）。
+     */
+    private final org.springframework.beans.factory.ObjectProvider<DahuaSdkStreamService>
+            dahuaSdkStreamProvider;
+
+    /** 解析一次并缓存，避免每次点播都查容器。 */
+    private volatile DahuaSdkStreamService dahuaSdkStreamCache;
+
+    private DahuaSdkStreamService dahuaSdkStream() {
+        DahuaSdkStreamService s = dahuaSdkStreamCache;
+        if (s == null) {
+            s = dahuaSdkStreamProvider.getIfAvailable();
+            dahuaSdkStreamCache = s;
+        }
+        return s;
+    }
+
     // ==================== 点播 ====================
 
     /**
@@ -203,15 +224,20 @@ public class StreamService {
     }
 
     /**
-     * SDK 直连设备（大华等）的实时点播：由 ZLM 反向拉设备的 RTSP 流。
+     * SDK 直连设备（大华等）的实时点播。
      *
-     * <p><b>为什么走 RTSP 而不是 NetSDK 取码流</b>：SDK 取回来的是 PS/裸流，
-     * 平台侧得自己解封装再喂给 ZLM；而 RTSP 由 ZLM 直接拉、直接解，
-     * FLV/HLS/WebRTC 输出链路与国标设备完全一致，前端一行都不用改。
-     * 代价是设备必须开着 RTSP（大华默认开启）。
-     *
-     * <p>返回的 {@link GbStream} 不来自 {@code RtpSession}（这类设备根本没有 RTP 会话），
-     * 因此控制器会走 {@code describeStream} 分支 —— 播放地址与状态都从实体里取。
+     * <h3>两条路径，按「有没有 SDK 会话」自动选</h3>
+     * <ol>
+     *   <li><b>SDK 取流</b>（有会话时优先）—— SDK 拿国标 PS → 打 RTP → 灌 ZLM 的
+     *       国标收流端口。走的是<b>已建立的登录会话</b>，方向与主动注册一致，
+     *       天然穿透 NAT；ZLM 侧与国标设备完全同一条链路。</li>
+     *   <li><b>RTSP 代理</b>（无会话时）—— 由 ZLM 反向拉设备的
+     *       {@code rtsp://<ip>:554/...}。局域网可用，但设备在 NAT 后时 554 不可达
+     *       （实测 554/37777/80 从公网全部连不上），会一直重试出不了图。</li>
+     * </ol>
+     * 之所以不再「一律走 RTSP」：那正是「主动注册成功了、设备也在线、
+     * 但一点播就播不出来」的根因 —— 控制指令走通了主动注册连接，
+     * 播放却在反向连设备的 554。
      */
     private GbStream startSdkLive(String deviceId, String channel,
                                   DeviceKind kind, Integer streamNumber) {
@@ -223,6 +249,12 @@ public class StreamService {
         if (device == null) {
             throw BizException.notFound("设备不存在：" + deviceId);
         }
+        // 有大华会话就走 SDK 取流（NAT 场景下这是唯一能出图的路径）
+        DahuaSdkStreamService dahua = dahuaSdkStream();
+        if (dahua != null && dahua.available(deviceId)) {
+            return startDahuaSdkLive(device, channel, streamNumber);
+        }
+
         DeviceAccessProvider provider = accessRegistry.require(kind);
         DeviceContext ctx = new DeviceContext(
                 device.getDeviceId(), device.getRemoteIp(),
@@ -271,6 +303,69 @@ public class StreamService {
         save(s);
         deviceService.setChannelStream(deviceId, channel, s.getStreamKey());
         log.info("SDK 设备点播已发起: {}/{} <- {}", app, channel, url.replaceAll("//[^@]*@", "//***@"));
+        return s;
+    }
+
+    /**
+     * 大华 SDK 取流：SDK 拿 PS → 打 RTP → 灌 ZLM 的国标收流端口。
+     *
+     * <p>与国标设备走<b>完全相同的下游链路</b>：ZLM 按 SSRC 认流、建轨道、
+     * 输出 FLV/HLS/WebRTC/RTSP。所以这里只做两件事：
+     * 「开会话拿端口和 SSRC」+「让 SDK 往那个端口灌 PS」。
+     */
+    private GbStream startDahuaSdkLive(GbDevice device, String channel, Integer streamNumber) {
+        String deviceId = device.getDeviceId();
+        RtpSessionManager sessions = platform.sessionManager();
+        if (sessions == null) {
+            throw BizException.badRequest("媒体服务未启动");
+        }
+        // 0 = 主码流 / 1 = 子码流，与国标口径一致（GB/T 28181—2022 附录 G 的 SSRC 后 4 位）
+        int streamNo = resolveSdkStreamNumber(device, streamNumber);
+        /*
+         * 复用平台的国标收流会话：它会分配 RTP 端口、生成 SSRC、登记映射。
+         * deviceSsrc 传 null —— 这条流是我们自己灌的，不需要按设备声明的 SSRC 过滤。
+         */
+        RtpSession session = sessions.open(channel, deviceId, null, 0, null,
+                MediaType.REALTIME, null, streamNo);
+
+        DahuaSdkStreamService.LiveStream live;
+        try {
+            live = dahuaSdkStream().start(deviceId, channel, session);
+        } catch (RuntimeException e) {
+            // 取流没起来就别留一个空会话在 ZLM 里等数据
+            try {
+                sessions.closeByKey(session.getSessionKey());
+            } catch (Throwable ignored) {
+                // 清理失败不影响主异常
+            }
+            throw e;
+        }
+
+        GbStream s = new GbStream();
+        s.setStreamKey(deviceId + "/" + channel);
+        s.setDeviceId(deviceId);
+        s.setChannelId(channel);
+        s.setStreamName(session.getStream());
+        s.setApp(session.getZlmApp());
+        s.setStreamType(GbStream.TYPE_LIVE);
+        // RTP 已经在灌了，但仍要等 ZLM 解出轨道才算真正可播：
+        // 状态先 NEGOTIATING，由 on_mk_media_publish 改成 ONLINE（与国标一致）
+        s.setState(RtpSession.NEGOTIATING);
+        s.setSsrc(session.getSsrc());
+        s.setTransport("UDP");
+        s.setStartTime(LocalDateTime.now());
+        s.setUpdateTime(LocalDateTime.now());
+        PlayUrls urls = platform.mediaServer().playUrls(session);
+        s.setHttpFlv(urls.getHttpFlv());
+        s.setWsFlv(urls.getWsFlv());
+        s.setHls(urls.getHls());
+        s.setWebrtc(urls.getWebrtc());
+        s.setRtsp(urls.getRtsp());
+        s.setRtmp(urls.getRtmp());
+        save(s);
+        deviceService.setChannelStream(deviceId, channel, s.getStreamKey());
+        log.info("大华 SDK 取流点播已发起: {}/{} ssrc={} rtpPort={}",
+                deviceId, channel, session.getSsrc(), session.getPort());
         return s;
     }
 
