@@ -168,11 +168,8 @@ window.addEventListener('resize', syncViewport)
 syncViewport()
 
 /*
- * 菜单项不写在这里。
- *
- * <p>侧栏完全由后端 {@code gb_menu} 决定（「菜单管理」页可增删改）：
- * 目录行 → 分组标题，菜单行 → 可点的页面，按钮行不进侧栏。
- * 由 {@link buildMenu} 按当前账号权限过滤后分组。
+ * 菜单完全由后端 gb_menu 决定：目录行 → 分组，菜单行 → 页面，按钮行不进侧栏。
+ * buildMenu 按当前账号权限过滤后分组。
  */
 const menuGroups = computed(() => buildMenu(auth, auth.menuRows))
 
@@ -230,10 +227,7 @@ onMounted(async () => {
   if (auth.loggedIn) {
     await auth.loadUser()
     await loadServerInfo()
-    /*
-     * 后台下载轮询挂在布局层（而不是某个页面）：下载任务是全局的，
-     * 用户切到任何页面都应当继续看到进度、并在完成时收到通知。
-     */
+    // 下载任务是全局的，轮询挂在布局层，切页面也继续显示进度
     downloads.startPolling()
   }
 })
@@ -414,7 +408,10 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-/* 侧栏底部状态 */
+/*
+ * 侧栏底部状态：3 种态（正常/部分离线/无设备）由 healthClass 决定，
+ * 文字与圆点颜色同步。
+ */
 .sidebar-foot {
   flex-shrink: 0;
   padding: 10px 12px;

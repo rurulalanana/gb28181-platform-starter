@@ -8,7 +8,6 @@
       </p>
     </header>
 
-    <!-- ---------------- 参数区 ---------------- -->
     <section class="ft-panel">
       <div class="ft-row">
         <label class="ft-label">通道</label>
@@ -102,7 +101,6 @@
       </div>
     </section>
 
-    <!-- ---------------- 地址 / 代码 ---------------- -->
     <section class="ft-panel">
       <div class="ft-code-head">访问地址</div>
       <div class="ft-code">{{ url || '（填好 serial 与 code 后生成）' }}</div>
@@ -111,7 +109,6 @@
       <div class="ft-code">{{ frameCode || '（同上）' }}</div>
     </section>
 
-    <!-- ---------------- 实时渲染 ---------------- -->
     <section class="ft-panel">
       <div class="ft-code-head">
         实时渲染（{{ w }}×{{ h }}）
@@ -133,7 +130,6 @@
       </div>
     </section>
 
-    <!-- ---------------- 说明 ---------------- -->
     <section class="ft-panel ft-notes">
       <div class="ft-code-head">自检清单</div>
       <ol>
@@ -172,24 +168,9 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
 /**
- * iframe 嵌入测试页。
- *
- * <h2>为什么要有这一页</h2>
- *
- * <p>分享页的 iframe 嵌入代码是给<b>别人</b>用的，但「别人嵌进去长什么样」
- * 在自己的主框架里根本看不到 —— 主框架有侧栏、有底部留白，
- * 而 iframe 是一个固定尺寸的小窗口，两者的显示条件完全不同（尤其是
- * {@code aspect=fullscreen} 与 {@code stretch=yes} 这类只在小尺寸下才暴露问题
- * 的参数）。
- *
- * <p>所以这里用一个<b>真实</b>的 {@code <iframe>}（不是模拟、不是 div 套壳）
- * 按用户填的尺寸渲染同一份地址，看到什么就是别人看到的什么。
- *
- * <h2>参数对齐 CMS</h2>
- *
- * <p>CMS 的地址是
- * {@code play.html?serial=…&code=…&aspect=fullscreen&stretch=yes}，
- * 本页支持同名的四个参数，语义见 {@code LiveShareView} 里的注释。
+ * iframe 嵌入测试页。分享页的嵌入代码是给别人用的，「嵌进去长什么样」在主框架里看不到
+ * （主框架有侧栏和留白，iframe 是固定小窗口）。这里用真实的 <iframe> 按用户填的尺寸渲染同一份地址。
+ * 参数对齐 CMS 的 play.html?serial=&code=&aspect=&stretch=。
  */
 const channels = ref([])
 const picked = ref('')
@@ -207,11 +188,8 @@ const sizePreset = ref('640x360')
 const frameSrc = ref('')
 
 /**
- * 组装目标地址。
- *
- * <p>用 {@code location.origin} 而不是后端给的地址：iframe 要嵌的就是
- * <b>当前访问的这个入口</b> —— 平台可能同时有内网/公网两个域名，
- * 用后端拼的地址会把内网用户引到公网（或反之）。
+ * 组装目标地址。用 location.origin 而不是后端给的地址：iframe 要嵌的就是
+ * 当前访问的这个入口（平台可能同时有内网/公网两个域名）。
  */
 const url = computed(() => {
   if (typeof window === 'undefined') return ''
@@ -232,9 +210,6 @@ const frameCode = computed(() => {
     + `allow="autoplay; fullscreen; microphone;" style="border:0"></iframe>`
 })
 
-/* ---------------- 交互 ---------------- */
-
-/** 选中通道后回填设备/通道编码。 */
 function onPick(v) {
   if (!v) return
   const [s, c] = v.split('/')
@@ -242,7 +217,6 @@ function onPick(v) {
   code.value = c || ''
 }
 
-/** 应用预设尺寸。 */
 function applyPreset(v) {
   const [pw, ph] = String(v).split('x').map(Number)
   if (pw > 0 && ph > 0) {
@@ -251,28 +225,15 @@ function applyPreset(v) {
   }
 }
 
-/** 预览区里的 iframe 元素（重载时要用）。 */
 const frameEl = ref(null)
 
 /**
- * 重新加载预览。
- *
- * <h3>尺寸变了怎么办</h3>
- * iframe 是普通元素，宽高是响应式的，改宽高会立即重排，<b>不需要重载</b>。
- *
- * <h3>参数变了：优先 contentWindow.reload()
- * </h3>
- * 先改 src 再让文档自己 reload —— 而不是用 {@code :key} 把整个 iframe
- * 销毁重建。两者看着一样，但实测差别很大：
- * 反复销毁 iframe 时，旧文档里的 {@code RTCPeerConnection} 是被浏览器
- * <b>直接丢弃</b>的（页面卸载不会走 Vue 的卸载钩子，没有 stop()），
- * ZLM 那侧要等 ICE 超时（约 30 秒）才释放这个读者；
- * 连着点几次「重新加载」，新旧对端就堆在一起，新对端拿得到轨道
- * （{@code tracks=[video:live]}）却收不到任何帧（{@code readyState=0}），
- * 12 秒后报「WebRTC 协商超时」—— 实测踩到。
- *
- * <p>同源时 {@code contentWindow.location.replace()} 会让旧文档走完整的
- * 卸载流程，连接干净释放。跨域时读不到 contentWindow，退回改 src。
+ * 重新加载预览。尺寸是响应式的，改宽高会立即重排，不需要重载。
+ * 参数变了优先 contentWindow.location.replace()，不用 :key 销毁重建：
+ * 反复销毁 iframe 时旧文档的 RTCPeerConnection 被浏览器直接丢弃（不走 Vue 卸载钩子），
+ * ZLM 要等 ICE 超时（约 30 秒）才释放读者，几次之后新对端能拿到轨道却收不到帧
+ * （readyState=0），12 秒后报「WebRTC 协商超时」（实测踩到）。
+ * 同源时 replace() 会走完整卸载流程；跨域读不到 contentWindow，退回改 src。
  */
 function apply() {
   const next = url.value
@@ -332,8 +293,6 @@ async function copy(text, what) {
   }
 }
 
-/* ---------------- 初始化 ---------------- */
-
 onMounted(async () => {
   // 先给一组可用的默认值（生产环境上这两个通道实测可播）
   serial.value = '34020000002000000006'
@@ -341,14 +300,9 @@ onMounted(async () => {
   apply()
 
   /*
-   * 通道列表只是「省得手抄编码」的便利功能：本页可能未登录
-   * （它是排查工具，常常在别人机器上打开），拿不到就静默降级。
-   *
-   * <p><b>必须用原生 fetch 而不是 {@code deviceApi.channelList}</b>：
-   * 共享的 http 封装在收到 {@code code=401} 时会
-   * {@code router.push('/login')} —— 未登录打开本页就会被踢去登录页，
-   * 完全失去「免登录排查工具」的意义（实测踩到，本页反复跳登录）。
-   * 用原生 fetch 自己判，失败就当作没有列表。
+   * 必须用原生 fetch 而不是 deviceApi.channelList：共享 http 封装在 code=401 时
+   * 会 router.push('/login')，本页常常未登录打开（排查工具），会被直接踢去登录页。
+   * 通道列表只是「省得手抄编码」的便利功能，拿不到就静默降级。
    */
   try {
     const res = await fetch('/api/v1/device/channellist?start=0&limit=200')

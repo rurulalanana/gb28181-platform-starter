@@ -78,7 +78,6 @@
       />
     </el-card>
 
-    <!-- 编辑录像计划 -->
     <el-dialog
       v-model="editDialog"
       :title="editTarget ? '编辑录像计划' : '添加录像计划'"
@@ -105,14 +104,9 @@
               </div>
             </div>
             <!--
-              每周七天的时段网格：横轴 0~24 小时，按小时分格。
-              选中 = 该小时开启云端录像。数据结构与 LiveGBS 一致：
-              plan = [[{s1,e1}], [], [{s3,e3}], ...]（外层 7 个数组 = 周一~周日）。
-
-              <p><b>支持拖动批量选择</b>：7 天 × 24 小时 = 168 格，
-              一格格点太慢。按住鼠标从起点拖到终点，按「矩形区域」批量设置
-              （与 Excel 选单元格一致：起点状态取反，拖过的格子统一成该值）。
-              起点未选 → 拖过的全选；起点已选 → 拖过的全取消。
+              七天 × 24 小时网格，选中 = 该小时开启云端录像。数据结构与 LiveGBS 一致：
+              [[{s1,e1}], [], ...]（外层 7 个数组 = 周一~周日）。
+              拖动按「矩形区域」批量设置：起点未选 → 全选，起点已选 → 全取消（与 Excel 一致）。
             -->
             <div
               v-for="day in DAYS"
@@ -157,7 +151,6 @@
       </template>
     </el-dialog>
 
-    <!-- 关联通道 -->
     <el-dialog v-model="chanDialog" :title="'录像计划关联通道(' + (chanTarget?.name || '') + ')'" width="900px">
       <div class="filter-bar">
         <el-input
@@ -178,21 +171,11 @@
         <el-checkbox v-model="onlyRelated">只看已选({{ picked.size }})</el-checkbox>
       </div>
       <!--
-        批量勾选：整行可点，且支持「按下鼠标拖动」连续勾选。
+        批量勾选：点复选框、点行其它位置、按住鼠标从首行拖到末行，三种方式并存。
+        拖动按「首行状态取反」批量设置（Excel 风格：首行未选则全选）。
 
-        <p>原实现只有一个小复选框，几十个通道要点几十次 —— 这是用户明确
-        抱怨的痛点。现在三种方式并存：
-        <ol>
-          <li>点复选框（精确增减）；</li>
-          <li>点行其它位置（切换该行）；</li>
-          <li>按住鼠标从第一行拖到最后一行（整段按「首行状态取反」批量设置，
-              Excel 风格：首行原本未选则全选，原本已选则全不选）。</li>
-        </ol>
-
-        <p><b>为什么 mousedown 挂在外层 div 而不是 el-table 事件</b>：
-        Element Plus 的 Table 只有 cell-mouse-enter / cell-click 等，
-        <b>没有 row-mousedown</b>。用外层原生监听 + closest('tr') 定位行索引，
-        比给每一行绑定更好维护（不用改渲染结构）。
+        mousedown 挂在外层 div 而不是 el-table：Table 只有 cell-mouse-enter / cell-click，
+        没有 row-mousedown；外层原生监听 + closest('tr') 定位行索引比给每行绑定更好维护。
       -->
       <div @mousedown="onChanTableMouseDown" @mouseleave="endChanDrag">
         <el-table
@@ -271,8 +254,6 @@ const { pager, offset, reset, setTotal, onPageChange, onSizeChange } = usePagina
   load: () => load()
 })
 
-/* ==================== 星期与时段 ==================== */
-
 const DAYS = [
   { key: 0, label: '星期一' },
   { key: 1, label: '星期二' },
@@ -284,15 +265,9 @@ const DAYS = [
 ]
 
 /**
- * 今天在 {@link DAYS} 里的下标（周一 = 0），以及当前小时。
- *
- * <p><b>为什么界面上必须标出来</b>：7 行格子长得一模一样，用户很容易
- * 在「星期五」那行画了却发现没录 —— 其实他画的是「星期六」。实测踩过：
- * 今天是周五、计划只配了周六 08:00-22:00，用户以为坏了，
- * 实际是配错了行，而界面完全看不出哪行是今天。
- *
- * <p>用 `getDay()`：0 = 周日，所以 `(getDay() + 6) % 7` 换成
- * 「周一 = 0」的索引，与 {@link DAYS} 对齐。
+ * 今天在 DAYS 里的下标（周一 = 0）与当前小时。界面必须标出来：7 行格子长得一样，
+ * 实测今天是周五、计划配在周六，用户以为坏了 —— 实际是配错了行，而界面看不出哪行是今天。
+ * getDay() 0=周日，故 (getDay()+6)%7。
  */
 const nowInfo = ref(currentNow())
 const todayIndex = computed(() => nowInfo.value.dayIndex)
@@ -303,17 +278,12 @@ function currentNow() {
   return { dayIndex: (d.getDay() + 6) % 7, hour: d.getHours() }
 }
 
-/** 0~23 共 24 格。 */
 const HOURS = Array.from({ length: 24 }, (_, i) => i)
 
-/** 刻度：每 2 小时一个。 */
 const TICKS = Array.from({ length: 13 }, (_, i) => i * 2)
 
 /**
- * 计划时段（按天 → 小时集合）。
- *
- * <p>内部用「天索引 → Set<小时>」表示，存库时转成 LiveGBS 的 JSON 结构
- * {@code [[{s1,e1}], ...]}：外层 7 个数组对应周一~周日，每项是该天的时段列表。
+ * 计划时段：内部用「天索引 → Set<小时>」，存库时转 LiveGBS 的 [[{s1,e1}], ...]（周一~周日）。
  */
 const planHours = reactive([])
 
@@ -334,17 +304,9 @@ function toggleHour(dayKey, hour) {
   else s.add(hour)
 }
 
-/* ==================== 时段格子：拖动批量选择 ==================== */
-
 /**
- * 拖动状态。
- *
- * <p>{@code anchor} 是按下鼠标的那一格（天, 小时）；{@code value} 是这一段
- * 要统一设成的值 —— 起点状态取反，与 Excel 选区一致：
- * 从空白格开始拖 = 全部选中，从已选格开始拖 = 全部取消。
- *
- * <p>选区按<b>矩形</b>算（起点的天到当前的天 × 起点的小时到当前的小时），
- * 这样「周三 8 点 → 周五 18 点」一次就能刷出 3 天 × 11 小时的时段。
+ * 拖动状态。value 是起点状态取反后的值（从空白格拖 = 全选，从已选格拖 = 全取消）。
+ * 选区按矩形算，「周三8点→周五18点」一次刷 3×11 小时。
  */
 const gridDrag = reactive({
   active: false,
@@ -367,7 +329,6 @@ function onHourEnter(dayKey, hour) {
   applyGridRect(dayKey, hour)
 }
 
-/** 把「锚点 → 当前格」的矩形区域统一设为 {@link gridDrag}.value。 */
 function applyGridRect(dayKey, hour) {
   const d0 = Math.min(gridDrag.anchorDay, dayKey)
   const d1 = Math.max(gridDrag.anchorDay, dayKey)
@@ -390,17 +351,7 @@ function setHour(dayKey, hour, on) {
   else s.delete(hour)
 }
 
-/**
- * 结束时段拖拽。
- *
- * <p><b>只能挂在最外层 {@code .plan-editor} 上，不能挂在每行的
- * {@code .plan-hours} 上</b>：行与行之间有 margin，行下方还有刻度条
- * （{@code .plan-ticks}），从周二拖到周四时鼠标必然经过这些非格子元素，
- * 触发行的 mouseleave 就会中断拖拽 —— 表现为「只能选中起点那一格」
- * （实测踩过）。
- *
- * <p>挂在最外层则「只要还在编辑器内」就一直有效，跨行、跨刻度都不中断。
- */
+/** 只能挂最外层 .plan-editor：行间有 margin、行下还有刻度条，挂行上会 mouseleave 中断（实测只能选中起点那一格） */
 function endGridDrag() {
   gridDrag.active = false
   gridDrag.anchorDay = -1
@@ -511,18 +462,9 @@ function describePlan(json) {
 
 /* ==================== 数据加载 ==================== */
 
-/**
- * 把接口返回的计划行归一化为本地结构。
- *
- * <p><b>为什么需要这一步</b>：后端历史上把 VO 字段写成 {@code ID / Name / Plan}
- * （大写开头），而 Jackson 按 getter 推导属性名时会 decapitalize 成
- * {@code id / name / plan} —— 前端照字段名读 {@code row.Name} 拿到 undefined，
- * 于是列表名称空白、时段全显示 ✗、编辑弹窗回显不出内容，
- * 「关联通道」拿到 undefined 的 id 导致通道表格为空、拖拽选择看起来也失效。
- *
- * <p>后端已统一改为小写驼峰。这里仍兼容两种写法：让前端不受后端序列化细节
- * 影响，任一侧改动都不会再出现「界面空了但接口有数据」这种难查的问题。
- */
+/** 把接口返回的计划行归一化为本地结构。后端历史 VO 字段是 ID / Name / Plan，Jackson
+ * decapitalize 成 id/name/plan，前端读 row.Name 得到 undefined（列表空、时段全 ✗、弹窗不回显）。
+ * 后端已改为小写驼峰，这里兼容两种写法。 */
 function normalizePlan(r) {
   if (!r) return null
   return {
@@ -560,8 +502,6 @@ function goBack() {
   router.push('/cloud')
 }
 
-/* ==================== 编辑 ==================== */
-
 const editDialog = ref(false)
 const editTarget = ref(null)
 const saving = ref(false)
@@ -584,11 +524,8 @@ async function doSave() {
     ElMessage.warning('请填写计划名称')
     return
   }
-  // 【保存前提醒】计划没覆盖「今天」时给一次确认。
-  //
-  // 实测踩过：用户在今天（周五）画了格子，其实画到了「星期六」那行，
-  // 保存后一直不录，以为是 bug。格子本身没有语义上的"今天"，
-  // 光靠视觉标「今天」还不够 —— 保存时再确认一次，代价很小。
+  // 实测踩过：用户在今天（周五）画了格子，其实画到了「星期六」那行，保存后一直不录，
+  // 以为是 bug。格子本身没有语义上的「今天」，光靠视觉标注不够 —— 保存时再确认一次。
   if (form.enable && !planCoversToday()) {
     const todayLabel = DAYS[todayIndex.value]?.label || '今天'
     if (!(await confirmAction(
@@ -617,7 +554,6 @@ async function doSave() {
   }
 }
 
-/** 当前编辑中的计划是否覆盖「今天」的任意时段。 */
 function planCoversToday() {
   const s = planHours[todayIndex.value]
   return !!s && s.size > 0
@@ -645,8 +581,6 @@ async function removePlan(row) {
   }
 }
 
-/* ==================== 关联通道 ==================== */
-
 const chanDialog = ref(false)
 const chanTarget = ref(null)
 const chanRows = ref([])
@@ -654,7 +588,6 @@ const chanLoading = ref(false)
 const chanSaving = ref(false)
 const chanQuery = ref('')
 const onlyRelated = ref(false)
-/** 已选中的通道键集合（`<设备编码>/<通道编码>`）。 */
 const picked = reactive(new Set())
 /** 该计划原本已关联的通道键集合（用于「只看已选」）。 */
 const related = reactive(new Set())
@@ -708,19 +641,13 @@ function togglePick(row, checked) {
   else picked.delete(k)
 }
 
-// ==================== 批量选择（点行 / 拖拽） ====================
-
 const chanTableRef = ref(null)
 
 /**
- * 拖拽状态。
- *
- * <p>{@code anchor} 是按下鼠标的那一行；{@code dragValue} 是这一整段要设成的值。
- * 「首行状态取反」是 Excel 的习惯：从已选行拖到未选行 = 全部取消，
- * 反之全部选中 —— 用户不必先想「我要选还是取消」。
+ * 拖拽状态：anchor 是按下时那一行。「首行状态取反」是 Excel 习惯：
+ * 从已选行拖到未选行 = 全部取消，反之全部选中。
  */
 const dragging = ref(false)
-/** 当前拖到第几行（用于高亮覆盖范围）。 */
 const dragHover = ref(-1)
 let dragAnchor = -1
 let dragValue = true
@@ -734,10 +661,8 @@ function chanRowClass({ rowIndex }) {
 }
 
 /**
- * 按下鼠标：定位行 → 记锚点 → 立即切换该行 → 进入拖拽态。
- *
- * <p>点复选框列时直接返回，让 checkbox 自己的 change 处理（否则会切换两次，
- * 表现为「点了没反应」）。
+ * 按下鼠标：定位行 → 记锚点 → 切换该行 → 进入拖拽态。点复选框列时直接返回，
+ * 让 checkbox 自己处理（否则会切换两次，表现为点了没反应）。
  */
 function onChanTableMouseDown(event) {
   if (event.button !== 0) return
@@ -755,7 +680,6 @@ function onChanTableMouseDown(event) {
   togglePick(row, dragValue)
 }
 
-/** 鼠标移入某单元格：若在拖拽中，把锚点到该行整段应用 dragValue。 */
 function onChanCellEnter(row) {
   if (!dragging.value) return
   const idx = chanRows.value.indexOf(row)
@@ -812,8 +736,7 @@ function onWindowMouseUp() {
 
 onMounted(() => {
   load()
-  // 拖拽可能在容器外松手（甚至拖出浏览器窗口），
-  // 挂在 window 上兜底，否则 dragging / gridDrag 会一直为 true。
+  // 拖拽可能在容器外松手（甚至拖出窗口），挂 window 兜底，否则 dragging / gridDrag 会一直为 true
   window.addEventListener('mouseup', onWindowMouseUp)
 })
 
@@ -823,16 +746,13 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/*
- * 表格与工具条沿用全局样式（.filter-bar / .el-table），
- * 与「设备管理」「通道管理」保持一致，这里只补计划详情文案。
- */
+/* 表格与工具条沿用全局样式，与「设备管理」「通道管理」一致，这里只补计划详情文案 */
 .plan-detail {
   font-size: 12px;
   color: var(--text-secondary);
 }
 
-/* 批量选择提示：弱化色，避免抢表格的注意力 */
+/* 批量选择提示：弱化色，避免抢表格注意力 */
 .pick-hint {
   margin-top: 8px;
   font-size: 12px;
@@ -935,9 +855,7 @@ onUnmounted(() => {
 }
 
 /*
- * 当前小时：加一条竖向标记。
- * 让用户打开弹窗就知道「现在正处于哪一格」，配合「今天」标签，
- * 一眼能判断当前时刻是否在计划时段内。
+ * 当前小时：竖向标记。配合「今天」标签，打开弹窗就知道现在是否在计划时段内。
  */
 .plan-hour.is-now {
   box-shadow: inset 0 0 0 2px var(--el-color-warning);

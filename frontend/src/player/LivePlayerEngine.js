@@ -1,26 +1,9 @@
 /**
- * LivePlayer 引擎适配层（全局脚本模式）。
+ * LivePlayer 引擎适配层：全局脚本加载组件，createVNode + render 命令式挂载。
  *
- * <h2>技术栈</h2>
- *
- * `@liveqing/liveplayer-v3` 是 <b>video.js 9 + flvjs + Hls/Webrtc tech</b> 的
- * Vue 封装。按官方示例走全局脚本加载：
- * <ol>
- *   <li>{@code /js/liveplayer-lib.min.js}（video.js + flvjs，index.html 同步加载）；</li>
- *   <li>{@code /js/liveplayer-component.min.js}（Vue 组件）—— 它依赖全局
- *       {@code window.Vue}，由本模块在首次使用前注入。</li>
- * </ol>
- *
- * <p><b>为什么不能 npm import</b>：该包是 UMD + webpack 内联运行时，文件里既有
- * {@code require("vue")} 又有 {@code require("util")}（Node 内置模块），
- * 让 Vite 去优化它会报 {@code TypeError: isFunction is not a function}
- * （发生在 {@code defineComponent} 内），整个应用白屏。
- *
- * <h2>为什么用 createVNode + render</h2>
- *
- * 现有播放器架构是命令式的（自己建宿主 div、自己管生命周期），各视图只调
- * {@code player.play(...)}。用 {@code createVNode + render} 把组件挂到宿主
- * div 上，视图层零改动，电视墙的多实例管理也不受影响。
+ * 不能 npm import：UMD 里混有 require("vue") 与 require("util")，
+ * Vite 优化后报 TypeError: isFunction is not a function，整个应用白屏。
+ * 先挂 window.Vue 再注入组件脚本，UMD 自执行时就要读它。
  *
  * @module LivePlayerEngine
  */
@@ -35,22 +18,11 @@ const COMPONENT_SRC = '/js/liveplayer-component.min.js'
 const FILL_STYLE_ID = 'lp-fill-style'
 
 /**
- * 注入「铺满容器」样式（幂等）。
+ * 注入「铺满容器」样式（幂等，模块级只注入一次）。
  *
- * <h3>为什么必须要这段 CSS</h3>
- *
- * <p>LivePlayer 的 {@code aspect} prop 默认是字符串 {@code "16:9"}，组件据此给
- * {@code .video-wrapper} 算 {@code padding-bottom: 56.25%} 来撑高度。
- * 电视墙的每个格子比例各不相同（4 格更方、1 格更宽），按 16:9 算出来的高度
- * <b>必然填不满</b> —— 底部多出一块纯黑，控制条浮在黑块上方，
- * 表现为「播放器没有占满容器」。
- *
- * <p>{@code aspect="100%"} 能让组件走另一条分支（直接给
- * {@code width/height:100%}），但只靠 prop 不够稳：组件在 {@code home}
- * （水印）与 {@code fullscreen} 切换时会重建内层结构，{@code video-js}
- * 自身也带 {@code height:auto} 默认样式，一旦外层比例变化就会再次塌陷。
- * 所以这里用 CSS 把整条链路的高宽全部拉满。样式是模块级共享的（只注入一次），
- * 宿主 div 销毁后规则仍然留在 {@code <head>} 里，供后续实例复用。
+ * aspect 默认按 16:9 算 padding-bottom，电视墙格子比例不同必然留黑边；
+ * aspect="100%" 在 home/全屏切换重建结构后仍会被 video-js 的 height:auto 拉塌，
+ * 所以用 CSS 把整条链路拉满。
  */
 function ensureFillStyle() {
   if (typeof document === 'undefined') return
@@ -59,16 +31,9 @@ function ensureFillStyle() {
   style.id = FILL_STYLE_ID
   style.textContent = `
 /*
- * 宿主 div 自身必须严格等于父容器高度。
- *
- * 【为什么必须显式约束】引擎会给宿主设 min-height:180px 兜底
- * （video.js 需要非零尺寸才能建控制栏）。但电视墙的小格子高度可能只有
- * 150px 左右，180px 会撑破父容器：控制栏按 180 定位、bottom:0 落在
- * 父容器之外，被 .video-box 的 overflow:hidden 裁掉大半 ——
- * 表现为「工具栏看得见却点不动」（实际可点区域只剩露出来的那一条）。
- *
- * 用 height:100% + max-height:100% 双保险：前者撑满，后者禁止超出。
- * min-height 交给下面的 @media 只在容器确实太矮时才生效。
+ * 宿主必须严格等于父容器高度：引擎的 min-height:180px 兜底在 150px 的电视墙格子里
+ * 会撑破父容器，控制栏被 .video-box 的 overflow:hidden 裁成「看得见点不动」。
+ * height:100% 撑满、max-height:100% 禁止超出。
  */
 .lp-fill {
   height: 100%;
@@ -84,12 +49,8 @@ function ensureFillStyle() {
   padding-bottom: 0 !important;
 }
 /*
- * .video-slot 是组件内部留给「自定义内容」的空槽，DOM 里排在
- * .vjs-control-bar 之后。给它 height:100% 会让它撑满整个播放器区域，
- * 从而<b>盖住控制栏</b>——控制栏看得见、点击却全被这个空 div 吃掉。
- *
- * 电视墙不往 slot 里放东西，所以直接让它不参与命中测试。
- * 需要往 slot 塞内容时，改成给里面的实际元素单独设 pointer-events。
+ * .video-slot 排在控制栏之后，height:100% 会盖住控制栏吃掉点击。
+ * 电视墙不往 slot 放内容，直接禁止命中；要放内容时给内部元素单独设 pointer-events。
  */
 .lp-fill .video-slot {
   pointer-events: none;
@@ -100,29 +61,14 @@ function ensureFillStyle() {
   height: 100% !important;
   padding-top: 0 !important;
 }
-/*
- * 控制栏贴底并置顶。
- *
- * <p>video.js 默认 bottom:0 相对 .video-js 定位，只要上面各层高度一致就已经正确。
- * 但组件内部的 .video-slot / .video-water / .video-zoom 都排在控制栏之后，
- * 一旦它们有实际尺寸就会盖住控制栏。显式给控制栏 z-index 是双保险，
- * 保证「工具栏看得见就一定点得动」。
- */
+/* .video-slot/.video-water/.video-zoom 排在控制栏之后，给控制栏 z-index 保证点得动 */
 .lp-fill .vjs-control-bar {
   margin-bottom: 0;
   z-index: 5;
 }
 /*
- * video 元素等比显示，不拉伸。
- *
- * <p>组件在 {@code stretch_=true} 时会内联 {@code object-fit:fill}
- * （见 liveplayer-component 里拼接 style 的那段），画面被强行拉满而变形。
- * 我们默认传 {@code stretch:false}，组件就不加 object-fit；
- * 这里显式写 {@code contain} 是把默认行为固定下来 ——
- * 即便将来组件换了默认值，也不会突然变成拉伸。
- *
- * <p>用户点控制栏的「STR」按钮时，组件会自行改成 {@code fill}，
- * 内联样式优先级高于本样式表，所以手动切换仍然有效。
+ * 等比显示：组件在 stretch_=true 时内联 object-fit:fill 会拉变形，
+ * 这里固定 contain；用户点 STR 时组件内联 fill 仍可覆盖（内联优先）。
  */
 .lp-fill video {
   width: 100%;
@@ -130,30 +76,11 @@ function ensureFillStyle() {
   object-fit: contain;
 }
 /*
- * 不可拖动的流：隐藏进度条与时间显示。
+ * 不可拖动的流隐藏进度条与时间。
  *
- * <h3>为什么直播和设备回放都不该有进度条</h3>
- * 这两条通路拿到的都是<b>主动推上来的实时流</b>，没有可 seek 的时间轴：
- * <ul>
- *   <li>直播 —— 本来就没有「跳到后面」这回事；</li>
- *   <li>设备录像 —— 是「按段重新 INVITE」的伪点播，定位靠 SIP INFO 让设备跳，
- *       不是靠改 {@code currentTime}。时间轴页面本身已提供定位入口。</li>
- * </ul>
- *
- * <h3>不隐藏会怎样（线上实际表现）</h3>
- * video.js 的 {@code ProgressControl.update()} 在
- * {@code player.seekable()} 为空时会调 {@code hide()}：
- * <pre>起播前（seekable 有值）→ 进度条出现
- *开始播放（seekable 变空）→ 进度条 display:none</pre>
- * 于是控制栏在播放前后<b>宽度分配完全不同</b> —— 按钮从分散变成挤在左边，
- * 整条控制栏看起来「跳了一下」，用户会以为页面布局坏了。
- * 时间数字（{@code 10:31 / 29:59}）同理，且它也不是真实进度。
- *
- * <p>隐藏后控制栏只剩 播放/暂停、音量、拉伸、截图、全屏，
- * 与 CMS（LiveGBS）的控制栏一致，且<strong>播放前后完全稳定</strong>。
- *
- * <p>只对显式传 {@code hideProgress} 的实例生效 —— 云端录像的 MP4 文件
- * 是真正可 seek 的点播，进度条必须保留（见 {@code useLivePlayer#playFile}）。
+ * 直播与设备回放都是主动推上来的实时流，没有可 seek 的时间轴。video.js 在
+ * seekable() 为空时自动 hide，控制栏宽度会在播放前后跳变；时间数字也不是真实进度。
+ * 只对显式传 hideProgress 的实例生效，云端录像 MP4 保留进度条。
  */
 .lp-no-seek .vjs-progress-control,
 .lp-no-seek .vjs-current-time,
@@ -162,32 +89,18 @@ function ensureFillStyle() {
 .lp-no-seek .vjs-remaining-time {
   display: none !important;
 }
-/*
- * 隐藏进度条后，靠 spacer 把右侧按钮组（拉伸/截图/全屏）推到最右。
- *
- * <p>video.js 默认 {@code .vjs-custom-control-spacer} 是 {@code display:none}，
- * 它平时由进度条的 flex 占据剩余空间来「顺便」把全屏挤到右边。
- * 进度条一没了，剩下的按钮就会全部挤到左侧、右边留一大片空白。
- */
+/* 进度条隐藏后由 spacer 占剩余空间，否则按钮全挤到左侧 */
 .lp-no-seek .vjs-custom-control-spacer {
   display: block !important;
   flex: 1 1 auto;
 }
 /*
- * 窄容器（电视墙小格子）：缩小按钮、隐去次要按钮。
+ * 窄容器（电视墙格子）：缩小按钮、隐去拉伸/截图/LIVE。
  *
- * <p>video.js 的按钮宽度是 {@code 4em}（14px 字号 → 56px）。
- * 电视墙 4/6/9/16 分屏时单个格子可能只有 180~250px 宽，
- * 而控制栏要放 播放+音量+拉伸+截图+全屏 共 5 个 → 需 280px，
- * <b>必然溢出</b>：多出来的按钮会跑到容器外（实测全屏按钮超出右边界 127px），
- * 表现为「控制栏按钮错位、部分点不到」。
- *
- * <p>处理：容器窄于 420px 时按钮缩到 {@code 2.8em}（≈39px），
- * 并隐去拉伸与截图 —— 这两个在小格子里既看不清也不常用，
- * 而播放/音量/全屏是任何尺寸都需要的。5 × 39 = 195px，能放下。
- *
- * <p>用容器查询而不是媒体查询：格子宽度取决于分屏数（1/4/6/9/16），
- * 与窗口宽度无直接关系 —— 1080p 窗口下 16 分屏每格也才 250px。
+ * video.js 按钮宽 4em（14px → 56px），5 个按钮需 280px；4/6/9/16 分屏的格子
+ * 只有 180~250px，实测全屏按钮超出右边界 127px。容器窄于 420px 时按钮缩到
+ * 2.8em（≈39px，5×39=195px 能放下）。用容器查询而非媒体查询：格子宽度取决于分屏数，
+ * 与窗口宽度无关（1080p 下 16 分屏每格也才 250px）。
  */
 .lp-fill {
   container-type: inline-size;
@@ -219,12 +132,9 @@ export function isLivePlayerAvailable() {
 }
 
 /**
- * 从 UMD 导出里取出真正的组件对象。
- *
- * <p><b>必须解包</b>：webpack 打包的 UMD 把入口模块的导出整体赋给
- * {@code window.LivePlayer}，源文件用 {@code export default}，拿到的就是
- * 命名空间对象 {@code { default: Component }}。直接当组件用会报
- * {@code Component is missing template or render function}。
+ * 从 UMD 导出里取组件：webpack 把入口导出赋给 window.LivePlayer，
+ * 源文件是 export default，拿到的是 { default: Component }。
+ * 直接当组件用会报 Component is missing template or render function。
  */
 function unwrapComponent(mod) {
   if (!mod) return null
@@ -233,18 +143,11 @@ function unwrapComponent(mod) {
 }
 
 /**
- * 给 flv 源处理器补上 {@code canPlayType}。
+ * 给 flv 源处理器补 canPlayType。
  *
- * <p>videojs-flvjs 注册到 {@code Html5} 技术上的处理器只有
- * {@code canHandleSource}/{@code handleSource}，而 video.js 9 的
- * {@code Html5.canPlayType()} 会逐个处理器调 {@code canPlayType} ——
- * 缺这个方法就抛 {@code r[n].canPlayType is not a function}，
- * 于是 {@code <source type="video/x-flv">} 被判成「不支持的源」，
- * 播放器只显示一句「无法找到此视频兼容的源」，画面永远不出来。
- *
- * <p>补上之后 {@code canPlayType('video/x-flv')} 正常返回
- * {@code probably}，源选择与后续 {@code handleSource} 都恢复正常。
- * 幂等：已经有的处理器不会被覆盖。
+ * videojs-flvjs 只注册了 canHandleSource/handleSource，video.js 9 逐个调
+ * canPlayType 时会抛 r[n].canPlayType is not a function，<source type="video/x-flv">
+ * 被判成不支持的源，画面永远不出。已有 canPlayType 的处理器不动（幂等）。
  */
 function patchFlvSourceHandler() {
   try {
@@ -269,8 +172,7 @@ function patchFlvSourceHandler() {
 /**
  * 确保 LivePlayer 组件可用（幂等）。
  *
- * <p>顺序关键：<b>先</b>把 Vue 挂到 window，<b>再</b>注入组件脚本 ——
- * 组件的 UMD 包装器在自执行时就会读 {@code window.Vue}。
+ * 顺序关键：先把 Vue 挂到 window，再注入组件脚本 —— UMD 自执行时就读 window.Vue。
  *
  * @returns {Promise<any>} Vue 组件对象
  */
@@ -310,43 +212,27 @@ export function ensureLivePlayerComponent() {
 }
 
 /**
- * LivePlayer 引擎实例。
+ * LivePlayer 引擎实例。接口贴近 WsFlvStream（构造 + start + destroy）。
  *
- * <p>接口贴近 {@code WsFlvStream}（构造 + start + destroy），
- * 让 {@code useXgPlayer} 能用同一套流程驱动。
- *
- * <h3>音频必须显式关掉</h3>
- *
- * <p>{@code hasaudio} 传 {@code true} 时，flv.js 会把音频一起塞进 MSE，
- * 而 ZLM 转出的 G.711 / AAC 音频描述符会被 Chrome 拒收：
- * <ul>
- *   <li>G.711A 流：{@code CodecUnsupported: Flv: Unsupported audio codec idx: 7}</li>
- *   <li>AAC 流：{@code code=4 audio decoder initialization failed (kUnsupportedConfig)}</li>
- * </ul>
- * 两种情况都<b>整路流播不出来</b>。传 {@code false} 后变纯视频：
- * 同一路流实测 1015ms 起播、缓冲攒到 15.5 秒、211 帧只丢 3 帧。
- *
- * <p>声音交给 {@code WsFlvStream}（Web Audio 解 G.711）或 WebRTC（PCMA 透传）。
+ * FLV 通路 hasaudio 必须显式 false：flv.js 把 G.711/AAC 塞进 MSE 会被 Chrome 拒收
+ * （G.711A: Unsupported audio codec idx: 7；AAC: code=4 ... kUnsupportedConfig），
+ * 整路流播不出来。关掉后实测 1015ms 起播、211 帧丢 3 帧。
+ * 声音交给 WebRTC（PCMA 透传）。
  */
 export class LivePlayerEngine {
   /**
    * @param {object} opts
    * @param {string} opts.url 播放地址
    * @param {HTMLElement} opts.el 宿主元素
-   * @param {boolean} [opts.muted] 静音（默认 true）
-   * @param {boolean} [opts.hasAudio] 是否让播放器处理音频（默认 false，见类注释）
-   * @param {(msg:string)=>void} [opts.onError] 起播前失败回调
-   * @param {()=>void} [opts.onReady] 成功起播回调
-   * @param {(info:object)=>void} [opts.onStats] 媒体信息回调
-   * @param {boolean} [opts.vod] 是否点播
-   * @param {boolean} [opts.webrtc] 是否走组件内置的 Webrtc tech
-   * @param {boolean} [opts.hideProgress] 隐藏进度条与时间显示（直播/设备回放必传，见 CSS 注释）
-   * @param {boolean} [opts.nativeHls] 原生 HLS：直接用 {@code <video src=m3u8>}，不经 video.js
-   * @param {boolean} [opts.debug] 打开组件自身的调试日志（Webrtc tech 的日志只能这么开）
-   * @param {Array<{id:string,title:string,text:string}>} [opts.controlButtons]
-   *        要插到控制栏的按钮（见 {@link LivePlayerEngine#_ensureControlButtons}）
-   * @param {(id:string, el:HTMLElement)=>void} [opts.onControlButton] 控制栏按钮点击
-   * @param {(stage:string, extra?:object)=>void} [opts.onDebug] 诊断回调
+   * @param {boolean} [opts.hasAudio] 让播放器处理音频；FLV 通路必须保持默认 false
+   * @param {boolean} [opts.hideProgress] 隐藏进度条（直播/设备回放必传）
+   * @param {boolean} [opts.nativeHls] 直接用 <video src=m3u8>，不经 video.js
+   * @param {Function} [opts.onError] 起播前失败回调
+   * @param {Function} [opts.onReady] 成功起播回调
+   * @param {Function} [opts.onStats] 媒体信息回调
+   * @param {Function} [opts.onDebug] 诊断回调
+   * @param {Array<{id,title,text}>} [opts.controlButtons] 控制栏按钮
+   * @param {Function} [opts.onControlButton] 控制栏按钮点击
    */
   constructor({
     url,
@@ -375,10 +261,10 @@ export class LivePlayerEngine {
     this.hideProgress = hideProgress
     this.nativeHls = nativeHls
     this.debug = debug
-    /** 要插到控制栏的按钮定义。 */
+    // 要插到控制栏的按钮定义
     this.controlButtons = controlButtons || []
     this.onControlButton = onControlButton || (() => {})
-    /** id → 已插入的 button 元素。 */
+    // id → 已插入的 button 元素
     this._controlEls = {}
     this.onError = onError || (() => {})
     this.onReady = onReady || (() => {})
@@ -393,7 +279,7 @@ export class LivePlayerEngine {
     this._readyFired = false
     /** 提示性信息（不致命）。 */
     this.lastNotice = null
-    /** 起播后遇到的错误（不触发退回）。 */
+    // 起播后遇到的错误（不触发退回）
     this.lastError = null
   }
 
@@ -412,10 +298,7 @@ export class LivePlayerEngine {
    */
   async start() {
     if (this.destroyed) return false
-    /*
-     * 原生 HLS 走独立分支：不加载 LivePlayer 组件、也不需要 video.js。
-     * 原因见 {@link _startNativeHls}。
-     */
+    // 原生 HLS 独立分支：不加载 LivePlayer 组件，也不用 video.js
     if (this.nativeHls) return this._startNativeHls()
     let Component
     try {
@@ -432,18 +315,9 @@ export class LivePlayerEngine {
     }
 
     /*
-     * 关键：容器必须有实际尺寸。
-     *
-     * <p>video.js 初始化时会读容器的 clientWidth/clientHeight 来建控制栏与
-     * 计算画面比例。若容器是 0×0（电视墙里 grid cell 尚未布局完成、
-     * 或父级高度为 auto），它虽然不报错，但<b>不会触发 playing</b> ——
-     * 表现为「组件挂上了、video 元素也在、就是不播」，极难定位。
-     * 所以这里给一个兜底尺寸。
-     *
-     * <p><b>兜底高度不能超过父容器</b>：电视墙小格可能只有 150px 高，
-     * 若这里硬写 min-height:180px，宿主会撑破父容器，
-     * 而 .video-box 是 overflow:hidden —— 控制栏被裁掉大半，
-     * 表现为「工具栏看得见却点不动」。所以取 min(180, 父容器高度)。
+     * 容器必须有非零尺寸：0×0 时 video.js 不报错，但不会触发 playing。
+     * 兜底高度取 min(180, 父容器高)——硬写 180px 会撑破 150px 的电视墙格子，
+     * .video-box 的 overflow:hidden 会把控制栏裁到「看得见点不动」。
      */
     if (!this.el.clientWidth || !this.el.clientHeight) {
       const parentH = this.el.parentElement ? this.el.parentElement.clientHeight : 0
@@ -454,27 +328,16 @@ export class LivePlayerEngine {
       })
       this.el.style.width = this.el.style.width || '100%'
       this.el.style.height = this.el.style.height || '100%'
-      /*
-       * 只有当父容器确实够高时才加 min-height。
-       * 父容器也为 0（布局尚未完成）时仍给 180，让 video.js 能初始化；
-       * 一旦父容器量出真实高度，100% 会自然接管。
-       */
+      // 父容器也为 0（布局未完成）时给 180，让 video.js 能初始化
       const minH = parentH > 0 ? Math.min(180, parentH) : 180
       if (!this.el.style.minHeight) this.el.style.minHeight = minH + 'px'
     }
 
     if (!this.el || this.destroyed) return false
     ensureFillStyle()
-    /*
-     * 在引擎层加 class 而不是让调用方加：{@code useLivePlayer} 与
-     * {@code useXgPlayer} 都走这里，样式覆盖必须对两者一致。
-     */
+    // 在引擎层加 class：useLivePlayer 与旧调用方都走这里，样式必须一致
     this.el.classList.add('lp-fill')
-    /*
-     * 实时流（直播 / 设备回放）没有可 seek 的时间轴，进度条既无意义、
-     * 又会在起播瞬间被 video.js 自动隐藏导致控制栏宽度跳变。
-     * 详见 {@link ensureFillStyle} 里 {@code .lp-no-seek} 的说明。
-     */
+    // 实时流没有可 seek 的时间轴，进度条只会让控制栏宽度跳变
     if (this.hideProgress) {
       this.el.classList.add('lp-no-seek')
     }
@@ -484,50 +347,25 @@ export class LivePlayerEngine {
       raw: false,
       live: !this.vod,
       muted: this.muted,
-      /*
-       * aspect="100%" 让组件跳过「按 16:9 算 padding-bottom」的分支，
-       * 直接给内层 100%×100%（详见 {@link ensureFillStyle}）。
-       */
+      // 跳过按 16:9 算 padding-bottom 的分支，直接给内层 100%×100%
       aspect: '100%',
       /*
-       * hasaudio 只在 FLV 通路必须显式传 false（见类注释）。
-       *
-       * WebRTC 通路<b>不能</b>传 false：那时音频是 PCMA/PCMU 原生解码，
-       * 浏览器完全支持，关掉就成了无声播放（白白丢功能）。
+       * FLV 通路必须显式 false（原因见类注释）；
+       * WebRTC 不能传 false：PCMA/PCMU 由浏览器原生解码，关掉就变成无声播放。
        */
       hasaudio: this.webrtc || this.hasAudio ? undefined : false,
       autoplay: true,
       debug: this.debug,
       /*
-       * WebRTC 通路关闭「错误即时重连」。
-       *
-       * <p>LivePlayer 的 Webrtc tech 会自己开一条名为 keepalive 的
-       * DataChannel 每 3 秒 ping。ZLMediaKit 的 WebRTC 应答不带 SCTP，
-       * 这条 channel 必然 close —— tech 随即抛
-       * {@code error{name:'send channel closed'}}，组件的
-       * {@code rtcError()} 看到 {@code reloadInterval>0} 就整段重建播放器。
-       * 实测每次起播后 1~5 秒画面会被掐断重来一次（表现为「刚出画面就转圈」）。
-       * 传 0 让组件不因这个假错误重建；真正的断流由 {@code liveInterval}
-       * 与上层看门狗兜底。
+       * WebRTC 通路传 0：keepalive DataChannel 每 3 秒 ping，而 ZLM 应答不带 SCTP，
+       * channel 必然 close，tech 抛 send channel closed 后整段重建播放器
+       * （实测起播后 1~5 秒画面被掐断重来）。真断流由 liveInterval 与上层看门狗兜底。
        */
       reloadInterval: this.webrtc ? 0 : undefined,
       fluent: true,
-      /*
-       * stretch: false —— 保持画面原始宽高比，不拉伸。
-       *
-       * <p>{@code stretch:true} 会让 video 撑满容器（等效 object-fit:fill），
-       * 16:9 的码流放进非 16:9 的格子里会被横向或纵向拉变形，
-       * 人像和球机云台的画面尤其明显。默认按标准比例显示（letterbox 留黑边），
-       * 需要铺满时由用户点控制栏的「STR」按钮自行切换。
-       */
+      // 保持原始宽高比；stretch:true 等效 object-fit:fill，会拉变形
       stretch: false,
-      /*
-       * 是否显示组件自带的控制栏。
-       *
-       * <p>国标回放要关掉：它的进度条画不出长度（FLV 里没有 duration），
-       * 拖动也是无效 seek（伪点播没有可 seek 的位置）。留着只会让用户拖一根
-       * 没有反应的进度条。回放的控制条改由页面提供（见 PlaybackView）。
-       */
+      // 国标回放关掉组件控制栏：FLV 没有 duration，进度条拖不动，控制条由页面提供
       controls: this.controls,
       onError: (e) => this._onErrorEvent(e),
       onMessage: (m) => {
@@ -554,14 +392,11 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 盯住控制栏的 DOM 变动，按钮被重建掉就重插。
+   * 盯住控制栏 DOM，按钮被重建掉就重插。
    *
-   * <p><b>为什么不用定时轮询</b>：控制栏只在「组件重建播放器」时才会换掉，
-   * 那是低频事件；而轮询得一直跑（重建可能发生在起播几十秒之后的重连里）。
-   * MutationObserver 只在真发生变动时触发，代价接近 0。
-   *
-   * <p>自身插入也会触发回调，但 {@link LivePlayerEngine#_ensureControlButtons}
-   * 里「已经在这个 bar 里就跳过」的判断让它自然幂等，不会死循环。
+   * 不用定时轮询：控制栏只在重建播放器时换掉，重建又可能发生在起播几十秒之后；
+   * MutationObserver 只在真变动时触发。自身插入也会触发回调，
+   * 但 _ensureControlButtons 的「已经在 bar 里就跳过」让它自然幂等。
    */
   _startControlBarObserver() {
     if (typeof MutationObserver === 'undefined' || this._ctrlObserver || !this.el) return
@@ -575,25 +410,9 @@ export class LivePlayerEngine {
   /**
    * 把自定义按钮插进 video.js 控制栏。
    *
-   * <h3>为什么不用组件的 {@code customButtons} prop</h3>
-   *
-   * <p>liveplayer 确实提供了 {@code customButtons="标题:图标类"}，但它有两个
-   * 硬限制：
-   * <ul>
-   *   <li>按钮内容只能是<b>图标 class</b>（{@code <i class="xxx">}）或纯文本，
-   *       要动态改文字得去改内联 HTML，很脏；</li>
-   *   <li>点击只能回传 {@code title} 字符串，而 {@code title} 又兼作按钮标识 ——
-   *       想让它显示成「播放协议」就没法稳定识别是哪个按钮。</li>
-   * </ul>
-   * 直接往 {@code .vjs-control-bar} 插一个自己建的按钮更干净：
-   * 文字随时能改、点击回调能拿到元素（可以拿它当锚点弹菜单）。
-   *
-   * <h3>为什么要轮询</h3>
-   *
-   * <p>控制栏是 video.js 在 {@code ready} 之后才建的，比组件挂载晚；
-   * 而组件在某些通路（实测 Webrtc tech）还会<b>整个重建</b>播放器，
-   * 那时控制栏也会换一个新的 DOM —— 所以插完还要能被重新插回来
-   * （见 {@link LivePlayerEngine#_ensureControlButtons} 的幂等判断）。
+   * 不用组件的 customButtons prop：按钮内容只能是图标 class 或纯文本，
+   * 点击只回传 title，而 title 又兼作标识，没法显示「播放协议」这类动态文字。
+   * 控制栏在 ready 之后才建、Webrtc tech 还会整个重建播放器，故由调用方补插。
    *
    * @param {number} tries 已重试次数
    */
@@ -605,12 +424,7 @@ export class LivePlayerEngine {
       return
     }
     for (const def of this.controlButtons) {
-      /*
-       * 已经插过且还在这个 bar 里就跳过。
-       *
-       * <p>控制栏被重建后旧元素已经不在文档里，{@code bar.contains} 为假，
-       * 于是会自动重插 —— 不需要额外的「重建」事件。
-       */
+      // 已在这个 bar 里就跳过；控制栏重建后 bar.contains 为假，会自动重插
       const existing = this._controlEls[def.id]
       if (existing && bar.contains(existing)) continue
 
@@ -625,10 +439,7 @@ export class LivePlayerEngine {
       span.textContent = def.text || ''
       btn.appendChild(span)
       btn.addEventListener('click', (ev) => {
-        /*
-         * 阻止冒泡：控制栏容器上挂有 video.js 的「用户活动」监听，
-         * 不拦的话点完会把控制栏当作待隐藏状态，某些布局下会直接收起。
-         */
+        // 阻止冒泡：控制栏容器挂有 video.js 的用户活动监听，不拦会直接收起控制栏
         ev.preventDefault()
         ev.stopPropagation()
         try {
@@ -637,10 +448,7 @@ export class LivePlayerEngine {
           // 忽略业务回调自身异常，不影响播放
         }
       })
-      /*
-       * 插在「全屏」之前：协议切换与拉伸/截图/全屏同属显示类开关，
-       * 放一起比放最左（播放/音量区）更合语义。
-       */
+      // 插在全屏之前：协议切换与拉伸/截图/全屏同属显示类开关
       const anchor = bar.querySelector('.vjs-fullscreen-control')
       if (anchor) bar.insertBefore(btn, anchor)
       else bar.appendChild(btn)
@@ -669,29 +477,13 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 原生 HLS：用 {@code <video src=m3u8>} 直接播，完全绕开 video.js。
+   * 原生 HLS：用 <video src=m3u8> 直接播，完全绕开 video.js。
    *
-   * <h3>为什么必须绕开</h3>
-   *
-   * <p>Safari / iOS <b>原生</b>就能播 HLS。但只要经过 video.js，它收到
-   * {@code type: 'application/x-mpegURL'} 就会先问注册的 source handler
-   * （{@code liveplayer-lib.min.js} 里打进来一个残缺的 contrib-hls），
-   * handler 抢走之后把 src 改成 {@code blob:} 去走 <b>MSE</b> ——
-   * 而 iOS 上根本没有 {@code MediaSource}，于是明明能播的地址被判死刑。
-   *
-   * <p>实测对照（桌面 Chromium，同一个 handler 同样会抢）：
-   * <pre>
-   *   裸 videojs() + m3u8 → tech=Html5、src=blob:、readyState=0、
-   *                         报 code=4 MEDIA_ERR_SRC_NOT_SUPPORTED
-   * </pre>
-   * 证明失败点在 handler 抢走这件事上，与 m3u8 本身无关
-   * （curl 拉 m3u8 与 ts 分片都是 200）。
-   *
-   * <h3>代价</h3>
-   *
-   * <p>用浏览器原生控制栏：音量、全屏、画中画都是系统组件（在 iOS 上
-   * 正是用户熟悉的交互）。没有 video.js 的截图按钮 —— HLS 本来就是兜底
-   * 通路（延迟 3 个切片），不值得为它复刻一套控制栏。
+   * video.js 会把 application/x-mpegURL 交给残缺的 contrib-hls handler，
+   * 改 src 为 blob: 走 MSE —— iOS 没有 MediaSource，能播的地址也被判死。
+   * 实测桌面 Chromium 同样 tech=Html5、src=blob:、readyState=0、
+   * code=4 MEDIA_ERR_SRC_NOT_SUPPORTED（curl 拉 m3u8/ts 均 200）。
+   * 代价是没有 video.js 控制栏，用系统原生控件；HLS 只是兜底通路。
    *
    * @returns {boolean} 是否已挂载（起播与否由 onReady 通知）
    */
@@ -702,10 +494,7 @@ export class LivePlayerEngine {
     }
     try {
       const v = document.createElement('video')
-      /*
-       * playsInline 必须显式三个属性都写：iOS 上少了它，
-       * 视频会自动跳进系统全屏播放器，页面里的播放器容器就空了。
-       */
+      // playsInline 三个属性都要写：iOS 少了它会跳进系统全屏，页面容器变空
       v.playsInline = true
       v.setAttribute('playsinline', '')
       v.setAttribute('webkit-playsinline', '')
@@ -750,10 +539,8 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 绑定底层 video 事件。
-   *
-   * <p>组件自身的 error 事件粒度不够（某些编码问题它<b>静默不动</b>，
-   * 不发任何事件），直接听底层 video 的 error / playing 更可靠。
+   * 绑定底层 video 事件：组件的 error 粒度不够，某些编码问题它静默不动、
+   * 不发任何事件，直接听 video 的 error / playing 更可靠。
    *
    * @param {number} tries 已重试次数（组件挂载是异步的两段式）
    */
@@ -776,10 +563,8 @@ export class LivePlayerEngine {
     v.addEventListener('error', () => {
       const err = v.error
       /*
-       * 已经播过一段（currentTime > 0.5）就不算「引擎选错了」。
-       *
-       * <p>直播流偶发 error 很常见（ZLM 侧短暂断流、切 GOP 丢帧），
-       * 组件自己会重连。若在这里判成致命，反而把「本来能继续播」的画面打断。
+       * currentTime > 0.5 的错误不算致命：直播偶发断流、切 GOP 丢帧很常见，
+       * 组件自己会重连，判死反而打断本可继续的播放。
        */
       if (v.currentTime > 0.5) {
         this.lastError = { code: err && err.code, msg: '起播后错误（已忽略，交给组件重连）' }
@@ -816,15 +601,11 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 周期性巡检：<b>重新定位</b> video 元素并按需重绑。
+   * 周期巡检：重新定位 video 元素并按需重绑。
    *
-   * <p><b>为什么必须有</b>：liveplayer 组件在某些通路（实测 Webrtc tech）会在
-   * 初始化失败/重连时 <b>整体重建 video 元素</b>。一次性绑定只会挂在那个已被
-   * 移除的旧节点上，结果是「画面其实在播、{@code onReady} 永远不来」——
-   * 上层看门狗 12 秒后报超时并回退，用户看到的是「明明在播却提示失败」。
-   *
-   * <p>顺带把「已经播过一段」也当作就绪：有些通路不发 {@code playing}
-   * （video.js 接管后事件被吞），只能靠 {@code currentTime} 前进判断。
+   * Webrtc tech 在初始化失败/重连时会整体重建 video，一次性绑定会挂在已移除的
+   * 旧节点上，表现为「画面在播、onReady 永远不来」，上层看门狗 12 秒后误报失败。
+   * 顺带用 currentTime > 0.2 兜住不发 playing 的通路。
    */
   _startReadyWatchdog() {
     if (this._readyTimer || this.destroyed) return
@@ -904,20 +685,12 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 拿到底层 video.js 实例。
+   * 取 video.js Player 实例（回放要把 seeking/pause/play 转成 SIP 指令）。
    *
-   * <p><b>为什么需要它</b>：录像回放要把 LivePlayer 的<b>官方事件</b>
-   * （{@code seeking} / {@code pause} / {@code play} / {@code ratechange} /
-   * {@code timeupdate}）转成国标 SIP 指令，必须拿到 Player 实例才能订阅。
+   * videojs.players 的键是 Player id，video 元素 id 是 tech id，
+   * 直接用 videoEl.id 会拿到只有 on 的 Component，故走 .video-js 根元素 id。
    *
-   * <p><b>怎么找到它</b>：video.js 的注册表 {@code videojs.players} 的键是
-   * <b>Player 的 id</b>（如 {@code vjs_video_2}），而 video 元素自己的 id 是
-   * <b>tech 的 id</b>（如 {@code vjs_video_2_webrtc_api}）。
-     * 直接 {@code videojs.getPlayer(videoEl.id)} 会命中另一个对象（只有 {@code on}
-   * 的 Component），拿不到 Player 的方法 —— 所以这里先用 Player 的根元素
-   * （{@code .video-js}）的 id 去取。
-   *
-   * @returns {object|null} video.js Player 实例
+   * @returns {object|null}
    */
   vjsPlayer() {
     if (!this.videoEl) return null
@@ -948,14 +721,11 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 订阅播放器事件。
+   * 订阅播放器事件：优先用 video.js 实例，拿不到时退回 video 元素原生事件。
    *
-   * <p>优先用 video.js 实例（事件语义与它自己的控制栏一致），
-   * 拿不到时退回 video 元素的原生事件。
-   *
-   * @param {string} event 事件名（'timeupdate' / 'play' / 'pause' / 'ratechange' / 'ended'）
+   * @param {string} event 事件名
    * @param {Function} handler 回调
-   * @returns {Function} 取消订阅的函数
+   * @returns {Function} 取消订阅
    */
   on(event, handler) {
     const p = this.vjsPlayer()
@@ -974,16 +744,7 @@ export class LivePlayerEngine {
     return () => this.videoEl.removeEventListener(event, handler)
   }
 
-  /* ==================== LivePlayer 官方方法转发 ====================
-   *
-   * 官方方法清单见 https://www.liveqing.com/docs/manuals/LivePlayer.html：
-   *   play / pause / paused / getCurrentTime / setCurrentTime / snap
-   *   getMuted / setMuted / isFullscreen / requestFullscreen / exitFullscreen
-   *   toggleFullscreen / getVolume / setVolume / getDuration
-   *
-   * <p>这里统一转发到底层 video 元素（video.js 的这些方法最终也是操作它），
-   * 业务层不必关心组件内部结构。
-   */
+  /* LivePlayer 官方方法（play/pause/seek/snap/volume/全屏）统一转到底层 video 元素。 */
 
   /** 播放。 */
   play() {
@@ -1023,7 +784,7 @@ export class LivePlayerEngine {
   }
 
   /**
-   * 设置播放进度（官方 {@code setCurrentTime}）。
+   * 设置播放进度。
    *
    * @param {number} sec 目标秒数
    */
@@ -1046,11 +807,7 @@ export class LivePlayerEngine {
     }
   }
 
-  /**
-   * 总时长（官方 {@code getDuration}，秒）。
-   *
-   * <p>直播 FLV 没有时长，返回 {@code 0}。录像点播（mp4）才有值。
-   */
+  /** 总时长（秒）；直播 FLV 没有时长，返回 0。 */
   getDuration() {
     const p = this.vjsPlayer()
     if (p && typeof p.duration === 'function') {

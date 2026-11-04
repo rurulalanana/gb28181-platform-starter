@@ -4,7 +4,7 @@ import { menuApi, systemApi } from '@/api'
 import { applyMenuRoutes } from '@/router'
 import { buildSeedItems, MENU_SEED_VERSION } from '@/router/routes'
 
-/** 本地记录「这一版种子已经同步过」，省掉每次刷新的那次 POST。 */
+/** 本地记录已同步的种子版本，省掉每次刷新的 POST。 */
 const SEED_KEY = 'gb_menu_seed_version'
 
 /**
@@ -15,10 +15,8 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref(null)
   const serverInfo = ref(null)
   /**
-   * 菜单节点（`gb_menu` 全量行：目录 D / 菜单 M / 按钮 B）。
-   *
-   * <p>侧栏与路由都由它决定，不再有「代码默认值 ⊕ 库里覆盖值」的合并逻辑 ——
-   * 库里就是全部真相，所以「菜单管理」页新增/删除/停用才真的生效。
+   * 菜单节点（gb_menu 全量行：D/M/B）。侧栏与路由都由它决定，库里就是全部真相，
+   * 所以菜单管理页的新增/删除/停用才真的生效。
    */
   const menuRows = ref([])
   /** 动态路由是否已注册。守卫靠它判断「这次导航前要不要先 bootstrap」。 */
@@ -26,8 +24,8 @@ export const useAuthStore = defineStore('auth', () => {
 
   const loggedIn = computed(() => !!token.value)
 
-  async function login(username, password) {
-    const data = await systemApi.login({ username, password, urlTokenOnly: false })
+  async function login(username, password, captchaId) {
+    const data = await systemApi.login({ username, password, captchaId, urlTokenOnly: false })
     token.value = data.token
     localStorage.setItem('gb_token', data.token)
     menuReady.value = false
@@ -49,10 +47,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
-   * 补写本版本缺失的目录/菜单行。
-   *
-   * <p>只在种子版本变化时真正写库（版本记在 `gb_menu_seed` 表），
-   * 平时是空操作。运维删掉的菜单不会因为重启又冒出来。
+   * 补写本版本缺失的目录/菜单行。只在种子版本变化时真正写库，
+   * 运维删掉的菜单不会因重启又冒出来。
    *
    * @returns {number} 新增行数
    */
@@ -67,9 +63,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   /**
    * 首屏初始化：用户信息 → 菜单种子 → 动态路由。
-   *
-   * <p>失败也要把 {@link menuReady} 置真：否则守卫会一直重试 bootstrap，
-   * 表现为页面白屏且控制台刷满请求。
+   * 失败也要把 menuReady 置真，否则守卫会一直重试 bootstrap（白屏 + 刷请求）。
    *
    * @returns {boolean} 是否拿到了用户信息
    */
@@ -119,14 +113,9 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
-   * 是否管理员。
-   *
-   * <p>后端 {@code /userinfo} 返回的是 {@code roles: ["admin"]} 数组，
-   * 这里同时兼容单数 {@code role} 字段，避免两种形态下判断结果不一致。
-   *
-   * <p><b>不要再用它控制业务按钮</b> —— 用 {@link can}。
-   * 「是不是管理员」是身份判断，而界面该显示什么取决于「有没有这项权限」：
-   * 管理员之外还有自定义角色（如「巡检员」只给云台），按身份判断会把这些人挡在功能之外。
+   * 是否管理员。后端返回 roles:["admin"] 数组，这里兼容单数 role 字段。
+   * 不要用它控制业务按钮，用 can()：界面显隐取决于「有没有这项权限」，
+   * 按身份判断会把「巡检员」这类自定义角色挡在功能之外。
    */
   function isAdmin() {
     const u = user.value
@@ -140,22 +129,14 @@ export const useAuthStore = defineStore('auth', () => {
     return false
   }
 
-  /**
-   * 当前账号的权限点集合。
-   *
-   * <p>后端已把角色展开成具体编码（admin 拿到的是全部编码），
-   * 所以这里直接用 {@code has} 判断，不需要处理通配符。
-   */
+  // 后端已把角色展开成具体编码（admin 拿到全部编码），直接 has 判断即可
   const permissionSet = computed(() => new Set(user.value?.permissions || []))
 
   /**
-   * 是否具备某个权限点。
+   * 是否具备某个权限点。只用于界面显隐：真正的边界永远在后端。
    *
-   * <p>语义上等价于后端 {@code StpUtil.hasPermission}，但<b>只用于界面显隐</b>：
-   * 前端隐藏按钮是为了不让人点了才看到 403，真正的边界永远在后端。
-   *
-   * @param {string} code 权限点编码，如 {@code 'device:write'}
-   * @returns {boolean} 没有传 code 时返回 true（便于在模板里写可选判断）
+   * @param {string} code 如 'device:write'
+   * @returns {boolean} 没传 code 时返回 true（便于模板里的可选判断）
    */
   function can(code) {
     if (!code) return true

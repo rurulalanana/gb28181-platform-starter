@@ -3,25 +3,12 @@ import { computed, reactive } from 'vue'
 /**
  * 列表分页状态。
  *
- * <p>后端 {@code PageQuery} 用的是<b>游标分页</b>：{@code start} 是偏移量（从 0 开始）、
- * {@code limit} 是每页条数、{@code limit=0} 表示不分页。
- * 本组合式负责在「页码」与「偏移量」之间换算，并把总数收敛在一处，
- * 避免每个列表各写一套 `(page - 1) * size`。
- *
- * <p>用法：
- * <pre>{@code
- * const { pager, offset, reset, setTotal, onPageChange, onSizeChange } =
- *   usePagination({ pageSize: 10, load })
- *
- * async function load() {
- *   const data = await api.list({ start: offset.value, limit: pager.size })
- *   rows.value = data.list
- *   setTotal(data.count)
- * }
- * }</pre>
+ * 后端 PageQuery 是游标分页：start 是偏移量（从 0 开始）、limit 是每页条数，
+ * limit=0 表示不分页。本组合式在「页码」与「偏移量」之间换算，
+ * 避免每个列表各写一套 (page - 1) * size。
  *
  * @param pageSize 初始每页条数
- * @param load     翻页 / 改每页条数后要重新执行的加载函数
+ * @param load 翻页 / 改每页条数后要重新执行的加载函数
  */
 export function usePagination({ pageSize = 10, load } = {}) {
   const pager = reactive({

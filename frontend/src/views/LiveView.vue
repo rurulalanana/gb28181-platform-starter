@@ -34,7 +34,6 @@
     </div>
     <!-- 页头 -->
 
-    <!-- 主体：设备树 + 视频墙 + 云台 -->
     <div class="live-body">
       <!-- 左侧：设备树（对齐 LiveGBS：搜索 + 设备/通道树） -->
       <aside class="side-panel tree-panel">
@@ -101,7 +100,6 @@
           </div>
         </div>
 
-        <!-- 平铺列表 -->
         <div v-else class="channel-list dark-scroll">
           <button
             v-for="c in filteredChannels"
@@ -133,22 +131,26 @@
           :class="{ 'is-active': tile.id === activeTileId }"
         >
           <!--
-            点击画面格：切换「当前操作格」（active）与云台目标；
-            320ms 内再次点同一格视为双击 → 该格全屏。
-
-            注意：xgplayer 默认会接管 video 上的单击（暂停）和双击（全屏），
-            并且在处理函数里 stopPropagation —— 那样这个 @click 根本收不到。
-            所以 useXgPlayer 里统一配了 closeVideoClick / closeVideoDblclick，
-            让播放器不再拦截点击事件（详见该文件 baseUiConfig 的说明）。
+            320ms 内两次点同一格视为双击 → 该格全屏。xgplayer 默认接管 video 上的
+            单击/双击并 stopPropagation，这个 @click 收不到；useXgPlayer 里用
+            closeVideoClick / closeVideoDblclick 关掉了。
           -->
           <div class="video-box" @click="onTileClick(tile)">
-            <!--
-              xgplayer 会在容器内自建 video 元素渲染（直播走 MSE + Web Audio，
-              录像回放走原生 video），所以这里不是 <video> 而是普通容器 div。
-            -->
             <div :ref="(el) => setContainerRef(tile.id, el)" class="video-container" />
 
-            <!-- 空闲态：提示如何上屏 -->
+            <!--
+              框选图层必须挂在 .video-box 内：组件靠 parentElement 找同层的 <video>
+              来算画面真实矩形（区分黑边），挂在外面就拿不到 video 元素。
+              每个格子只渲染自己那一个，避免多层重叠抢指针事件。
+            -->
+            <TrackBox
+              v-if="tile.channelKey && trackTileId === tile.id"
+              v-model:active="trackActive"
+              :serial="tile.serial"
+              :code="tile.code"
+              mode="targettrack"
+            />
+
             <div v-if="!tile.playing" class="tile-overlay">
               <el-icon :size="30"><VideoCamera /></el-icon>
               <span class="overlay-text">{{ tile.state }}</span>
@@ -156,7 +158,6 @@
               <span v-else class="overlay-hint">从左侧选择通道</span>
             </div>
 
-            <!-- 空闲态且已选通道时整块可点 -->
             <button
               v-if="!tile.playing && tile.channelKey"
               type="button"
@@ -165,7 +166,6 @@
               @click="playTile(tile)"
             />
 
-            <!-- 右上角：清除该格（断流并腾空） -->
             <button
               v-if="tile.playing || tile.channelKey"
               class="tile-clear"
@@ -179,7 +179,6 @@
         </div>
       </div>
 
-      <!-- 右侧：云台控制（常驻，绑定当前操作的画面格） -->
       <aside class="side-panel ptz-aside">
         <div class="panel-head">
           <span class="panel-title">云台控制</span>
@@ -199,9 +198,36 @@
               :key="ptzTile.id"
               :serial="ptzTile.serial"
               :code="ptzTile.code"
-              :disabled="!ptzTile.playing || ptzTile.ptzType === 3"
+              :disabled="ptzTile.ptzType === 3"
               simple
             />
+            <!--
+              目标跟踪（A.2.3.1.14）。精简模式的云台面板不放运维 Tab，
+              但跟踪是日常操作，单独占一行；框选图层要叠在视频上，
+              由本页统一管理状态。
+            -->
+            <div class="ptz-track-row">
+              <!--
+                自动跟踪是设备侧指令（SDK/CGI），不依赖画面是否在播；
+                框选跟踪要在画面上拖框，必须有画面，所以各自判断。
+              -->
+              <el-button
+                size="small"
+                :type="tracking ? 'danger' : 'default'"
+                :title="tracking ? '停止目标跟踪' : '让设备自动跟踪（球机智能分析固件支持才生效）'"
+                @click="toggleAutoTrack"
+              >
+                <el-icon><Aim /></el-icon> {{ tracking ? '停止跟踪' : '自动跟踪' }}
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="!ptzTile.playing"
+                title="在画面上拖拽框选要跟踪的目标"
+                @click="beginTrack(ptzTile)"
+              >
+                <el-icon><Crop /></el-icon> 框选跟踪
+              </el-button>
+            </div>
           </template>
           <div v-else class="panel-empty">
             <el-empty description="先在左侧上屏一个通道，再进行云台控制" :image-size="64" />
@@ -248,10 +274,11 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { deviceApi, streamApi, systemApi } from '@/api'
+import { deviceApi, streamApi, systemApi, controlApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import PtzPanel from '@/components/PtzPanel.vue'
+import TrackBox from '@/components/TrackBox.vue'
 
 const channels = ref([])
 const gridSize = ref(4)
@@ -260,25 +287,18 @@ const proto = ref(LIVE_DEFAULT_PROTOCOL)
 const mediaHttpPort = ref(null)
 
 /**
- * 每格的播放器实例。
- *
- * 用普通对象（非 reactive）：reactive 会自动解包嵌套 ref，
- * 导致取 DOM 元素时拿到的是解包后的值而非 ref，无法再赋值绑定。
+ * 每格的播放器实例。用普通对象（非 reactive）：reactive 会自动解包嵌套 ref，
+ * 取 DOM 时拿到解包后的值而非 ref，无法再赋值绑定。
  */
 const players = {}
-/** 每格的容器 DOM 引用（xgplayer 在容器内自建 video）。 */
 const containerRefs = {}
-/** 播放器状态监听停止句柄。 */
 const stoppers = {}
 
-/** 当前选中的画面格（加 2px 强调描边，方便看清操作的是哪一格）。 */
 const activeTileId = ref(1)
 
 /**
- * 云台面板绑定的小格：优先取最近操作的格子，该格没有通道时退回到第一个已选通道的格子。
- *
- * <p>不直接跟随 {@code activeTileId}：连续上屏时选中位置会自动前移（见 pickChannel），
- * 若云台跟着前移，刚播放的通道会立刻失去云台控制。
+ * 云台绑定的小格：优先最近操作的格子，没有通道时退回第一个已选通道的格子。
+ * 不跟随 activeTileId：连续上屏时选中位置会自动前移，云台跟着移会让刚播的通道立刻失去控制。
  */
 const ptzTile = computed(() => {
   const picked = tiles.value.find((t) => t.id === ptzTileId.value && t.channelKey)
@@ -286,21 +306,83 @@ const ptzTile = computed(() => {
   return tiles.value.find((t) => t.channelKey) || null
 })
 
+/** 框选图层当前挂在哪一格（0 = 未激活）。同一时刻只允许一格在框选。 */
+const trackTileId = ref(0)
+const trackActive = ref(false)
+
+/**
+ * 自动跟踪状态。设备不支持时不会报错也不做任何动作（标准里没有回传通道），
+ * 所以只表示「命令发过」，再点一次发 Stop 复位，不假装知道设备真的在跟。
+ */
+const tracking = ref(false)
+
+/** 「框选跟踪」：在指定格子上打开拖拽图层。 */
+function beginTrack(tile) {
+  if (!tile || !tile.playing) {
+    ElMessage.warning('请等画面出来后再框选')
+    return
+  }
+  trackTileId.value = tile.id
+  trackActive.value = true
+}
+
+async function toggleAutoTrack() {
+  const t = ptzTile.value
+  if (!t || !t.channelKey) {
+    ElMessage.warning('请先上屏一个通道')
+    return
+  }
+  const next = !tracking.value
+  try {
+    const res = await controlApi.targetTrack({
+      serial: t.serial,
+      code: t.code || t.serial,
+      target_track: next ? 'Auto' : 'Stop'
+    })
+    tracking.value = next
+    reportTrackResult(res, next ? '自动跟踪' : '停止跟踪')
+  } catch (e) {
+    ElMessage.error(e.message || '目标跟踪指令下发失败')
+  }
+}
+
+/**
+ * 按设备应答类型给提示。三种情况必须分开：
+ * OK = 设备受理了；ERROR = 设备拒绝；未答 = 设备没回话（多数设备如此）。
+ */
+function reportTrackResult(res, action) {
+  const name = action || '跟踪'
+  if (res && res.answered && res.result === 'OK') {
+    ElMessage.success(`${name}：设备已受理`)
+  } else if (res && res.answered) {
+    ElMessage.warning(`${name}：设备拒绝（${res.result || 'ERROR'}）`)
+  } else {
+    ElMessage.warning(`${name}指令已下发，设备未回应答（以画面是否跟随为准）`)
+  }
+}
+
 /** 视频墙容器（整体全屏用）。 */
 const wallRef = ref(null)
 /** 左侧面板视图：tree=设备树，list=平铺列表。 */
 const treeTab = ref('tree')
-/** 云台面板绑定的小格（最近操作的格子）。 */
 const ptzTileId = ref(0)
-/** 已展开的设备（设备树）。 */
+
+/**
+ * 切到另一格时把跟踪状态全部清掉：框选图层是根据 `trackTileId` 挂到具体格子上的，
+ * 不清会留在旧格上，而且「自动跟踪」的开关状态属于上一路通道，不能带过去。
+ */
+watch(ptzTileId, () => {
+  trackActive.value = false
+  trackTileId.value = 0
+  tracking.value = false
+})
 const expandedDevices = ref(new Set())
 
-/** 轮播状态（间隔由弹窗里的 rotateSeconds 决定）。 */
 const rotating = ref(false)
 let rotateTimer = null
 let rotateIndex = 0
 
-/** 真正参与轮巡的通道：勾选过就只轮这些，否则轮全部在线通道。 */
+/** 勾选过就只轮这些，否则轮全部在线通道。 */
 const rotatePool = computed(() => {
   const all = onlineChannels.value
   if (!rotateKeys.value.length) return all
@@ -308,7 +390,7 @@ const rotatePool = computed(() => {
   return all.filter((c) => set.has(`${c.deviceId}/${c.id}`))
 })
 
-/** 轮播设置弹窗（先选通道再开跑）。 */
+/** 轮巡间隔范围 5~300 秒，默认 15 秒 */
 const rotateDialog = ref(false)
 const rotatePicked = ref([])
 /** 已确认的轮巡集合（空 = 全部在线通道）。 */
@@ -331,12 +413,11 @@ const tiles = ref(
 
 const visibleTiles = computed(() => tiles.value.slice(0, gridSize.value))
 
-/** 已被画面格占用的通道 key，通道列表用它标记"使用中"。 */
+/** 已被画面格占用的通道 key，通道列表用它标记使用中 */
 const usedKeys = computed(
   () => new Set(tiles.value.filter((t) => t.channelKey).map((t) => t.channelKey))
 )
 
-/** 在线通道（轮播数据源）。 */
 const onlineChannels = computed(() => channels.value.filter((c) => c.deviceOnline))
 
 /** 分组视图：按设备归拢通道，设备在线状态取该设备下任一通道。 */
@@ -429,7 +510,6 @@ function onTileClick(tile) {
   tileClick.ts = now
 }
 
-/** 双击画面格 / 工具条按钮：进入或退出全屏。 */
 function toggleFullscreen(tile) {
   const host = containerRefs[tile.id]
   const box = host?.closest?.('.video-box')
@@ -442,7 +522,6 @@ function toggleFullscreen(tile) {
   }
 }
 
-/** 视频墙整体全屏（工具栏「全屏」按钮）。 */
 function toggleWallFullscreen() {
   if (document.fullscreenElement) {
     document.exitFullscreen?.()
@@ -454,10 +533,7 @@ function toggleWallFullscreen() {
   }
 }
 
-/**
- * 地址栏带 ?play=<设备编码>/<通道编码>（可逗号分隔多个）时自动上屏，
- * 供设备/通道列表的「上屏预览」直接跳过来播放。
- */
+/** ?play=<设备编码>/<通道编码>（逗号分隔多个）自动上屏，供列表页「上屏预览」跳转过来播放。 */
 async function applyQueryPlay() {
   const raw = String(route.query.play || '').trim()
   if (!raw) return
@@ -489,7 +565,6 @@ function setContainerRef(id, el) {
   if (el) containerRefs[id] = el
 }
 
-/** 获取（或创建）某格的播放器，并绑定当前 DOM 元素与状态监听。 */
 function playerOf(tile) {
   if (!players[tile.id]) {
     // 播放器渲染到容器 div 内，传入容器 ref 供播放器创建 video
@@ -531,18 +606,8 @@ async function loadChannels() {
 }
 
 /**
- * 点击左侧通道：上屏到当前选中的画面格，并把选中位置往后推一格。
- *
- * <p><b>为什么是「选中格」而不是「第一个空位」</b>：用户先点画面格选出要操作的位置，
- * 再点通道，语义就是「把这一路放到我刚选的位置」。若改成找第一个空位，
- * 用户的选择被忽略，连点几个通道会跳到与预期不同的格子上。
- *
- * <p><b>为什么播放后 active 要 +1</b>：连续上屏是常见操作 —— 选好起始格后
- * 依次点几个通道，每次都期望落在下一格。自动前移后无需反复点格子，
- * 且视觉焦点跟着走，能立刻看出「下一个会落在哪」。
- *
- * <p>前移只在还有可见格时进行；已到最后一格就停在原地，
- * 再次点击会覆盖该格（而不是绕回第 1 格，那样会意外覆盖别处的画面）。
+ * 点击通道：上屏到当前选中格，选中位置后推一格。用「选中格」而非第一个空位 ——
+ * 用户先选位置再点通道，语义就是「放到我刚选的位置」。到最后一格就停住（不绕回第 1 格，避免意外覆盖）。
  */
 function pickChannel(channel) {
   const key = `${channel.deviceId}/${channel.id}`
@@ -572,7 +637,6 @@ function applyChannel(tile, channel) {
   tile.ptzType = channel.ptzType || 0
 }
 
-/** 点播 + 播放。 */
 async function playTile(tile) {
   if (!tile.channelKey) {
     ElMessage.warning('请先选择通道')
@@ -610,40 +674,20 @@ async function playTile(tile) {
     proto: proto.value,
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
     onStall: () => rebuildStalled(tile),
-    /*
-     * 播放器自动改协议时同步顶部下拉。
-     *
-     * <p>典型触发：FLV 解码失败重试耗尽 → 自动切 WebRTC。不同步的话
-     * 下拉会一直写着「WebSocket-FLV」，而画面其实走 WebRTC ——
-     * 排查时会被这个错位带偏（「我选的 FLV 怎么不卡了」）。
-     *
-     * <p>只在「该格就是当前点播的格子」时同步，避免多格之间互相覆盖：
-     * 电视墙里各格的协议是各自独立的，顶部下拉只代表<br>
-     * 「下次点播用哪个」，所以取最后一次操作的那一格的值是合理的。
-     */
+    // 播放器自动改协议时同步顶部下拉（典型：FLV 解码失败重试耗尽 → 切 WebRTC）。
+    // 各格协议独立，下拉只代表「下次点播用哪个」，取最后操作的格子合理
     onProtoChange: (p) => {
       if (p && p !== proto.value) proto.value = p
     }
   })
 }
 
-/**
- * 单格的「有数据但无画面」重建次数上限。
- *
- * <p>电视墙是长期开着的，若设备真的坏了，无限重建会把整个墙刷成不停地
- * INVITE。每个格子最多自动救 2 次，之后只能人工处理。
- */
+/** 单格「有数据但无画面」的重建上限 2 次：电视墙长期开着，设备坏了无限重建会把整墙刷成不停 INVITE。 */
 const stallRetryOf = {}
 
 /**
- * 流是通的、却始终没有视频轨 → 停会话 + 重新点播。
- *
- * <p><b>为什么必须停会话</b>：ZLM 等轨就绪超时会把没就绪的视频轨
- * <b>永久丢弃</b>（{@code Track not ready for a long time, ignored: H264}），
- * 这个状态绑定在媒体源上，重连播放器没有任何用。只有拆掉会话
- * （连带清掉媒体源）再 INVITE，才会生成新的媒体源。
- *
- * <p>这与用户手动「关掉这一格再播放」等价，只是自动完成。
+ * 有数据却无视频轨 → 停会话 + 重新点播。必须停会话：ZLM 等轨超时会把未就绪的视频轨
+ * 永久丢弃（Track not ready for a long time, ignored: H264），重连播放器没用。
  */
 async function rebuildStalled(tile) {
   const n = stallRetryOf[tile.id] || 0
@@ -673,12 +717,7 @@ function stopTile(tile) {
   tile.state = '已停止'
 }
 
-/**
- * 清除单个画面格：断流并解绑通道，格子回到「未选择通道」。
- *
- * <p>与旧版顶端「全部停止 / 清除」相比，清除粒度改到每格右上角，
- * 想腾空哪一格就清哪一格，不影响其它画面。
- */
+/** 清除单个画面格：断流并解绑通道，只影响这一格（旧版是顶端「全部停止」） */
 function clearTile(tile) {
   stopTile(tile)
   // 格子被腾空就是新的一轮，重置卡轨重建计数
@@ -694,17 +733,9 @@ function clearTile(tile) {
 }
 
 /**
- * 切换协议：所有播放中的格子重连。
- *
- * <p><b>拿不到播放地址时要重新完整点播，不能直接调 switchProtocol</b>：
- * 切协议时 {@code stop()} 会断开旧通路的连接，这一瞬间 ZLM 的读者数会归零，
- * 平台侧的空闲流巡检（{@code reapIdleStreams}，45 秒无观看者即关流）
- * 有可能刚好在此时执行，把流关掉。之后再查 {@code stream/info} 就是 400，
- * {@code urls} 为空 —— 而 {@code switchProtocol} 拿到空地址会直接清空播放器，
- * 表现就是「切回来画面没了，也不报错」。
- *
- * <p>所以这里一旦发现流不在了，就走完整的 {@code playTile}（内部会重新
- * INVITE 拉起设备推流），而不是继续拿空地址去切。
+ * 切换协议：所有播放中的格子重连。拿不到地址时必须重新完整点播，不能直接 switchProtocol：
+ * stop() 后 ZLM 读者数归零，45 秒空闲巡检可能刚好关流，再查 info 就是 400；
+ * switchProtocol 拿到空地址会清空播放器（画面没了也不报错）。
  */
 async function onProtoChange() {
   const active = visibleTiles.value.filter((t) => t.playing && t.channelKey)
@@ -737,8 +768,7 @@ const route = useRoute()
 const router = useRouter()
 
 onMounted(async () => {
-  /* ws-flv 引擎不需要额外的 SDK 下载（解封装用 xgplayer-transmuxer，
-     音频用浏览器原生 Web Audio），因此不再做播放器预热。 */
+  // ws-flv 引擎不需要额外的 SDK 下载（解封装用 xgplayer-transmuxer、音频用 Web Audio），不做预热
   await loadChannels()
   await applyQueryPlay()
 })
@@ -755,28 +785,28 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* ============ 布局 ============ */
-
 .live-page {
-  /* 视频墙要吃掉内容区的剩余高度，不随内容滚动。
-     注意：.page 是 flex 列容器但没有高度，需要从 .content（flex:1）
-     一路继承下来，这里用 min-height:0 + flex 允许子项收缩。 */
+  /* .page 是 flex 列容器但没有高度，需从 .content(flex:1) 一路继承；min-height:0 允许子项收缩 */
   height: 100%;
   min-height: 0;
 }
 
 .live-body {
   display: grid;
-  /* 左树 · 中墙 · 右云台 */
-  grid-template-columns: 248px minmax(0, 1fr) 252px;
+  /*
+   * 右侧云台栏 360px（原 252px）。
+   *
+   * <p>云台扩展里的巡航组/线扫/巡迹是 6~7 列的表格，252px 下每列不到 30px，
+   * 名称列被压成 2 个字。360px 是能在不显著挤压中间画面的前提下
+   * 让表格各列都放得下完整内容的最小值。
+   */
+  grid-template-columns: 248px minmax(0, 1fr) 420px;
   gap: var(--sp-3);
   flex: 1;
   min-height: 0;
 }
 
-/* 三栏固定列位：树在最左、墙在中间、云台在最右；
-   显式指定列位后，DOM 顺序变化也不会把墙挤到侧栏位置。
-   小屏单列时列位复位，靠 order 保持「树 → 墙 → 云台」的纵向顺序。 */
+/* 三栏固定列位：显式指定后 DOM 顺序变化不会把墙挤到侧栏位置；小屏单列时列位复位 */
 .tree-panel {
   grid-column: 1;
   order: 1;
@@ -792,14 +822,11 @@ onUnmounted(() => {
   order: 3;
 }
 
-/* ============ 视频墙 ============ */
-
 .wall {
   display: grid;
   gap: var(--sp-3);
   min-width: 0;
   min-height: 0;
-  /* 格子按可用高度均分，避免底部留白 */
   align-content: stretch;
   grid-auto-rows: minmax(0, 1fr);
 }
@@ -822,9 +849,7 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-/* ============ 画面格 ============ */
-
-/* 画面格：靠 1px 内描边区分边界，不用投影（投影会让视频墙显得"漂浮"） */
+/* 靠 1px 内描边区分边界，不用投影（投影会让视频墙显得「漂浮」） */
 .tile .video-box {
   /* 全局 .video-box 是 16:9 定比例的；视频墙里要让每格精确填满网格单元，
      否则多出来的比例高度会溢出/留白，故改为自适应高度 */
@@ -838,7 +863,6 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
-/* 空闲遮罩 */
 .tile-overlay {
   position: absolute;
   inset: 0;
@@ -928,8 +952,6 @@ onUnmounted(() => {
   border-radius: 0 var(--r-md) var(--r-md) 0;
 }
 
-/* ============ 侧栏面板（设备树 / 云台） ============ */
-
 .side-panel {
   display: flex;
   flex-direction: column;
@@ -940,7 +962,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 云台常驻面板：目标通道条 + PtzPanel */
 .ptz-tab {
   flex: 1;
   min-height: 0;
@@ -966,6 +987,21 @@ onUnmounted(() => {
   flex-shrink: 0;
   color: var(--ink-400, #909399);
   font-size: var(--fs-xs);
+}
+
+/*
+ * 目标跟踪按钮行。精简模式的云台面板不放运维 Tab，但跟踪是日常操作，
+ * 单独占一行；两个按钮等宽，与上方方向盘的中轴对齐。
+ */
+.ptz-track-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 4px 2px 0;
+}
+.ptz-track-row .el-button {
+  margin: 0;
+  width: 100%;
 }
 
 /* 固定枪机提示：云台面板整体置灰时给出原因，避免用户以为是故障 */
@@ -1033,7 +1069,6 @@ onUnmounted(() => {
   background: var(--ink-50);
 }
 
-/* 已上屏：浅底 + 左侧强调条（和侧栏选中态同一套语言） */
 .channel-item.is-used {
   background: var(--brand-50);
 }
@@ -1105,7 +1140,6 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 轮播设置弹窗 */
 .rotate-tip {
   font-size: var(--fs-sm);
   color: var(--text-secondary);
@@ -1157,14 +1191,12 @@ onUnmounted(() => {
     0 0 14px rgba(44, 98, 214, 0.55);
 }
 
-/* 工具栏里的轮播按钮 */
 .rotate-btn.is-on {
   color: var(--accent-ink);
   border-color: var(--brand-300);
   background: var(--brand-50);
 }
 
-/* 通道面板：列表/分组 页签 */
 .panel-tabs {
   display: flex;
   align-items: center;
@@ -1196,7 +1228,6 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-/* 分组视图 */
 .ch-group-head {
   display: flex;
   align-items: center;
@@ -1246,8 +1277,6 @@ onUnmounted(() => {
 .ch-group-body {
   padding-left: 10px;
 }
-
-/* ============ 响应式 ============ */
 
 @media (max-width: 1400px) {
   .live-body {

@@ -2,7 +2,6 @@
   <div class="page is-fill">
 
     <el-card shadow="never">
-    <!-- 工具条：筛选条件在左，操作按钮在右，一行放完 -->
     <div class="filter-bar">
       <el-input
         v-model="query.q"
@@ -29,11 +28,7 @@
       </el-button>
     </div>
 
-      <!--
-        列结构对齐 LiveGBS 的「设备 > 通道列表」页：
-        通道号 / 通道国标编号 / 通道名称 / 在线状态 / 按需直播 / 云端录像 /
-        子节点数 / 厂家 / 云台类型 / 位置 / 更新时间 / 创建时间 / 操作
-      -->
+      <!-- 列结构对齐 LiveGBS 的「设备 > 通道列表」页 -->
       <el-table ref="tableRef" v-loading="loading" :data="channels" stripe table-layout="fixed">
         <el-table-column prop="channel" label="通道号" min-width="96" align="center" sortable>
           <template #default="{ row }">
@@ -53,10 +48,7 @@
           show-overflow-tooltip
         >
           <template #default="{ row }">
-            <!--
-              按需编辑：常驻输入框会在每行渲染「点击修改」占位符，一屏全是灰字。
-              平时显示文本，点击才换输入框。
-            -->
+            <!-- 常驻输入框会在每行渲染「点击修改」占位符，一屏全是灰字 -->
             <el-input
               v-if="row._editing"
               :id="nameInputId(row)"
@@ -154,12 +146,9 @@
         <el-table-column label="云台类型" min-width="108" align="center">
           <template #default="{ row }">
             <!--
-              与设备管理的「流传输模式」保持一致：文字 + 箭头，点开是下拉菜单。
-              用 el-select 的话一屏几十行全是灰框输入框，很脏。
-
-              【坑】el-dropdown 在表格里多行复用时，@command 只回传被选项的值，
-              不知道自己属于哪一行（实测点第 5 行的菜单，改的却是第 1 行）。
-              解决：命令值带上通道编码，由 handlePtzCommand 拆开去对应行上应用。
+              文字 + 箭头（用 el-select 一屏全是灰框）。el-dropdown 在表格里复用时
+              @command 只回传值、不知道属于哪一行（实测点第 5 行改的是第 1 行），
+              所以命令值带上通道编码，由 handlePtzCommand 拆开。
             -->
             <el-dropdown
               v-if="canUpdate"
@@ -211,10 +200,7 @@
           </template>
         </el-table-column>
 
-        <!--
-          操作列固定在右侧：表格列多（参考站同款 13 列）必然超宽，
-          不固定的话横向滚动才能看到按钮，操作入口等于藏起来了。
-        -->
+        <!-- 操作列固定右侧：13 列必然超宽，不固定就要横向滚动才能找到入口 -->
         <el-table-column label="操作" min-width="316" align="center" class-name="op-col" fixed="right">
           <template #default="{ row }">
             <el-button
@@ -226,11 +212,9 @@
               <el-icon><VideoPlay /></el-icon> 播放
             </el-button>
             <!--
-              「停止」只在通道确实有推流时出现。
-              原来是一直显示、无流时置灰 —— 但十几个通道里通常只有一两路在推，
-              满屏灰按钮会让人以为功能坏了（点了没反应的按钮比没有按钮更糟）。
-              判据用 streamId：后端在开流时写入、会话关闭时清除、
-              平台重启时由 resetStaleChannelStates() 收敛，不会长期残留。
+              只在确实有推流时出现（原来常显置灰，满屏灰按钮更像坏了）。
+              判据 streamId：开流时后端写入、会话关闭清除、重启时由
+              resetStaleChannelStates() 收敛，不会长期残留。
             -->
             <el-button
               v-if="row.streamId"
@@ -250,9 +234,8 @@
               <el-icon><Film /></el-icon> 设备录像
             </el-button>
             <!--
-              分享：直接在新窗口打开该通道的免登录直播页（对齐 LiveGBS 的 play.html）。
-              不弹窗、不复制：这一下就是要看「别人打开会看到什么」，
-              需要链接时在新页里一键复制即可（分享页自带复制按钮）。
+              分享：新窗口打开免登录直播页（对齐 LiveGBS 的 play.html）。
+              用户要的就是看「别人打开会看到什么」，需要链接时分享页自带复制按钮。
             -->
             <el-button
               link
@@ -277,16 +260,10 @@
       />
     </el-card>
 
-    <!-- 预览对话框 -->
     <!--
-      尺寸对齐参考站（LiveGBS）的播放弹窗：那边视频区实测 878×494（16:9），
-      云台面板 303 宽贴在右侧，弹窗整体约 1200px 宽。
-
-      这里取 1520px 上限（视口小时按 96vw 收缩）。为什么比参考站宽这么多：
-      右侧云台面板固定 340px（比参考站宽，因为多了预置位/设备/高级三页），
-      而弹窗高度由它决定（约 643px）—— 视频要长到同样高，栏宽需要
-      643 × 16/9 ≈ 1143px。弹窗窄于这个值时视频只能变矮，多出来的部分
-      就是黑边。放宽弹窗是唯一能「把黑边压小而不裁切画面」的手段。
+      尺寸对齐 LiveGBS 的播放弹窗（视频区 878×494，云台面板 303 宽）。
+      这里放宽到 1520px：云台面板 340px 决定行高（约 643px），视频要 643×16/9≈1143px
+      才能不产生黑边；弹窗窄于这个值时视频只能变矮。
     -->
     <el-dialog
       v-model="previewDialog"
@@ -299,26 +276,29 @@
       @closed="onPreviewClosed"
     >
       <div class="preview-wrap" :class="{ 'is-video-only': !hasPtz }">
-        <!--
-          视频栏：整块黑底，视频 16:9 居中。
-          行高由右侧云台面板决定，视频比它矮时多出来的部分是播放器的黑边，
-          不是页面空白（详见 .preview-stage 的样式说明）。
-        -->
+        <!-- 视频 16:9 居中；黑底只挂在 .video-box 上（见样式说明） -->
         <div class="preview-stage">
           <div class="video-box">
             <div ref="videoContainer" class="video-container" />
             <!--
-              播放状态角标：叠在画面左上角。
+              框选图层必须挂在 .video-box 内：组件靠 parentElement 找到同层的 <video>
+              来算画面真实矩形（区分黑边），挂在外面就拿不到 video 元素。
 
-              【为什么从右栏挪进来】
-              原来它在右侧云台面板顶部占一行（状态标签 + 分隔线，共约 65px）。
-              而右栏高度决定整个弹窗的行高（两栏等高），那 65px 全部
-              变成了视频上下的黑边 —— 为了一个不到 40px 标签，画面矮了一圈。
-              挪进画面后，它与视频同域：“这路流现在什么状态”本来就是在
-              说画面本身，而不是云台面板的属性。
-
-              【视觉】暗底胶囊 + 彩色圆点，不遮挡画面且不挡鼠标（pointer-events: none）。
-              播放中低调（绿），中间态呼吸（琥珀），异常醒目（红）。
+              这里保留 !playing：框选要在画面上拖框，没有画面就无从框起。
+              与云台面板不同，云台走 SDK/CGI，不依赖画面。
+            -->
+            <TrackBox
+              v-if="previewTarget"
+              v-model:active="trackActive"
+              :serial="previewTarget.deviceId"
+              :code="previewTarget.id"
+              :disabled="!playing"
+              mode="targettrack"
+            />
+            <!--
+              状态角标叠在画面左上角。挂在右栏时那 65px 会全变成视频上下的黑边，
+              而「这路流现在什么状态」本来就是在说画面本身。
+              pointer-events: none，不挡画面点击 / 双击全屏。
             -->
             <div class="video-state" :class="`is-${stateType}`">
               <span class="video-state-dot" />
@@ -326,13 +306,9 @@
             </div>
 
             <!--
-              播放协议切换：挪进播放器控制栏（见 startPlay 里的 controlButtons）。
-
-              <p>这里只留一个「虚拟触发」的弹层：按钮是引擎用 DOM 建的，
-              Vue 拿不到它的组件实例，所以用 el-popover 的 virtual-triggering
-              把它当锚点（{@code protoAnchorEl} 由 onPlayerControlButton 回传）。
-              placement 选 top：控制栏在底部，菜单往上弹才不会被容器裁掉
-              （.video-box 是 overflow:hidden）。
+              控制栏按钮由引擎用 DOM 创建，Vue 拿不到组件实例，只能把元素当
+              el-popover 虚拟锚点。placement=top：控制栏在底部，而 .video-box 是
+              overflow:hidden，往下弹会被裁掉。
             -->
             <el-popover
               v-model:visible="protoMenuVisible"
@@ -356,26 +332,49 @@
                 </button>
               </div>
             </el-popover>
+
+            <!-- 码流菜单：与协议菜单同一套虚拟锚点做法（按钮由播放引擎用 DOM 创建） -->
+            <el-popover
+              v-model:visible="streamMenuVisible"
+              :virtual-ref="streamAnchorEl"
+              virtual-triggering
+              trigger="click"
+              placement="top-end"
+              :width="150"
+              popper-class="preview-proto-menu"
+            >
+              <div class="proto-menu">
+                <button
+                  v-for="o in STREAM_OPTIONS"
+                  :key="o.value"
+                  type="button"
+                  class="proto-menu-item"
+                  :class="{ 'is-current': o.value === streamChoice }"
+                  @click="switchStreamTo(o.value)"
+                >
+                  {{ o.label }}
+                </button>
+              </div>
+            </el-popover>
           </div>
         </div>
         <div v-if="hasPtz" class="preview-side">
           <!--
-            云台面板只在通道被标为可云台（球机 / 半球 / 遥控枪机）时提供。
-            类型未知或固定枪机时整栏都不渲染 —— 面板里的方向键对固定枪机无效，
-            摆在那里只会让人反复点而怀疑平台坏了；
-            而只放一个 el-empty 占着 340px 宽、609px 高的白块更糟（大片空白）。
+            只有标为可云台（球机/半球/遥控枪机）才渲染整栏。固定枪机上方向键无效，
+            只放一个 el-empty 占 340×609 白块更糟。
           -->
           <PtzPanel
             v-if="previewTarget"
             :serial="previewTarget.deviceId"
             :code="previewTarget.id"
-            :disabled="!playing"
+            :source="previewTarget.source"
+            :disabled="ptzDisabled"
+            @track="beginTrack"
           />
         </div>
       </div>
     </el-dialog>
 
-    <!-- 重命名对话框 -->
     <el-dialog v-model="renameDialog" title="重命名通道" width="460px">
       <div class="mono mb-3">{{ renameTarget?.id }}</div>
       <el-input v-model="renameValue" placeholder="自定义名称" />
@@ -422,49 +421,39 @@ import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
 import { useAuthStore } from '@/stores/auth'
 import PtzPanel from '@/components/PtzPanel.vue'
+import TrackBox from '@/components/TrackBox.vue'
 import TablePager from '@/components/TablePager.vue'
 import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
 
-/** 上屏预览需要跳转路由。 */
 const router = useRouter()
 const route = useRoute()
 
 const auth = useAuthStore()
 
-/** 能否编辑通道（模块级，等价于下面全部按钮）。 */
 const canWrite = computed(() => auth.can('channel:write'))
-/** 改名称/编号/云台类型（按钮级）。 */
 const canUpdate = computed(() => auth.can('channel:update'))
-/** 改经纬度（按钮级）。 */
 const canPosition = computed(() => auth.can('channel:position'))
-/** 按需直播开关（按钮级）。 */
 const canOndemand = computed(() => auth.can('channel:ondemand'))
-/** 云端录像开关（按钮级）。 */
 const canRecord = computed(() => auth.can('channel:record'))
-/** 音频开关（按钮级）。 */
 const canAudio = computed(() => auth.can('channel:audio'))
-/** 共享给下级（按钮级）。 */
 const canShare = computed(() => auth.can('channel:share'))
 
 const channels = ref([])
 const loading = ref(false)
 const query = reactive({ q: '', online: null, serial: '' })
 
-/** 行高随表体可用高度自适应，10 条数据正好铺满表格区。 */
+/** 行高随表体可用高度自适应 */
 const tableRef = ref(null)
 useFillTableRows(tableRef, () => channels.value.length)
 
-/** 正在切换云端录像开关的通道编码集合（用于开关 loading / 防重复点击）。 */
+/** 正在切换云端录像开关的通道编码集合（loading / 防重复点击）。 */
 const recordPending = reactive(new Set())
 
-/** 正在修改云台类型的通道编码集合（用于下拉 loading / 防重复点击）。 */
 const ptzPending = reactive(new Set())
 
-/** 正在切换「按需直播」开关的通道编码集合。 */
 const ondemandPending = reactive(new Set())
 
-/** 位置（经纬度）编辑弹窗。 */
 const positionDialog = ref(false)
 const positionTarget = ref(null)
 const positionLon = ref('')
@@ -480,15 +469,40 @@ const previewTarget = ref(null)
 const proto = ref(LIVE_DEFAULT_PROTOCOL)
 const mediaHttpPort = ref(null)
 
+/**
+ * 该通道能不能切换码流。判据由后端给（{@code ChannelVo.streamSwitchable}）：
+ * <ul>
+ *   <li>SDK 直连设备（大华等）：走 RTSP {@code subtype}，恒支持</li>
+ *   <li>国标设备：目录里上报了两路以上 {@code StreamNumberList} 才算支持 ——
+ *       2016 版设备不认 SSRC 后 4 位的码流编号，给了子码流选项也只会推主码流</li>
+ * </ul>
+ * 没上报就一律不显示，宁可少一个选项，也不给点了没反应的开关。
+ */
+const hasStreamSwitch = computed(() => !!previewTarget.value?.streamSwitchable)
+
+/**
+ * 码流选项。{@code auto} 表示不传 {@code streamnumber}，让后端按设备配置决定
+ * （国标看 {@code gb_device.stream_index}，大华等 SDK 设备同样看它，缺省主码流）。
+ */
+const STREAM_OPTIONS = [
+  { value: 'auto', label: '自动码流' },
+  { value: '0', label: '主码流' },
+  { value: '1', label: '子码流' }
+]
+const streamChoice = ref('auto')
+
+/** 选择值 → 请求参数。{@code auto} 不传，让后端用设备配置。 */
+function streamParam() {
+  return streamChoice.value === 'auto' ? undefined : Number(streamChoice.value)
+}
+
 /** 播放器容器（xgplayer 在内部创建 video 元素）。 */
 const videoContainer = ref(null)
 const player = useLivePlayer(videoContainer)
 
 /*
- * 协议下拉跟随播放器实际使用的协议。
- *
- * <p>不同步的话预览弹窗里会一直显示 WebRTC，而画面实际走 FLV ——
- * 排查时会被这个错位带偏。详见 LiveView 里同样的 watch 说明。
+ * 协议下拉跟随播放器实际使用的协议。不同步的话弹窗一直显示 WebRTC、
+ * 画面却走 FLV，排查时会被带偏。
  */
 watch(
   () => player.protocol.value,
@@ -501,29 +515,50 @@ const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)
 
 /**
- * 当前通道是否支持云台（决定弹窗是两栏还是单栏）。
+ * 云台面板是否可操作。
  *
- * <p>不支持时<b>整栏不渲染</b>：只放一个 el-empty 占着 340×609 的白块，
- * 比没有还难看（用户反馈的「空白」主要就是它）。
+ * <p><b>不能用 {@code !playing}</b>：云台走的是 SDK / 设备 CGI（37777 / 80），
+ * 与视频流（ZLM、RTP）是两条独立通路，画面没出来照样能控云台。
+ *
+ * <p>早先这里传 {@code :disabled="!playing"}，导致「保存一次后所有按钮全禁用」：
+ * 保存会重读设备 CGI（PtzTour 有 120KB+），把 WebRTC 协商挤超时 →
+ * {@code onStall} 触发 {@code rebuildStalled()} 停会话重播 → 重建 2 次预算用完 →
+ * {@code playing} 永久 false → 整个面板永久禁用，只能关掉弹窗重开。
+ *
+ * <p>现在只在「弹窗没开 / 没有目标通道」时禁用。
+ */
+const ptzDisabled = computed(() => !previewTarget.value)
+
+/**
+ * 当前通道是否支持云台（决定弹窗两栏还是单栏）。不支持时整栏不渲染：
+ * 只放一个 el-empty 占着 340×609 白块比没有还难看。
  */
 const hasPtz = computed(() => !!previewTarget.value && supportsPtz(previewTarget.value.ptzType))
 
 /**
- * 当前协议的显示名（控制栏按钮上那一段文字）。
- *
- * <p>从 {@code protoOptions} 里查而不是本地再存一份映射：
- * 两份名字一旦不同步，就会出现「下拉里写 WS-FLV、按钮上写 FLV」的错位。
+ * 框选图层是否激活。由 PtzPanel 的「框选跟踪」按钮打开，
+ * 图层自己框完/取消后通过 `update:active` 关掉。
  */
+const trackActive = ref(false)
+
+/** 「框选跟踪」按钮：画面上打开拖拽图层。 */
+function beginTrack() {
+  if (!playing.value) {
+    ElMessage.warning('请等画面出来后再框选')
+    return
+  }
+  trackActive.value = true
+}
+
+/** 控制栏按钮上的协议名。从 protoOptions 查而不是另存一份，两份不同步会显示错。 */
 const protoShort = computed(() => {
   const hit = protoOptions.value.find((o) => o.value === proto.value)
   return hit ? hit.label : proto.value
 })
 
 /**
- * 可选的协议：只列本浏览器真能播的。
- *
- * <p>iPhone / iPad Safari 没有 {@code MediaSource}，flv.js 起不来 ——
- * 菜单里还摆着 WS-FLV / FLV 的话，用户点了只会得到一片黑屏。
+ * 只列本浏览器真能播的协议：iPhone / iPad Safari 没有 MediaSource，
+ * flv.js 起不来，菜单里摆着 WS-FLV / FLV 只会点了黑屏。
  */
 const protoOptions = computed(() => availableProtocols())
 
@@ -531,23 +566,14 @@ const renameDialog = ref(false)
 const renameTarget = ref(null)
 const renameValue = ref('')
 
-/**
- * 云台类型：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机。
- *
- * <p>与后端 {@code gb_channel.ptz_type} 的取值一致。
- */
+/** 云台类型：0 未知 / 1 球机 / 2 半球 / 3 固定枪机 / 4 遥控枪机，与 gb_channel.ptz_type 一致。 */
 const PTZ_TYPES = { 0: '未知', 1: '球机', 2: '半球', 3: '固定枪机', 4: '遥控枪机' }
 
-/** 云台类型显示文案。 */
 function ptzText(row) {
   return PTZ_TYPES[row.ptzType ?? 0] || '未知'
 }
 
-/**
- * 处理云台类型下拉菜单的命令。
- *
- * <p>命令值形如「通道编码|类型」，因为 el-dropdown 不知道命令来自哪一行。
- */
+/** 命令值形如「通道编码|类型」，因为 el-dropdown 不知道命令来自哪一行。 */
 function handlePtzCommand(cmd) {
   const sep = cmd.lastIndexOf('|')
   if (sep < 0) return
@@ -559,18 +585,27 @@ function handlePtzCommand(cmd) {
 }
 
 /**
- * 该类型是否支持云台控制。
+ * 该类型是否要显示云台面板。
  *
- * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
+ * <p><b>只有明确是固定枪机（3）才隐藏</b>。{@code 0} 是「设备没报」，
+ * 不等于「不能转」：
+ * <ul>
+ *   <li>国标设备普遍不上报 PTZType，大量真实球机永远是 0；</li>
+ *   <li>SDK 直连设备（大华等）根本没有这个字段，恒为 0 ——
+ *       早期把 0 当「不支持」，直接后果是这类设备<b>云台面板根本不渲染</b>，
+ *       点播能看、控制完全用不了。</li>
+ * </ul>
+ * 显不显示与「命令能不能生敢」是两件事：多显示一个不可用的方向盘，
+ * 比让一台能转的球机彻底无法控制代价小得多。真不能转的，
+ * 用户在通道页把类型改成固定枪机即可隐藏。
  */
 function supportsPtz(type) {
-  return type === 1 || type === 2 || type === 4
+  return type !== 3
 }
 
 /**
  * 把设备上报的码流编号列表转成可读文案。
- *
- * @param {string} list 形如 {@code "0,1"} 的逗号分隔编号
+ * @param {string} list 形如 "0,1"
  * @returns {string} 如「主+子」；无法识别时原样返回
  */
 function streamLabels(list) {
@@ -635,7 +670,6 @@ async function ensureMediaPort() {
   }
 }
 
-/** 打开预览并自动播放。 */
 async function preview(row) {
   previewTarget.value = row
   previewDialog.value = true
@@ -647,22 +681,11 @@ async function preview(row) {
 }
 
 /**
- * 在新窗口打开该通道的免登录直播页。
+ * 在新窗口打开免登录直播页（对齐 LiveGBS 的 play.html）。链接用 location.origin：
+ * 平台有内网/公网两个域名时，后端拼的地址会把用户引到错的入口。
  *
- * <p>链接形如 {@code /play?serial=<设备编码>&code=<通道编码>}，
- * 对齐 LiveGBS 的 {@code play.html}。打开的人不需要账号 ——
- * 这正是「分享」的语义（安全边界见后端 {@code LiveShareController}）。
- *
- * <p>用 {@code location.origin} 而不是后端返回的地址：分享链接要指向
- * <b>用户当前访问的这个入口</b>。若平台同时有内网/公网两个域名，
- * 用后端拼的地址会把内网用户引到公网去（或反之）。
- *
- * <h3>为什么用创建 {@code <a>} 而不是 {@code window.open}</h3>
- *
- * <p>{@code window.open(url, '_blank', 'noopener')} 带 {@code noopener} 时
- * <b>规范上就返回 null</b>，没法据此判「是不是被拦截了」；
- * 而不带 {@code noopener} 又会把 {@code window.opener} 交给对方的页面。
- * 由点击事件直接触发一个真实的链接跳转，既不丢 noopener，也不受弹窗拦截器影响。
+ * 用创建 <a> 而不是 window.open：带 noopener 时规范上返回 null，判不了是否被拦截；
+ * 不带又会把 window.opener 交给对方页面。真实链接跳转两者都不丢。
  */
 function shareLive(row) {
   const serial = row.deviceId || row.serial
@@ -682,23 +705,16 @@ function shareLive(row) {
 }
 
 /**
- * 「画面未就绪」自动重建的次数上限（每个通道一轮最多 2 次）。
- *
- * <p>重建 = 停会话 + 重新 INVITE，成本不低（设备要重新起推），
- * 而如果是设备自己坏了，重试多少次都没用。限定次数避免变成死循环。
+ * 画面未就绪的重建次数上限（每轮最多 2 次）。重建 = 停会话 + 重新 INVITE，
+ * 设备要重新起推；设备自己坏了重试多少次都没用。
  */
 let stallRetry = 0
 
 /**
- * 流是通的、却始终没有视频轨 → 重建整路流。
- *
- * <p><b>为什么必须停会话而不是重连播放器</b>：ZLM 等轨就绪超时后会把视频轨
- * <b>永久丢弃</b>（{@code Track not ready for a long time, ignored: H264}），
- * 这个决定绑定在那个媒体源上。重连 FLV 连的还是同一个媒体源，所以永远没画面。
- * 只有 {@code stream/stop} 把会话拆掉（同时清掉 ZLM 的媒体源），再重新
- * INVITE 让设备重推，才会生成一个全新的媒体源。
- *
- * <p>这也正好对应用户的土办法「关掉重播一下就好了」—— 只是现在由程序自己做。
+ * 流是通的、却始终没有视频轨 → 重建整路流。必须停会话而不是重连播放器：
+ * ZLM 等轨超时会把 H264 轨永久丢弃（Track not ready for a long time, ignored: H264），
+ * 该决定绑定在媒体源上，重连 FLV 连的还是同一个源；只有 stream/stop 拆掉会话、
+ * 重新 INVITE 才会生成新源。
  */
 async function rebuildStalled() {
   const row = previewTarget.value
@@ -721,7 +737,11 @@ async function startPlay() {
   let info = null
   try {
     // 点播响应已包含全部播放地址
-    info = await streamApi.start({ serial: row.deviceId, code: row.id })
+    info = await streamApi.start({
+      serial: row.deviceId,
+      code: row.id,
+      streamnumber: streamParam()
+    })
   } catch (e) {
     try {
       info = await streamApi.info(streamId, true)
@@ -730,13 +750,8 @@ async function startPlay() {
       return
     }
   }
-  /*
-   * 会话已建立，同步到行上，让操作列的「停止」立刻出现。
-   *
-   * <p>不写这一行的话，用户点「播放」后设备已经在推流，但列表里没有停止入口 ——
-   * 只有刷新页面才看得到（列表数据来自 channellist，不轮询）。
-   * 那条路上用户会以为「停不了」，只能去实时预览页找。
-   */
+  // 会话已建立，同步到行上，让操作列「停止」立刻出现。
+  // 不写这一行，设备已在推流但列表没有停止入口（数据不轮询），只能去预览页找
   row.streamId = streamId
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
   if (!hasPlayUrl(proto.value, urls)) {
@@ -744,30 +759,24 @@ async function startPlay() {
     return
   }
   await player.play(streamId, urls, {
-    /*
-     * 手机端固定 WebRTC，不提供切换。
-     *
-     * <p>手机上能用的只剩 WebRTC（FLV 没有可用 MSE，HLS 延迟 6s+ 且
-     * 非 Safari 解不了 G.711），给三个选项只会让用户点到必然失败的那个。
-     * 详见 {@code isMobileClient} 的注释。
-     */
+    // 手机端固定 WebRTC：FLV 没有可用 MSE，HLS 延迟 6s+ 且非 Safari 解不了 G.711，
+    // 给三个选项只会让用户点到必然失败的那个
     proto: isMobileClient() ? LIVE_DEFAULT_PROTOCOL : proto.value,
-    /*
-     * 控制栏里的「播放协议」按钮：<b>仅桌面端提供</b>。
-     *
-     * <p>以前它在弹窗页脚（与「关闭」并排），后来摆到画面右上角，
-     * 但浮层会盖住画面、又容易和弹窗 header 争层级（实测点不到）；
-     * 控制栏本来就是「改这路画面怎么放」的地方，放这里最顺。
-     */
+    // 「播放协议」按钮仅桌面端提供。放控制栏是因为页脚/画面右上角都试过：
+    // 浮层会盖住画面，且与弹窗 header 争层级（实测点不到）
     controlButtons: isMobileClient()
       ? null
-      : [{ id: 'proto', title: '播放协议', text: protoShort.value }],
+      : [
+          { id: 'proto', title: '播放协议', text: protoShort.value },
+          // 只在真能切码流时才显示：国标 2016 版设备不认 SSRC 码流编号，
+          // 给了选项也只会推主码流，用户切了看不出变化
+          ...(hasStreamSwitch.value
+            ? [{ id: 'stream', title: '码流（主/子）', text: streamShort.value }]
+            : [])
+        ],
     onControlButton: onPlayerControlButton,
-    /*
-     * 浏览器放不了所选协议时（手机上选 FLV），引擎会自动降级到能播的那条。
-     * 同步回 proto 并提示一句 —— 不提示的话用户只看到「按钮写着 FLV
-     * 但画面是 WebRTC」，下次还会再选一遍。
-     */
+    // 浏览器放不了所选协议时引擎会自动降级；同步回 proto 并提示，
+    // 否则按钮写着 FLV 画面却是 WebRTC，用户下次还会再选一遍
     onProtoChange: (used, wanted) => {
       proto.value = used
       if (wanted && wanted !== used) {
@@ -779,48 +788,45 @@ async function startPlay() {
     onStall: () => rebuildStalled()
   })
   syncProtoLabel()
+  syncStreamLabel()
 }
 
 /* ---------------- 控制栏按钮 ---------------- */
 
 /**
- * 协议菜单是否展开（锚定在控制栏那个按钮上）。
- *
- * <p>用 {@code el-popover} 的虚拟触发：按钮是引擎直接用 DOM 建的
- * （不在 Vue 模板里），拿不到组件实例，只能把它当锚点元素传给 popover。
+ * 协议菜单是否展开。用 el-popover 虚拟触发：按钮是引擎直接用 DOM 建的，
+ * 拿不到组件实例，只能把它当锚点元素传给 popover。
  */
 const protoMenuVisible = ref(false)
-/** 控制栏按钮元素（popover 锚点）。 */
 const protoAnchorEl = ref(null)
 
+/** 码流菜单（与协议菜单同一套做法）。 */
+const streamMenuVisible = ref(false)
+const streamAnchorEl = ref(null)
+
 /**
- * 控制栏按钮点击。
- *
- * <p>只负责把锚点交给 popover，<b>是否展开由 el-popover 自己管</b>：
- * {@code virtual-triggering} 会把 click 监听挂到锚点元素上自行 toggle。
- * 若这里也写 {@code visible = true}，第二次点击会变成「它 toggle 成 false、
- * 我又设回 true」，菜单就关不掉了。
- *
- * <p>唯一的例外是「第一次拿到锚点」那次点击 —— 监听要等 popover 重新渲染
- * 才挂上，这一次它收不到，所以手动打开一次。
- *
- * @param {string} id 按钮 id
- * @param {HTMLElement} el 按钮元素（当作 popover 锚点）
+ * 只负责把锚点交给 popover，是否展开由 el-popover 自己管：virtual-triggering
+ * 会在锚点元素上挂 click 自行 toggle。若这里再写 visible = true，第二次点击会
+ * 变成「它 toggle 成 false、我又设回 true」，菜单关不掉。
+ * 例外是第一次拿到锚点那次点击 —— 监听要等重新渲染才挂上，得手动打开一次。
  */
 function onPlayerControlButton(id, el) {
-  if (id !== 'proto') return
-  if (protoAnchorEl.value === el) return
-  protoAnchorEl.value = el
-  protoMenuVisible.value = true
+  if (id === 'proto') {
+    if (protoAnchorEl.value === el) return
+    protoAnchorEl.value = el
+    protoMenuVisible.value = true
+    return
+  }
+  if (id === 'stream') {
+    if (streamAnchorEl.value === el) return
+    streamAnchorEl.value = el
+    streamMenuVisible.value = true
+  }
 }
 
 /**
- * 把当前协议文案同步到控制栏按钮。
- *
- * <p><b>为什么不能只靠 watch</b>：切换协议实际上是「重新 play 一次」——
- * 新引擎的按钮文案取自 {@code playOpts}，而那份 opts 是<b>上一次</b> play
- * 时存下的（文案已经旧了）。watch 触发时引擎往往还没建好，写入落空。
- * 所以每次 play / switch 结束后再补一刀。
+ * 把协议文案同步到控制栏按钮。不能只靠 watch：切协议实际是重新 play 一次，
+ * 新引擎的按钮文案取自上一次 play 存的 opts（已旧），而 watch 触发时引擎还没建好。
  */
 function syncProtoLabel() {
   player.setControlButtonText('proto', protoShort.value)
@@ -829,18 +835,50 @@ function syncProtoLabel() {
 /** 协议文案变化时同步到控制栏按钮上（自动兜底时也会走到）。 */
 watch(protoShort, syncProtoLabel)
 
+/** 码流名（控制栏按钮文案）。 */
+const streamShort = computed(() => {
+  const hit = STREAM_OPTIONS.find((o) => o.value === streamChoice.value)
+  return hit ? hit.label : streamChoice.value
+})
+
+/** 把码流文案同步到控制栏按钮。理由同 syncProtoLabel：重新 play 会重建按钮。 */
+function syncStreamLabel() {
+  if (!hasStreamSwitch.value) return
+  player.setControlButtonText('stream', streamShort.value)
+}
+
+watch(streamShort, syncStreamLabel)
+
 /**
- * 切换播放方式（ws-flv ↔ WebRTC）。
+ * 切换码流。
  *
- * <p><b>拿不到播放地址时要重新点播，不能直接调 switchProtocol</b>：
- * 切协议时 {@code stop()} 会断开旧通路，这一瞬间 ZLM 的读者数归零，
- * 平台侧的空闲流巡检（45 秒无观看者即关流）可能刚好在此时执行把流关掉。
- * 之后再查 {@code stream/info} 就是 400，地址为空 ——
- * 而 {@code switchProtocol} 拿到空地址只会把状态置成「缺少播放地址」，
- * 播放器就停在那儿了（这就是用户看到的提示）。
- *
- * <p>所以这里一旦发现地址不齐，就重新走完整的 {@link startPlay}
- * （内部会重新 INVITE 拉起设备推流），而不是拿空地址去切。
+ * <p>必须重建流而不是只改参数：码流编号在国标里是 INVITE 时写进 SSRC 的，
+ * 在大华里是 RTSP 地址的 {@code subtype}，两者都无法在会话中途改。
+ * 先 stop 再 startPlay，避免旧会话被复用（复用会把子码流当主码流一直播下去）。
+ */
+async function switchStreamTo(next) {
+  streamMenuVisible.value = false
+  if (!hasStreamSwitch.value) return
+  if (!next || next === streamChoice.value) return
+  streamChoice.value = next
+  const row = previewTarget.value
+  if (!row) return
+  // 未在播放时只记住选择，下次点播按它走
+  if (!playing.value) return
+  try {
+    await streamApi.stop({ serial: row.deviceId, code: row.id })
+  } catch (e) {
+    // 会话可能已被空闲巡检关掉，继续重播即可
+  }
+  if (!previewDialog.value) return
+  await startPlay()
+}
+
+/**
+ * 切换播放方式（ws-flv ↔ WebRTC）。拿不到播放地址时要重新点播，不能直接
+ * switchProtocol：stop() 断开旧通路后 ZLM 读者数归零，45 秒空闲巡检可能刚好
+ * 关流，再查 stream/info 就是 400；switchProtocol 拿到空地址只会把状态置成
+ * 「缺少播放地址」停在那里。
  */
 async function switchProto(next) {
   const row = previewTarget.value
@@ -868,14 +906,8 @@ async function switchProto(next) {
 }
 
 /**
- * 画面右上角的下拉选项回调。
- *
- * <p>先写回 {@code proto} 再调 {@link switchProto}：{@code switchProto}
- * 在「未播放」时只记住选择，在「已播放」时会用它作为目标协议 ——
- * 两条路径都读 {@code proto}，所以赋值必须在调它之前。
- * 选中当前项时直接关掉菜单，避免白白断流重连一次。
- *
- * @param {string} next 目标协议
+ * 先写回 proto 再调 switchProto：后者两条路径都读 proto（未播时只记住选择，
+ * 已播时作为目标协议）。选中当前项时直接关菜单，避免白白断流重连。
  */
 function switchProtoTo(next) {
   protoMenuVisible.value = false
@@ -885,19 +917,14 @@ function switchProtoTo(next) {
 }
 
 /**
- * 关闭预览弹窗。
- *
- * <p><b>必须显式把 {@code previewDialog} 置 false</b>。早先这里只做了
- * 「停播放器 + 清目标」，底部那个「关闭」按钮就变成了一句空指令 ——
- * 点了既不关窗也不断流，看起来像按钮坏了。
- * （右上角 × 之所以能用，是因为 el-dialog 自己会 emit
- * {@code update:modelValue false}，走的是 v-model 那条路，跟这个函数无关。）
- *
- * <p>清 {@code previewTarget} 放到 {@link onPreviewClosed}：这里清掉的话，
- * 标题（依赖 target）会在关闭动画还没跑完时先变成空串，肉眼能看到闪一下。
+ * 必须显式把 previewDialog 置 false：否则底部「关闭」点了既不关窗也不断流。
+ * （右上角 × 能用是因为 el-dialog 自己 emit update:modelValue，与这个函数无关。）
+ * 清 previewTarget 放到 onPreviewClosed，否则标题会在关闭动画中先变空串、闪一下。
  */
 function closePreview() {
   previewDialog.value = false
+  // 关窗时框选图层必须一起退掉，否则下次打开弹窗它会保持着激活状态
+  trackActive.value = false
   // 立即断流：不要等 300ms 的关闭动画，让 ZLM 早点释放这路拉流
   // 先退掉「CSS 全屏」兜底（切协议重建播放器时可能用上），否则它固定覆盖整屏
   player.exitCssFullscreen()
@@ -911,14 +938,8 @@ function onPreviewClosed() {
 }
 
 /**
- * 修改通道的云台类型。
- *
- * <p>下拉菜单不是 v-model，值不会自动改到行对象上，
- * 所以成功后要显式写回，否则列表显示的还是旧值。
- * 失败时回滚，保证显示与后端一致。
- *
- * <p>另外后端已改为「目录同步时设备报 0 不覆盖」，所以这里改的值不会被设备
- * 下一次注册冲回未知。
+ * 修改云台类型。下拉不是 v-model，成功后必须显式写回，否则列表还是旧值。
+ * 后端在目录同步时「设备报 0 不覆盖」，所以这里改的值不会被下次注册冲回未知。
  */
 async function changePtzType(row, type) {
   const previous = row.ptzType
@@ -943,13 +964,10 @@ async function toggleCloudRecord(row, enable) {
   // v-model 已先行改值：失败时必须回滚，否则开关状态与后端不一致
   recordPending.add(row.id)
   try {
-    // 参数名必须是 cloudrecord（后端 @RequestParam Boolean cloudrecord），
-    // 传 enable 会被忽略并落到默认值 false，开关看似生效实则永远关着
+    // 参数名必须是 cloudrecord（后端 @RequestParam Boolean cloudrecord），传 enable 会被忽略
     await deviceApi.setChannelCloudRecord({ serial: row.deviceId, code: row.id, cloudrecord: enable })
-    // 【互斥：后端会自动关掉「按需直播」，这里必须同步本地状态】
-    //
-    // 否则用户看到的是「两个开关都显示开」，可实际库里是按需=关。
-    // 不清同步就只能刷新页面才对得上（这是用户反馈的原问题）。
+    // 后端开云端录像会自动关掉「按需直播」，这里必须同步本地状态，
+    // 否则界面显示两个都开、库里是按需=关，只能刷新页面才对得上
     const turnedOffOnDemand = enable && row.ondemand
     if (turnedOffOnDemand) {
       row.ondemand = false
@@ -984,9 +1002,8 @@ async function doRename() {
   }
 }
 
-/* ---------------- 名称按需编辑（对齐 LiveGBS：点名称即改） ---------------- */
+/* ---------------- 名称按需编辑 ---------------- */
 
-/** 进入名称编辑态。 */
 function startNameEdit(row) {
   if (row._editing) return
   row._editing = true
@@ -1004,7 +1021,6 @@ function nameInputId(row) {
   return `ch-name-${row.deviceId}-${row.id}`
 }
 
-/** 放弃编辑，还原原值。 */
 function cancelName(row) {
   row.customName = row._draftName || ''
   row._editing = false
@@ -1028,9 +1044,6 @@ async function saveName(row) {
   }
 }
 
-/* ---------------- 位置（经纬度） ---------------- */
-
-/** 位置显示文案：两个都有效才显示，否则占位。 */
 function positionText(row) {
   const lon = row.longitude
   const lat = row.latitude
@@ -1041,7 +1054,6 @@ function positionText(row) {
   return `${hasLon ? Number(lon).toFixed(4) : '-'},${hasLat ? Number(lat).toFixed(4) : '-'}`
 }
 
-/** 打开经纬度编辑弹窗。 */
 function openPosition(row) {
   positionTarget.value = row
   positionLon.value = row.longitude ?? ''
@@ -1049,7 +1061,6 @@ function openPosition(row) {
   positionDialog.value = true
 }
 
-/** 保存经纬度。 */
 async function savePosition() {
   const row = positionTarget.value
   if (!row) return
@@ -1078,15 +1089,6 @@ async function savePosition() {
   }
 }
 
-/* ---------------- 按需直播 / 停止推流 ---------------- */
-
-/**
- * 切换「按需直播」开关。
- *
- * <p><b>与云端录像互斥</b>：后端开按需时会自动关掉云端录像并归档，
- * 这里必须同步 row.cloudRecord，否则界面会显示「两个都开」——
- * 与实际库里状态不符，用户只能刷新页面才发现变了。
- */
 async function toggleOndemand(row, enable) {
   ondemandPending.add(row.id)
   try {
@@ -1111,13 +1113,11 @@ async function toggleOndemand(row, enable) {
   }
 }
 
-/** 停止该通道的推流。 */
 async function stopStream(row) {
   try {
     const res = await streamApi.stop({ serial: row.deviceId, code: row.id })
-    // 无论后端有没有真的停掉会话，本行都不该再显示「停止」：
-    // ok=false 表示本来就没有会话（例如被 45 秒空闲巡检关掉了，
-    // 而列表数据不轮询，本地还以为在推流）。
+    // 无论后端有没有真停掉会话，本行都不该再显示「停止」：ok=false 表示本来
+    // 就没有会话（可能被 45 秒空闲巡检关了，而列表不轮询，本地还以为在推流）
     row.streamId = null
     if (res?.ok === false) {
       ElMessage.info('该通道当前没有推流')
@@ -1129,7 +1129,6 @@ async function stopStream(row) {
   }
 }
 
-/** 跳到「设备录像」页，并预填当前设备/通道。 */
 function openDeviceRecord(row) {
   router.push({
     path: '/playback',
@@ -1137,9 +1136,8 @@ function openDeviceRecord(row) {
   })
 }
 
-/** 打开所属设备的详情弹窗（状态记录 / 流量统计 / 移动轨迹 / 会话列表）。 */function openDeviceDetail(row) {
-  // 弹窗内部按 device.id（设备编码）查日志，通道行的 id 是通道编码，
-  // 直接透传会查不到数据，所以这里重组为设备对象
+function openDeviceDetail(row) {
+  // 弹窗按 device.id（设备编码）查日志，通道行里的 id 是通道编码，需重组为设备对象
   detailTarget.value = {
     id: row.deviceId,
     name: row.deviceName,
@@ -1171,11 +1169,8 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 带提示的表头：文字 + 问号图标。
- *
- * 「按需直播」与「云端录像」互斥，但在表头只写四个字看不出来 ——
- * 用户会以为两个可以同时开，点了一个另一个自动关掉时还以为出 bug 了。
- * 加个问号让语义可发现（悬停显示完整说明）。
+ * 带提示的表头：「按需直播」与「云端录像」互斥，只看表头四个字会以为能同时开，
+ * 点了一个另一个自动关掉时像是 bug。悬停显示完整说明。
  */
 .th-with-tip {
   display: inline-flex;
@@ -1194,7 +1189,7 @@ onUnmounted(() => player.stop())
   font-size: var(--fs-xs);
 }
 
-/* 云台类型：文字 + 箭头，点开是下拉菜单（与设备管理的流传输模式一致） */
+/* 云台类型：文字 + 箭头，点开是下拉菜单 */
 .ptz-link {
   display: inline-flex;
   align-items: center;
@@ -1217,7 +1212,6 @@ onUnmounted(() => player.stop())
   color: var(--text-tertiary);
 }
 
-/* 名称按需编辑：平时是文本，点击才换成输入框 */
 .name-text {
   cursor: default;
   border-radius: 4px;
@@ -1242,7 +1236,6 @@ onUnmounted(() => player.stop())
   padding: 0 6px;
 }
 
-/* 位置：可点击编辑经纬度 */
 .position-text {
   cursor: pointer;
   border-radius: 4px;
@@ -1258,7 +1251,6 @@ onUnmounted(() => player.stop())
   color: var(--el-color-primary);
 }
 
-/* 在线状态 + 流量图标：整体可点开设备详情 */
 .status-cell {
   display: inline-flex;
   align-items: center;
@@ -1299,13 +1291,14 @@ onUnmounted(() => player.stop())
 .preview-wrap {
   display: grid;
   /*
-   * 视频栏吃掉剩余宽度，云台面板固定 340px。
+   * 视频栏吃掉剩余宽度，云台面板固定 420px。
    *
-   * 参考站是 303px，但它的云台面板只有方向盘 + 变倍 + 信息表；
-   * 我们多了 Tab 页形式的运维功能（预置位/设备/高级/语音喊话），
-   * 320px 时标题文字与展开箭头离得很近，所以放宽到 340px。
+   * <p>为什么是 420 而不是 340：云台扩展里的巡航组/线扫/巡迹都是 6~7 列的表格
+   * （序号 + 名称 + 若干操作列 + 删除），340px 减去左栏内边距后每列只剩 40px 左右，
+   * 名称列被压到只能显示 2~3 个字。实测 420px 时名称列有 90px、操作列不再换行。
+   * 参考站是 303px，但它没有「云台扩展」这组表格页。
    */
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 480px;
   gap: 24px;
   /*
    * 行高由两栏内容高度的较大值决定 —— 这里是<b>右栏</b>（云台面板）。
@@ -1313,45 +1306,34 @@ onUnmounted(() => player.stop())
    */
   align-items: stretch;
   /*
-   * 视频的最大高度。视口太矮时靠它收缩，避免画面顶到弹窗底部。
-   * 只通过下面的 max-width 反推，不直接约束 width，所以不会压扁比例。
-   *
-   * <p>为什么不是更保守的 62vh：那个值比左栏按宽度算出的 16:9 高度
-   * <b>还小</b>（实测 1680×950 下 62vh = 589，而栏宽 1082 对应 609），
-   * 于是视频被无谓地收窄到 1047、左右各多出一道黑边。
-   * 这里改成「减掉作业区高度（标题栏 + 页脚 + 弹窗上边距）」——
-   * 正常视口下它算出来总是大于栏宽对应值，上限就不生效，视频铺满一栏；
-   * 只有真正矮的视口才会被夹住。
+   * 视频最大高度。只通过下面的 max-width 反推，不直接约束 width，所以不压比例。
+   * 取 100vh-210px（标题栏 + 页脚 + 弹窗上边距），不用更保守的 62vh：
+   * 实测 1680×950 下 62vh=589，而栏宽 1082 对应 609，会把视频无谓收窄到 1047，
+   * 左右各多一道黑边。
    */
   --video-max-h: calc(100vh - 210px);
+  /*
+   * 行高上限 = 视频最大高度，且允许行被压缩（minmax 的下限是 0）。
+   *
+   * 没有这两行时，网格行按<b>内容</b>高度算：切到「相机」页，43 项参数
+   * 把右栏内容撑到 400+px，行跟着长高，弹窗就被顶大了（实测 644 → 888）。
+   * 加上之后行高封顶在视频能占的最大高度，右栏在内部滚动，弹窗尺寸不再随页签变化。
+   */
+  grid-template-rows: minmax(0, 1fr);
+  max-height: var(--video-max-h);
 }
 
-/*
- * 单栏模式（通道不支持云台）：去掉右栏，视频吃满整个弹窗。
- *
- * <p>不渲染右栏后，行高就只由视频决定 —— 弹窗高度自动收缩，
- * 不会再出现「左边一块黑、右边一片白」的对比。
- */
+/* 单栏模式（不支持云台）：去掉右栏，弹窗高度只由视频决定，不再「左黑右白」 */
 .preview-wrap.is-video-only {
   grid-template-columns: minmax(0, 1fr);
   gap: 0;
 }
 
 /*
- * 左栏 = 播放器画面区。
+ * 左栏 = 播放器画面区。黑底只挂在 .video-box（播放器自身）上，不在这一层：
+ * 两栏行高由右栏决定，视频装不满时围在外面的黑就是一整块黑框，比白空白更难看。
  *
- * 【为什么这里不能再挂黑底】
- * 两栏行高由右栏（云台面板）决定，右栏比视频高时，视频就装不满左栏。
- * 上一版把整块左栏刷成黑的，想让「多出来的部分看起来像播放器黑边」——
- * 但黑边只在视频<b>内部</b>才像黑边（16:9 片源放进更高容器的那种），
- * 围在视频<b>外面</b>就是一个大黑框，比白空白更难看（用户反馈“一堆黑的”）。
- *
- * 现在黑底只挂在 {@code .video-box}（播放器自身）上，左栏其余部分透明，
- * 多出来的就是弹窗背景。视频也因此不再被整块黑包住。
- *
- * 【为什么不用 height: 100% 拉高视频】
- * 要么横向裁切（object-fit: cover）把画面切掉 —— 监控场景不可接受；
- * 要么拉伸变形。两者都比留一点背景差。
+ * 也不 height:100% 拉高：object-fit:cover 会切掉画面（监控不可接受），否则就是变形。
  */
 .preview-stage {
   min-width: 0;
@@ -1363,13 +1345,9 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 同时写 width / max-width / aspect-ratio 是这里的关键：
- *   - 栏宽够大时：宽度取 100%，高度 = 宽度 × 9/16；
- *   - 视口太矮时：宽度被 max-width 夹住（= --video-max-h × 16/9），
- *     高度随之收缩，比例保持 16:9。
- *
- * 注意不能用 max-height 代替 max-width —— max-height 不参与宽高比反算，
- * 只会把高度硬压下去，画面就变形了（这正是上一版踩过的坑）。
+ * 同时写 width / max-width / aspect-ratio：栏宽够大时宽度 100%、高=宽×9/16；
+ * 视口太矮时宽度被 max-width 夹住（--video-max-h × 16/9），比例仍保持 16:9。
+ * 不能用 max-height 代替 —— 它不参与宽高比反算，只硬压高度，画面会变形。
  */
 .preview-stage .video-box {
   width: 100%;
@@ -1378,34 +1356,32 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 右栏：高度自然（由云台面板内容决定），<b>正常视口下不滚动</b>。
- *
- * 上两版都在跟滚动条较劲：先给 wrapper 定死 74vh（凭空多出 174px 空白），
- * 再用 contain: size + overflow-y: auto 把溢出挤进栏内（滚动条常驻）。
- * 真正的结论是：弹窗本来就放得下 —— 面板 641px，加 header/footer 共约
- * 760px，常见视口（≥800）不需要滚动。之前之所以出现滚动条，是因为
- * 强行把行高压到视频高度（474）后再让面板去适应它。
- *
- * max-height + overflow 保留作为<b>矮视口兜底</b>（<768px 那种）：
- * 那时确实物理放不下，滚动是唯一选择；正常视口下这两条都不生效。
+ * 右栏：高度由云台面板内容决定，正常视口下不滚动（面板 641px + header/footer
+ * 约 760px，≥800px 的视口放得下）。max-height + overflow 只是矮视口兜底。
  */
 .preview-side {
   border-left: 1px solid var(--border-color);
   padding-left: 18px;
   /*
-   * 顶部留白：状态角标挪进画面后，右栏第一个元素就是云台方向盘，
-   * 不加这一行它会紧贴弹窗 body 的上边缘，看起来像被裁掉一截。
+   * 顶部留白：状态角标挪进画面后，右栏第一个元素就是方向盘，不留白会贴上边缘。
    * 只留 8px：这里每多 1px，视频上下黑边各多 0.5px（两栏等高）。
    */
   padding-top: 8px;
+  /*
+   * 底部留白：面板现在撑满整栏，底部的「还原/保存」会紧贴边框，
+   * 留 8px 让它不贴边（flex 会把子项自动收窄，不会溢出）。
+   */
+  padding-bottom: 8px;
   min-height: 0;
   /*
-   * 兜底上限：只在视口真的装不下时才出滚动条。
-   *
-   * 面板实测 663px，加弹窗 header（约 54）与 footer（约 64）共约 780，
-   * 再加 top: 5vh —— 视口 ≥ 840px 时完全放得下，这里不会触发。
-   *
-   * 取 100vh-150 而不是更紧的值：之前写 200 时算出来正好等于面板高度，
+   * flex column：让云台面板（.ptz-panel 有 flex:1）吃掉整栏高度，
+   * 参数页的内容区因此能一直撑到底部，不会在保存按钮下面留一条空白。
+   */
+  display: flex;
+  flex-direction: column;
+  /*
+   * 兜底上限：面板实测 663px + header/footer 约 780px，视口 ≥840px 不会触发。
+   * 取 100vh-150 而不是 200：200 时算出来正好等于面板高度，
    * scrollHeight 比 clientHeight 多一个子像素就常驻滚动条（实测踩到）。
    */
   max-height: calc(100vh - 150px);
@@ -1432,18 +1408,9 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 预览弹窗里的预置位表格调矮（默认 248）。
- *
- * <p>为什么只在这里改：表格高度直接决定右栏总高，而右栏总高又决定
- * 左栏的黑边 —— 右栏每高 16px，黑边上下各多 8px。248 是给
- * 实时预览页（LiveView，右侧常驻面板、空间充裕）用的；
- * 在弹窗里压到 176（约 3 行 + 表头）就能把右栏拉到接近视频高度。
- *
- * <p>代价是预置位多于一页时要滚表格。但那正是「列表滚动」该有的样子 ——
- * 滚动条出现在一个明确的列表框里，而不是整片面板外面。
- *
- * <p>{@code !important} 是因为 el-table 的 {@code height} 属性会写成内联
- * style，普通规则的优先级盖不住它。
+ * 预置位表格压到 176（约 3 行 + 表头）。表格高度直接决定右栏总高，
+ * 右栏每高 16px，左栏黑边上下各多 8px。只在弹窗里改，LiveView 保持 248。
+ * !important 是因为 el-table 的 height 属性写成内联 style。
  */
 .preview-side :deep(.preset-table) {
   height: 176px !important;
@@ -1478,12 +1445,8 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 播放状态角标：叠在画面左上角（替代原先占右栏一行的状态标签）。
- *
- * 用 absolute 而不是把标签塞进播放器控件：xgplayer 的控制栏在底部，
- * 左上角是它的空白区，叠在这里不会与任何按钮抢位置；
- * pointer-events: none 保证它不拦截画面上的点击 / 双击全屏。
- * 暗底半透明 + 细描边：亮画面上不被吞掉，暗画面上也不突兀。
+ * 状态角标叠在画面左上角。xgplayer 控制栏在底部，左上角是空白区，
+ * 不会与按钮抢位置；pointer-events:none 保证不拦截点击 / 双击全屏。
  */
 .video-state {
   position: absolute;
@@ -1547,20 +1510,12 @@ onUnmounted(() => player.stop())
 </style>
 
 <!--
-  预览弹窗的内边距必须放在非 scoped 样式块里。
-
-  el-dialog 会把 DOM teleport 到 <body> 下，元素上没有本组件的
-  data-v-xxx 标记，scoped 样式里的 `.preview-dialog :deep(...)` 匹配不到，
-  写了也不生效（实测弹窗底部仍留着约 90px 空白）。
-
-  选择器带上 .preview-dialog 前缀，只影响这个弹窗，不会污染其它对话框。
+  预览弹窗的内边距必须放在非 scoped 样式块里：el-dialog teleport 到 <body>，
+  元素上没有本组件的 data-v 标记，scoped 里的 :deep 匹配不到（实测底部仍留约 90px 空白）。
+  选择器带 .preview-dialog 前缀，不影响其它对话框。
 -->
 <style>
-/*
- * Element Plus 默认给 header / body / footer 各留 16~20px，
- * 三者叠起来在视频下方形成一条明显的空白带 —— 视频再大也填不满。
- * 这里把上下留白收到只够放标题和按钮的程度。
- */
+/* Element Plus 默认给 header/body/footer 各留 16~20px，叠起来在视频下方形成空白带 */
 .preview-dialog .el-dialog__header {
   padding: 14px 20px 10px;
   margin-right: 0;
@@ -1581,23 +1536,16 @@ onUnmounted(() => player.stop())
 }
 
 /*
- * 单栏（无云台）时把弹窗宽度也收窄，否则左右会多出两大块弹窗背景。
- *
- * <p>公式与 {@code .video-box} 的 max-width 一致：视频最高
- * {@code 100vh - 210px}，16:9 下的宽度就是它 × 16/9；再加 76px
- * （弹窗 body 左右内边距，实测 74~78）正好装下、不多留白。
- * 视口再宽也不超过 96vw；窄屏时视频改用宽度 100% 适配，同样填满。
+ * 单栏时收窄弹窗，否则左右多出两大块背景。公式同 .video-box 的 max-width：
+ * (100vh-210px) × 16/9 + 76px（body 左右内边距，实测 74~78）。
  */
 .preview-dialog.is-video-only {
   width: min(calc((100vh - 210px) * 16 / 9 + 76px), 96vw) !important;
 }
 
 /*
- * 协议菜单（el-popover 的内容）。
- *
- * <p>必须写在非 scoped 块里：popover 的 popper 是 teleport 到 body 的，
- * 元素上没有本组件的 data-v 标记，scoped 选择器压根匹配不到。
- * 用 {@code popper-class} 限定作用域（见模板），不影响其它弹层。
+ * 协议菜单（el-popover 内容）。必须写在非 scoped 块：popper teleport 到 body，
+ * 没有 data-v 标记。用 popper-class 限定作用域，不影响其它弹层。
  */
 .preview-proto-menu .proto-menu {
   display: flex;

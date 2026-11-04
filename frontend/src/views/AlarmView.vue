@@ -21,29 +21,39 @@
     </div>
 
       <el-table ref="tableRef" v-loading="loading" :data="pagedAlarms" stripe table-layout="fixed">
-        <el-table-column prop="alarmTime" label="时间" width="160" sortable>
+        <el-table-column prop="alarmTime" label="时间" width="148" sortable>
           <template #default="{ row }"><span class="mono">{{ row.time || '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="alarmPriority" label="级别" width="84" align="center" sortable>
+        <!-- 级别只显示「一级」两字：完整名称是「一级警情」，4 个汉字在 80px 列里会被压成省略号。
+             完整名称放原生 title，不用 el-tooltip —— 后者会把 trigger 元素带上
+             transform: scaleX(0) / opacity: 0，标签在表格里直接看不见。 -->
+        <el-table-column prop="alarmPriority" label="级别" width="80" align="center" sortable>
           <template #default="{ row }">
-            <el-tag :type="priorityColor(row.alarmPriority)" size="small" effect="light">
-              {{ row.alarmPriorityName || priorityText(row.alarmPriority) }}
+            <el-tag :type="priorityColor(row.alarmPriority)" size="small" effect="light"
+                    :title="row.alarmPriorityName || priorityText(row.alarmPriority)">
+              {{ priorityText(row.alarmPriority) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="设备" width="160">
+        <el-table-column label="设备" width="130">
           <template #default="{ row }"><span class="mono">{{ row.deviceId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="通道" width="160">
+        <el-table-column label="通道" width="120">
           <template #default="{ row }"><span class="mono">{{ row.channelId || '—' }}</span></template>
         </el-table-column>
-        <el-table-column label="报警方式" width="104">
+        <!-- 报警类型：国标走 AlarmType 映射，SDK 直连设备走事件码映射（认不出的码原样显示 0xXXXX） -->
+        <el-table-column label="报警类型" width="116" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span>{{ row.alarmTypeName || eventCodeText(row.alarmEventType) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="报警方式" width="92">
           <template #default="{ row }">{{ row.alarmMethodName || '—' }}</template>
         </el-table-column>
         <el-table-column label="描述" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">{{ row.alarmDescription || '—' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="72" align="center">
+        <el-table-column label="操作" width="56" align="center">
           <template #default="{ row }">
             <el-button v-if="canWrite" link type="danger" aria-label="删除报警" @click="removeOne(row)">
               <el-icon aria-hidden="true"><Delete /></el-icon>
@@ -103,22 +113,48 @@ function priorityColor(p) {
   return PRIORITY_COLOR[p] || 'info'
 }
 
+/**
+ * 未知事件码的兜底显示。
+ *
+ * <p>SDK 直连设备的事件码上千个，认不出的必须原样透出成 0xXXXX ——
+ * 显示成「—」会让人以为平台没收到报警。
+ */
+function eventCodeText(code) {
+  if (code === null || code === undefined || code === '') return '—'
+  const n = Number(code)
+  if (!Number.isFinite(n)) return '—'
+  return `事件 0x${n.toString(16).toUpperCase().padStart(4, '0')}`
+}
+
 /** 聚合搜索关键词（设备/通道编码、报警方式、描述）。 */
 const keyword = ref('')
 
-const { pager, offset, onPageChange, onSizeChange } = usePagination({
-  pageSize: 10,
-  // 翻页只切本地切片
-  load: () => {}
+const { pager, offset, setTotal, onPageChange, onSizeChange } = usePagination({
+  pageSize: 20,
+  load: () => load()
 })
 
+/**
+ * 加载当前页。
+ *
+ * <p><b>服务端分页</b>：以前是 {@code limit: 0} 一次拉全量、再在前端过滤和切片。
+ * 那张表实测 5 千多行，后端又对每行补设备名（N+1，11638 次远程查询），
+ * 接口要跑到 290 秒，页面直接打不开。
+ *
+ * <p>现在把「级别 / 关键词 / 偏移量 / 每页条数」全交给后端，
+ * 前端只拿当前这一页；{@code alarmCount} 就是筛选后的总数。
+ */
 async function load() {
   loading.value = true
   try {
-    // limit=0：一次取全量，搜索/筛选才是全库聚合
-    const data = await alarmApi.list({ start: 0, limit: 0 })
+    const data = await alarmApi.list({
+      start: offset.value,
+      limit: pager.size,
+      priority: query.priority || undefined,
+      q: keyword.value.trim() || undefined
+    })
     alarms.value = data?.alarmList || []
-    pager.page = 1
+    setTotal(data?.alarmCount ?? 0)
   } catch (e) {
     ElMessage.error(e.message || '加载报警失败')
   } finally {
@@ -126,26 +162,22 @@ async function load() {
   }
 }
 
-/** 级别 + 关键词过滤（本地）。 */
-const filteredAlarms = computed(() => {
-  const q = keyword.value.trim().toLowerCase()
-  return alarms.value.filter((a) => {
-    if (query.priority && String(a.alarmPriority) !== String(query.priority)) return false
-    if (!q) return true
-    return [a.deviceId, a.channelId, a.alarmMethodName, a.alarmDescription, a.alarmPriority]
-      .filter(Boolean)
-      .some((v) => String(v).toLowerCase().includes(q))
-  })
-})
+/** 当前页数据（后端已经切好，直接用）。 */
+const pagedAlarms = computed(() => alarms.value)
 
-const pagedAlarms = computed(() =>
-  filteredAlarms.value.slice(offset.value, offset.value + pager.size)
-)
+/** 条件变化时回到第一页再查。 */
+function reloadFromFirstPage() {
+  pager.page = 1
+  load()
+}
 
-watch([filteredAlarms, () => pager.size], () => {
-  pager.total = filteredAlarms.value.length
-  if (offset.value >= filteredAlarms.value.length) pager.page = 1
+// 关键词防抖：边打字边请求会把后端打满，也和「搜索」的直觉不符
+let keywordTimer = null
+watch(keyword, () => {
+  if (keywordTimer) clearTimeout(keywordTimer)
+  keywordTimer = setTimeout(reloadFromFirstPage, 300)
 })
+watch(() => query.priority, reloadFromFirstPage)
 
 async function removeOne(row) {
   try {
@@ -163,6 +195,7 @@ async function clearAll() {
   try {
     const data = await alarmApi.clear()
     ElMessage.success(`已清空 ${data?.deleted ?? 0} 条`)
+    pager.page = 1
     load()
   } catch (e) {
     ElMessage.error(e.message || '清空失败')

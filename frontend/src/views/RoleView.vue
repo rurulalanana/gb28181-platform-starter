@@ -94,8 +94,9 @@
     <el-dialog
       v-model="editDialog"
       :title="form.created ? '新增角色' : `编辑角色 · ${form.name}`"
-      width="720px"
-      top="6vh"
+      width="min(900px, 94vw)"
+      top="5vh"
+      class="role-dialog"
     >
       <el-form :model="form" label-width="88px">
         <el-form-item label="角色编码">
@@ -114,33 +115,73 @@
         <el-form-item label="说明">
           <el-input v-model="form.description" placeholder="这个角色是干什么的" />
         </el-form-item>
-        <el-form-item label="权限">
+        <el-form-item label="权限" class="perm-form-item">
+          <!-- 工具条：展开/折叠 · 全选/全不选 · 父子联动（对齐若依的权限分配交互） -->
           <div class="perm-toolbar">
-            <span class="perm-count">已选 {{ form.permissions.length }} / {{ allPermCodes.length }} 项</span>
-            <div>
-              <el-button size="small" text @click="selectAll">全选</el-button>
-              <el-button size="small" text @click="clearAll">清空</el-button>
-              <el-button size="small" text @click="selectReadonly">仅只读</el-button>
-            </div>
+            <el-checkbox v-model="expandAll">展开/折叠</el-checkbox>
+            <el-checkbox v-model="checkAll">全选/全不选</el-checkbox>
+            <el-checkbox v-model="linkage">父子联动</el-checkbox>
+            <span class="perm-count">已选 {{ form.permissions.length }} / {{ allPermCodes.length }}</span>
+            <el-button size="small" text @click="selectReadonly">仅只读</el-button>
           </div>
-          <div class="perm-groups">
-            <div v-for="g in catalog" :key="g.group" class="perm-group">
-              <div class="perm-group-title">{{ g.group }}</div>
-              <el-checkbox-group v-model="form.permissions">
-                <el-checkbox
-                  v-for="p in g.permissions"
-                  :key="p.code"
-                  :value="p.code"
-                  class="perm-item"
-                  :class="{ 'is-parent': !p.parent, 'is-child': !!p.parent }"
-                  :disabled="isInherited(p)"
-                  @change="(checked) => onPermChange(p, checked)"
-                >
-                  <span class="perm-name">{{ p.name }}</span>
-                  <span v-if="p.parent && isInherited(p)" class="perm-inherited">含在上项</span>
-                  <span class="perm-desc">{{ p.description }}</span>
-                </el-checkbox>
-              </el-checkbox-group>
+
+          <!-- 树形表格：左侧菜单名称（目录 → 菜单），右侧该菜单下的按钮权限 -->
+          <div class="perm-tree">
+            <div class="perm-tree-head">
+              <span class="col-menu">菜单名称</span>
+              <span class="col-btns">按钮权限</span>
+            </div>
+            <div class="perm-tree-body">
+              <div v-for="g in permTree" :key="g.key" class="perm-group-block">
+                <!-- 目录行 -->
+                <div class="perm-row is-group">
+                  <label class="col-menu">
+                    <el-checkbox
+                      :model-value="isAllChecked(g.codes)"
+                      :indeterminate="isPartialChecked(g.codes)"
+                      @change="(v) => setCodes(g.codes, v)"
+                    />
+                    <button
+                      type="button"
+                      class="perm-caret"
+                      :aria-label="isExpanded(g.key) ? '收起' : '展开'"
+                      @click="toggleExpand(g.key)"
+                    >
+                      <el-icon><CaretBottom v-if="isExpanded(g.key)" /><CaretRight v-else /></el-icon>
+                    </button>
+                    <span class="perm-name">{{ g.name }}</span>
+                  </label>
+                  <span class="col-btns" />
+                </div>
+
+                <!-- 菜单行 + 按钮组 -->
+                <template v-if="isExpanded(g.key)">
+                  <div v-for="m in g.modules" :key="m.key" class="perm-row is-module">
+                    <label class="col-menu">
+                      <el-checkbox
+                        :model-value="isAllChecked(m.codes)"
+                        :indeterminate="isPartialChecked(m.codes)"
+                        @change="(v) => setCodes(m.codes, v)"
+                      />
+                      <span class="perm-name">{{ m.name }}</span>
+                    </label>
+                    <div class="col-btns">
+                      <el-checkbox
+                        v-for="b in m.buttons"
+                        :key="b.code"
+                        :model-value="form.permissions.includes(b.code) || isInherited(b)"
+                        :disabled="isInherited(b)"
+                        :title="b.description"
+                        class="perm-btn"
+                        @change="(v) => toggleCode(b, v)"
+                      >
+                        {{ b.name }}
+                        <span v-if="isInherited(b)" class="perm-inherited">含在上项</span>
+                      </el-checkbox>
+                    </div>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
         </el-form-item>
@@ -154,7 +195,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { roleApi } from '@/api'
@@ -207,28 +248,128 @@ const childrenMap = computed(() => {
   return map
 })
 
-/** 下级动作被上级「完全控制」包含时置灰：取消它没有意义，取消上级即可。 */
-/** 老数据里可能只存了上级编码，打开时把下级补齐，勾选框才不会「半勾着」。 */
-function withChildren(codes) {
-  const set = new Set(codes)
-  for (const c of codes) {
-    for (const child of childrenMap.value[c] || []) set.add(child)
+/** 下级编码 → 上级编码。 */
+const parentMap = computed(() => {
+  const map = {}
+  for (const g of catalog.value) {
+    for (const p of g.permissions) {
+      if (p.parent) map[p.code] = p.parent
+    }
   }
-  return [...set]
+  return map
+})
+
+/** 父子联动默认开：勾目录即勾全部下级，符合多数人的预期。 */
+const linkage = ref(true)
+/** 已展开的目录 key 集合。 */
+const expanded = ref(new Set())
+
+/**
+ * 权限树：group（目录）→ module（菜单）→ buttons。
+ *
+ * <p>后端 {@code /role/permissions} 返回「分组 + 扁平权限点」，每个点带 {@code module}；
+ * 这里按 module 聚一次，得到角色页要的三级结构。
+ */
+const permTree = computed(() => {
+  const out = []
+  for (const g of catalog.value) {
+    const node = { key: g.group, name: g.group, modules: [], codes: [] }
+    const byModule = new Map()
+    for (const p of g.permissions) {
+      const mk = p.module || '其他'
+      let m = byModule.get(mk)
+      if (!m) {
+        m = { key: `${g.group}/${mk}`, name: mk, buttons: [], codes: [] }
+        byModule.set(mk, m)
+        node.modules.push(m)
+      }
+      m.buttons.push(p)
+      m.codes.push(p.code)
+      node.codes.push(p.code)
+    }
+    out.push(node)
+  }
+  return out
+})
+
+watch(permTree, (tree) => {
+  expanded.value = new Set(tree.map((g) => g.key))
+})
+
+/**
+ * 展开/折叠全部。用 computed 而不是 ref + watch：
+ * 用户手动收起一个目录后，总开关要自动回弹，否则会显示「已全部展开」而实际有折叠项。
+ */
+const expandAll = computed({
+  get: () => permTree.value.length > 0 && permTree.value.every((g) => expanded.value.has(g.key)),
+  set: (v) => {
+    expanded.value = v ? new Set(permTree.value.map((g) => g.key)) : new Set()
+  }
+})
+
+/** 全选/全不选。同样用 computed：手动取消任意一项后总开关自动回弹。 */
+const checkAll = computed({
+  get: () => allPermCodes.value.length > 0 && allPermCodes.value.every((c) => isChecked(c)),
+  set: (v) => {
+    // 只勾叶子按钮，不带「完全控制」：否则每项都显示「含在上项」，看不出真实授权
+    form.permissions = v ? allPermCodes.value.filter((c) => !childrenMap.value[c]) : []
+  }
+})
+
+function isExpanded(key) {
+  return expanded.value.has(key)
 }
 
+function toggleExpand(key) {
+  const next = new Set(expanded.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expanded.value = next
+}
+
+/** 某编码是否实际生效：自己勾了，或被上级「完全控制」包含。 */
+function isChecked(code) {
+  if (form.permissions.includes(code)) return true
+  const parent = parentMap.value[code]
+  return !!parent && form.permissions.includes(parent)
+}
+
+function isAllChecked(codes) {
+  return codes.length > 0 && codes.every((c) => isChecked(c))
+}
+
+function isPartialChecked(codes) {
+  return !isAllChecked(codes) && codes.some((c) => isChecked(c))
+}
+
+/** 被上级「完全控制」包含时置灰：取消它没有意义，取消上级即可。 */
 function isInherited(p) {
   return !!p.parent && form.permissions.includes(p.parent)
 }
 
-/** 勾选上级时连带勾上下级，取消时一起取消；下级单独勾选不受影响。 */
-function onPermChange(p, checked) {
-  const children = childrenMap.value[p.code]
-  if (!children) return
+/** 批量设置一组编码（目录行 / 菜单行）。父子联动关闭时不动下级。 */
+function setCodes(codes, checked) {
   const set = new Set(form.permissions)
-  for (const c of children) {
+  const list = linkage.value
+    ? codes.flatMap((c) => [c, ...(childrenMap.value[c] || [])])
+    : codes
+  for (const c of list) {
     if (checked) set.add(c)
     else set.delete(c)
+  }
+  form.permissions = [...set]
+}
+
+/** 单个按钮勾选。父子联动开启时勾上级会带上下级。 */
+function toggleCode(p, checked) {
+  const set = new Set(form.permissions)
+  if (checked) set.add(p.code)
+  else set.delete(p.code)
+  if (linkage.value && childrenMap.value[p.code]) {
+    for (const c of childrenMap.value[p.code]) {
+      if (checked) set.add(c)
+      else set.delete(c)
+    }
   }
   form.permissions = [...set]
 }
@@ -257,7 +398,9 @@ function openEdit(row) {
       code: row.code,
       name: row.name,
       description: row.description || '',
-      permissions: withChildren(row.permissions || [])
+      // 不展开下級：「完全控制」的子项由 isChecked() 按 parent 推导显示，
+      // 存盘时保留原始编码即可（后端 expand() 会展开）
+      permissions: [...(row.permissions || [])]
     })
   } else {
     Object.assign(form, {
@@ -268,20 +411,15 @@ function openEdit(row) {
       permissions: ['device:read', 'channel:read', 'play:live']
     })
   }
+  // 注意：不要在这里重置 checkAll —— 它是 computed，写它会触发 setter 把权限清空。
+  // 勾选状态由 form.permissions 反推，切角色后自动正确。
   editDialog.value = true
 }
-
-function selectAll() {
-  form.permissions = [...allPermCodes.value]
-}
-
-function clearAll() {
-  form.permissions = []
-}
-
 /** 一键只保留「只读」类权限：新增角色时最常用的一档。 */
 function selectReadonly() {
-  form.permissions = allPermCodes.value.filter((c) => c.endsWith(':read') || c === 'play:live' || c === 'play:record')
+  form.permissions = allPermCodes.value.filter(
+    (c) => c.endsWith(':read') || c === 'play:live' || c === 'play:record'
+  )
 }
 
 async function save() {
@@ -374,92 +512,139 @@ onMounted(loadAll)
 .perm-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--sp-4);
   width: 100%;
   margin-bottom: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--line-200);
 }
 
 .perm-count {
+  margin-left: auto;
   font-size: var(--fs-xs);
   color: var(--ink-600);
 }
 
 /*
- * 权限点分组区。
+ * 权限树：仿若依的「菜单名称 | 按钮权限」两列表格。
  *
- * <p>限高 + 内部滚动：权限点会随功能增加而变多，弹窗不能跟着无限变高，
- * 否则在小屏上「保存」按钮会被顶出视口。
+ * <p>用普通 div 而非 el-table：el-table 的 tree 模式要求固定字段名与 children 结构，
+ * 而这里按钮是行内网格，塞进列模板反而更难对齐。
  */
-.perm-groups {
+.perm-tree {
   width: 100%;
-  max-height: 52vh;
-  overflow-y: auto;
-  padding-right: var(--sp-2);
+  border: 1px solid var(--line-200);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
 }
 
-.perm-group + .perm-group {
-  margin-top: var(--sp-3);
+.perm-tree-head,
+.perm-row {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  align-items: start;
 }
 
-.perm-group-title {
+.perm-tree-head {
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line-200);
   font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--ink-700);
-  margin-bottom: var(--sp-1);
-  padding-bottom: 4px;
-  border-bottom: 1px solid var(--line-200);
 }
 
-/* 让每个权限点占一行：中文名 + 灰色说明，勾选框与文字顶端对齐 */
-.perm-item {
+.perm-tree-head > span {
+  padding: 8px 12px;
+}
+
+/* 限高 + 内部滚动：权限点会随功能增加，弹窗不能跟着无限变高 */
+.perm-tree-body {
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.perm-row {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line-100, var(--line-200));
+}
+
+.perm-row:last-child {
+  border-bottom: 0;
+}
+
+/* 目录行：加底色与加粗，与菜单行拉开层次 */
+.perm-row.is-group {
+  background: var(--bg-sunken);
+  font-weight: 600;
+}
+
+.perm-row .col-menu {
   display: flex;
-  align-items: flex-start;
-  width: 100%;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+  min-height: 30px;
+}
+
+.perm-row.is-module .col-menu {
+  /* 二级菜单缩进一格，与目录区分 */
+  padding-left: 34px;
+}
+
+.perm-row.is-module:hover {
+  background: var(--brand-50, var(--bg-sunken));
+}
+
+/* 按钮网格：每行 3~4 个等宽列。中文名长短不一时也能对齐；
+   最小 118px 是「重置密码」这类 4 字标签不被挤成两行的临界值。 */
+.perm-row .col-btns {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 2px 12px;
+  padding: 4px 12px 6px 0;
+}
+
+.perm-btn {
   height: auto;
   margin-right: 0;
-  padding: 3px 0;
 }
 
-.perm-item :deep(.el-checkbox__label) {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
+.perm-btn :deep(.el-checkbox__label) {
   white-space: normal;
-  line-height: 1.5;
+  line-height: 1.45;
+  font-size: var(--fs-sm);
 }
 
 .perm-name {
   font-size: var(--fs-sm);
 }
 
-.perm-desc {
-  font-size: var(--fs-xs);
-  color: var(--ink-500);
+/* 展开/收起箭头：用 button 而不是 el-icon 直接绑 click —— 后者点在小图标上易失效 */
+.perm-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 2px;
+  padding: 0;
+  color: var(--ink-600);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 
-/*
- * 父子层级：上级是「完全控制」，下级动作缩进一格。
- * 上级勾选时下级置灰并标注「含在上项」，避免出现
- * 「明明没勾删除、实际却能删」的错觉。
- */
-.perm-item.is-parent .perm-name {
-  font-weight: 600;
-}
-
-.perm-item.is-child {
-  padding-left: var(--sp-5);
-}
-
-.perm-item.is-child .perm-name {
-  font-size: var(--fs-xs);
+.perm-caret:hover {
+  color: var(--brand-600);
 }
 
 .perm-inherited {
-  font-size: var(--fs-xs);
+  margin-left: 4px;
+  font-size: 11px;
   color: var(--brand-600);
   border: 1px solid var(--brand-200);
   border-radius: var(--r-full);
-  padding: 0 6px;
+  padding: 0 5px;
   line-height: 1.5;
   white-space: nowrap;
 }

@@ -1,29 +1,15 @@
 /**
  * 菜单种子、组件注册表与侧栏/路由装配。
  *
- * <h3>菜单从哪来</h3>
+ * 菜单树存在后端 gb_menu（D/M/B 三层），侧栏与前端路由都由它决定。本文件的种子只在
+ * 首次部署或 MENU_SEED_VERSION 变化时由 /api/v1/menu/sync 补写缺失行，之后以库为准。
+ * 种子必须放前端：component 是构建产物路径，只有前端知道，后端内置一份必然漂移。
+ * 按钮权限点反过来由后端按 Permissions 常量补写。
  *
- * <p>整棵菜单树存在后端 {@code gb_menu} 表里（目录 D / 菜单 M / 按钮 B 三层），
- * 侧栏与前端路由都由它决定。本文件仍保留一份<b>种子</b>：首次部署或
- * {@link MENU_SEED_VERSION} 变化时，由 {@code /api/v1/menu/sync} 把缺失的
- * 目录/菜单行补写进库。之后一律以库为准 —— 运维在「菜单管理」页改名、挪分组、
- * 新增、删除都能生效，代码不会再覆盖回去。
- *
- * <p>为什么种子必须放前端：{@code component} 是构建产物路径
- * （{@code views/UserView.vue}），清单只有前端知道；后端内置一份必然漂移，
- * 表现为「库里有个页面、前端根本没这个组件」。
- *
- * <p>按钮行（权限标识）反过来由后端按 {@code Permissions} 常量补写 ——
- * 权限点是 Java 侧的唯一真相，前端不该重复定义。
- *
- * <h3>加一个页面要做什么</h3>
- *
- * <p>在 {@link SEED_PAGES} 里加一条，并把 {@link MENU_SEED_VERSION} 改成新值。
- * 这样已部署的环境会在下次打开页面时自动补上这一行（已有行不动）。
- * 只改标题/图标/排序 <b>不用改版本号</b>，直接在「菜单管理」页里改即可。
+ * 加页面：在 SEED_PAGES 加一条并把 MENU_SEED_VERSION 改成新值；只改标题/图标/排序
+ * 不用改版本号，直接在「菜单管理」页改。
  */
 
-/** 分组默认标题（{@code 编码 → 标题}）。库里 D 行的 title 可覆盖。 */
 export const DEFAULT_GROUP_TITLES = {
   'g-monitor': '监控',
   'g-resource': '资源',
@@ -32,7 +18,6 @@ export const DEFAULT_GROUP_TITLES = {
   'g-system': '系统'
 }
 
-/** 可选的图标名（Element Plus 图标组件名，{@code main.js} 已全局注册）。 */
 export const ICON_OPTIONS = [
   'Odometer', 'VideoCamera', 'Monitor', 'List', 'Film', 'Cloudy', 'Bell', 'Share',
   'User', 'Key', 'Document', 'Setting', 'Cpu', 'DataLine', 'Folder', 'Files',
@@ -40,7 +25,7 @@ export const ICON_OPTIONS = [
   'Picture', 'Postcard', 'Ticket', 'TrendCharts', 'View', 'Warning'
 ]
 
-/** 免登录的对外页面（不进菜单表，也不参与权限过滤）。 */
+/* 免登录的对外页面（不进菜单表，也不参与权限过滤）。 */
 export const publicRoutes = [
   {
     path: '/login',
@@ -56,29 +41,15 @@ export const publicRoutes = [
     meta: { public: true, title: '录像分享' }
   },
   {
-    /*
-     * 直播分享页：免登录，对齐 LiveGBS 的 play.html。
-     *
-     * <p>路径用 {@code /play} 而不是 {@code /share/live}：前者与 CMS 的
-     * {@code play.html} 语义一致（「播放某个通道」），也不会和录像分享
-     * {@code /share/:token} 的动态段混淆 —— 那会让 {@code /share/live}
-     * 被当成「令牌为 live 的录像分享」。
-     *
-     * <p>参数：{@code ?serial=<设备编码>&code=<通道编码>}。
-     */
+    // 直播分享页：免登录，路径对齐 CMS 的 play.html（避免与 /share/:token 动态段混淆）
     path: '/play',
     name: 'play',
     component: () => import('@/views/LiveShareView.vue'),
     meta: { public: true, title: '直播分享' }
   },
   {
-    /*
-     * iframe 嵌入测试页：免登录。
-     *
-     * <p>免登录是刻意的：这一页要在「别人的机器、别人的浏览器」上打开，
-     * 用来判断「嵌到我站里能不能播」。要登录就等于多一道门槛，
-     * 而它本身不含任何敏感数据 —— 通道编码由使用者自己填。
-     */
+    // iframe 嵌入测试页：免登录是刻意的，它要在别人的机器上判断「嵌到我站里能不能播」，
+    // 且不含敏感数据（通道编码由使用者自己填）
     path: '/iframe-test',
     name: 'iframeTest',
     component: () => import('@/views/IframeTestView.vue'),
@@ -87,12 +58,8 @@ export const publicRoutes = [
 ]
 
 /**
- * 页面清单种子。
- *
- * <p>字段对应 {@code gb_menu} 的 M 行：{@code name} → {@code menu_key}（也是路由 name），
- * {@code group} → {@code parent_key}，{@code perm} → {@code perms}。
- *
- * <p>{@code hidden: true} 的页面不进侧栏，但照常注册路由（直连 URL 可打开，仍受权限守卫管辖）。
+ * 页面清单种子。字段对应 gb_menu 的 M 行：name → menu_key（也是路由 name）、
+ * group → parent_key、perm → perms。hidden 的页面不进侧栏，但照常注册路由。
  */
 export const SEED_PAGES = [
   { name: 'dashboard', path: '/dashboard', component: 'views/DashboardView.vue', title: '总览', icon: 'Odometer', group: 'g-monitor', perm: 'device:read' },
@@ -114,19 +81,14 @@ export const SEED_PAGES = [
 ]
 
 /**
- * 种子版本。
- *
- * <p><b>只有在 {@link SEED_PAGES} / {@link DEFAULT_GROUP_TITLES} 增删条目时才需要改</b>：
- * 版本一致时 {@code /menu/sync} 是空操作，不会把运维删掉的行种回来。
- * 改标题、图标、排序、分组请直接在「菜单管理」页操作，不要动这里。
+ * 种子版本。只在 SEED_PAGES / DEFAULT_GROUP_TITLES 增删条目时改：版本一致时
+ * /menu/sync 是空操作，不会把运维删掉的行种回来。改标题/图标/排序请在菜单管理页操作。
  */
 export const MENU_SEED_VERSION = '2026-11-01.2'
 
 /**
- * 把种子摊平成 {@code gb_menu} 行（目录 + 菜单，不含按钮）。
- *
- * <p>{@code sortOrder} 按<b>同级</b>从 1 开始编号（目录 1..n，每个目录下的菜单各自 1..n）：
- * 界面上直接显示这个数字，用全局序号（0/10/100）会让人以为排序跳着用。
+ * 把种子摊平成 gb_menu 行（目录 + 菜单，不含按钮）。
+ * sortOrder 按同级从 1 编号：界面直接显示这个数字，全局序号会让人以为排序跳着用。
  */
 export function buildSeedItems() {
   const dirs = Object.entries(DEFAULT_GROUP_TITLES).map(([code, title], idx) => ({
@@ -156,32 +118,28 @@ export function buildSeedItems() {
   return [...dirs, ...pages]
 }
 
-/** 组件注册表：{@code views/Xxx.vue → () => import(...)}（构建期静态分析仍然有效）。 */
 const viewModules = import.meta.glob('../views/*.vue')
 
-/** 「菜单管理」里可选的组件路径。 */
 export const COMPONENT_OPTIONS = Object.keys(viewModules)
   .map((k) => k.replace('../', ''))
   .sort()
 
-/** 组件路径 → 动态 import；找不到返回 {@code null}（调用方跳过该路由）。 */
+/** 组件路径 → 动态 import；找不到返回 null（调用方跳过该路由）。 */
 export function resolveView(component) {
   if (!component) return null
   return viewModules['../' + component] || null
 }
 
-/** 同级排序：先按 sortOrder，再按主键保证稳定。 */
 function bySort(a, b) {
   const d = (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
   return d !== 0 ? d : String(a.menuKey).localeCompare(String(b.menuKey))
 }
 
-/** 是否可用（停用节点既不进侧栏也不注册路由）。 */
 function enabled(row) {
   return Number(row?.status ?? 0) !== 1
 }
 
-/** 行数组 → {@code parentKey → 子行[]}。 */
+// 行数组 → parentKey → 子行[]
 function childrenOf(rows) {
   const map = new Map()
   rows.forEach((r) => {
@@ -193,11 +151,10 @@ function childrenOf(rows) {
 }
 
 /**
- * 生成侧栏菜单（按当前账号权限过滤）。
+ * 生成侧栏菜单（按权限过滤）。
  *
- * @param {object} auth auth store（提供 {@code can(perm)}）
- * @param {Array<object>} items {@code gb_menu} 行
- * @returns {Array<{label: string, items: Array<{key: string, path: string, title: string, icon: string}>}>}
+ * @param {object} auth auth store（提供 can(perm)）
+ * @param {Array<object>} items gb_menu 行
  */
 export function buildMenu(auth, items) {
   const rows = items || []
@@ -219,13 +176,10 @@ export function buildMenu(auth, items) {
 }
 
 /**
- * 生成动态路由（供 {@code router.addRoute} 注册）。
+ * 生成动态路由（供 router.addRoute 注册）。组件缺失时打日志跳过，
+ * 不让一行脏数据把整个应用弄白屏。
  *
- * <p>只有「菜单行 + 正常状态 + 组件能解析」的节点才会注册；组件缺失时打日志跳过，
- * 而不是让整个应用因为一行脏数据白屏。
- *
- * @param {Array<object>} items {@code gb_menu} 行
- * @returns {Array<object>} vue-router 路由记录
+ * @param {Array<object>} items gb_menu 行
  */
 export function buildRoutes(items) {
   const rows = items || []

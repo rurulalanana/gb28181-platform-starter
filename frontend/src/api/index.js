@@ -1,8 +1,18 @@
 import http, { get, post } from './http'
 
 /**
- * 系统与用户接口（`/api/v1/*`）。
+ * 行为验证码（/api/v1/captcha/*，tianai-captcha）。
+ *
+ * <p>走项目统一信封，拦截器已拆出 data，这里直接拿到图片对象 / {@code {id}}。
  */
+export const captchaApi = {
+  /** 本次部署是否要验证码（运维关掉开关后前端就不再弹滑块）。 */
+  required: () => get('/captcha/required'),
+  gen: (type = 'SLIDER') => post('/captcha/gen', { type }),
+  check: (payload) => post('/captcha/check', null, payload)
+}
+
+/** 系统与用户接口（/api/v1/*）。 */
 export const systemApi = {
   login: (payload) => post('/login', null, payload),
   logout: () => get('/logout'),
@@ -18,16 +28,7 @@ export const metricsApi = {
   get: () => get('/system/metrics')
 }
 
-/**
- * 运行时配置接口（`/api/v1/config/*`）。
- *
- * <p>这些配置改完<b>立即生效，不需要重启</b>：
- * 保存 → 写数据库 + 更新内存 → 定时任务下一次执行就按新值跑；
- * 需要推送到媒体层的项（分片时长、无人观看时长）会同步 apply。
- *
- * <p>语义是「数据库优先、application.yml 兜底」：
- * 库里没有该 key 时用 yml 的值，保存过则覆盖，`reset` 回落 yml。
- */
+/** 运行时配置（/api/v1/config/*）：保存即生效，数据库优先、yml 兜底，reset 回落 yml。 */
 export const configApi = {
   list: () => get('/config/list'),
   save: (key, value) => post('/config/save', { key, value }),
@@ -35,13 +36,8 @@ export const configApi = {
 }
 
 /**
- * 接入控制（黑白名单）接口（`/api/v1/acl/*`）。
- *
- * <p>保存后立即生效：服务端维护一份不可变规则快照，增删后整体替换，
- * SIP 信令线程读到的永远是一份完整规则，不需要重启。
- *
- * <p>判定顺序是**先黑后白**：命中黑名单直接拒绝（白名单不能给它开后门），
- * 然后「有白名单但未命中」也拒绝。白名单为空 = 不限制来源。
+ * 接入控制（/api/v1/acl/*）：保存即用不可变规则快照整体替换。
+ * 判定先黑后白；白名单为空=不限制来源。
  */
 export const aclApi = {
   list: (params) => get('/acl/list', params),
@@ -50,13 +46,8 @@ export const aclApi = {
 }
 
 /**
- * HTTPS 证书管理接口（`/api/v1/tls/*`）。
- *
- * TLS 在 nginx 终结（应用只监听内网端口），所以这里的 install 做的是
- * 「校验证书 → 落盘 → 生成 nginx 片段 → nginx -t → reload」。
- * 校验不通过时不会 reload，站点保持原状。
- *
- * `<p>`注意私钥只会单向写入，任何接口都不会读回。
+ * HTTPS 证书（/api/v1/tls/*）：TLS 在 nginx 终结。install = 校验 → 落盘 → 生成片段 → nginx -t → reload；
+ * 校验不过不 reload。私钥只单向写入，任何接口都不读回。
  */
 export const tlsApi = {
   status: () => get('/tls/status'),
@@ -90,6 +81,23 @@ export const deviceApi = {
   /** 读预置位列表；queriedAt 为 null 表示设备还没应答。 */
   presetList: (serial, code) => get('/device/presetlist', { serial, code }),
   remove: (serial) => post('/device/remove', { serial }),
+  /**
+   * 纳管一台 SDK 直连设备（大华 NetSDK）。
+   *
+   * <p>与国标设备的差别：国标由设备 REGISTER 推上来，平台从不主动建；
+   * SDK 设备不会注册，必须录入地址与凭据。纳管后就是普通 gb_device 行
+   * （source=dahua），通道/点播/云台/录像接口照旧可用。
+   */
+  addDahua: (params) => post('/device/adddahua', params),
+  /**
+   * 局域网搜索大华设备（SDK 广播发现）。
+   *
+   * <p>只在同一广播域有效，跨三层收不到应答——这是协议决定的，不是平台缺陷。
+   * 结果不落库：发现到设备后仍需用户填账号密码，由 {@link addDahua} 完成纳管。
+   */
+  discover: (params) => get('/device/discover', params),
+  /** 探测 SDK 直连设备并同步通道目录（同步返回，不像国标要等 Catalog 应答）。 */
+  refreshSdk: (serial) => post('/device/refreshsdk', { serial }),
   setName: (params) => post('/device/setname', params),
   setInfo: (params) => post('/device/setinfo', params),
   /** 切换流传输模式（UDP/TCP，仅影响后续点播）。 */
@@ -148,12 +156,7 @@ export const cloudRecordApi = {
   removeDaily: (params) => post('/cloudrecord/removedaily', params),
   setImportant: (params) => post('/cloudrecord/setimportant', params),
   share: (params) => post('/cloudrecord/share', params),
-  /**
-   * 服务端抓拍：拉流 + ffmpeg 解码，返回快照地址。
-   *
-   * <p>超时给到 60 秒：级联设备收到 INVITE 后可能几十秒才开始推流，
-   * 服务端要等流上线才能解码。
-   */
+  // 服务端抓拍（60s：级联设备可能几十秒才推流）
   snapGrab: (params) => post('/cloudrecord/snap/grab', params, undefined, 60000),
   download: (serial, code, period) => get(`/cloudrecord/download/${serial}/${code}/${period}`),
   video: (operate, serial, code, starttime, endtime) =>
@@ -202,6 +205,93 @@ export const controlApi = {
   targetTrack: (params) => post('/control/targettrack', params)
 }
 
+/**
+ * 大华 SDK 直连设备的扩展能力（`/api/v1/dahua/*`）。
+ *
+ * <p>相机参数走「能力位 → 动态表单」：前端不硬编码参数名，
+ * 按 {@code capabilities} 返回的 group/type/options 渲染控件。
+ */
+export const dahuaApi = {
+  /** 参数能力位：每项带 group / type / options / min / max / available / value。 */
+  cameraCapabilities: (params) => get('/dahua/cameraconfig/capabilities', params),
+  /** 读全部参数当前值（key → value）。 */
+  cameraRead: (params) => get('/dahua/cameraconfig', params),
+  /** 写参数：body 是 `{brightness: 60, viewMode: 1}` 这样的键值对。 */
+  cameraWrite: (params, values) => post('/dahua/cameraconfig', params, values),
+  /** 设备录像计划。 */
+  recordPlan: (params) => get('/dahua/record/plan', params),
+  setRecordPlan: (params) => post('/dahua/record/plan', params),
+
+  // ---------- 云台扩展：动作（SDK）与配置（设备 CGI）是两套入口 ----------
+
+  /**
+   * 云台动作。
+   *
+   * <p>`action` 取值：
+   * cruise-add / cruise-remove / cruise-run、
+   * pattern-record / pattern-record-stop / pattern-run / pattern-delete、
+   * limit-left / limit-right（线扫左右边界，SDK）、
+   * scan-limit-left / scan-limit-right（线扫左右边界，RPC2）、
+   * limit-up / limit-down（旋转限制上下限位，RPC2）、
+   * line-scan、pan-cruise、reboot。
+   */
+  ptzAction: (params) => post('/dahua/ptz/action', params),
+  /** 云台配置快照：巡航组 / 线扫 / 巡迹 / 速度 / 空闲动作 / 定时任务 / 限位 / 当前运行。 */
+  ptzConfig: (params) => get('/dahua/ptz/config', params),
+  /** 保存一条巡航线（整条覆盖，body: {route, name, enable, points:[{preset,stay,speed}]}）。 */
+  saveTour: (params, tour) => post('/dahua/ptz/tour', params, tour),
+  /** 保存云台速度（body: {ptzSpeed, patternSpeed}，取值 0~4）。 */
+  savePtzSpeed: (params, speed) => post('/dahua/ptz/speed', params, speed),
+  // 当前运行状态（只读 PtzMovement 一项），给「执行」开关轮询用
+  ptzRunning: (params) => get('/dahua/ptz/running', params),
+  // 水平旋转速度（设备 AutoPan.PanSpeed，1~8）——与上面的 PtzSpeed 是两个独立字段
+  saveAutoPan: (params, cfg) => post('/dahua/ptz/autopan', params, cfg),
+  /** 保存线扫参数（body: {scanId, speed}，速度 0~7）。 */
+  saveScan: (params, body) => post('/dahua/ptz/scan', params, body),
+  /** 保存巡迹名称（body: {patternId, name}）。设备没有巡迹停留时间字段。 */
+  savePattern: (params, body) => post('/dahua/ptz/pattern', params, body),
+  /** 保存旋转限制开关（body: {enable, horizontalEnable}）。 */
+  saveLimit: (params, body) => post('/dahua/ptz/limit', params, body),
+  /** 保存空闲动作（IdleMotion，body: {enable, function, timerMinutes, presetId/tourId/patternId/scanId}）。 */
+  saveIdle: (params, body) => post('/dahua/ptz/idle', params, body),
+  /** 保存定时任务（PtzAutoMovement，body 见后端 AutoMovementRequest）。 */
+  saveAutoMovement: (params, body) => post('/dahua/ptz/automovement', params, body),
+  // 开机动作（/dahua/ptz/poweron）已随后端一并移除：设备没有「上电动作」配置项。
+
+  // ---------- 喊话 / 双工对讲 ----------
+
+  /**
+   * 开始对讲。返回 `{talkId, sampleRate, channels, format, wsUrl, owner}`。
+   *
+   * <p>采样率/格式必须按返回的实现，别硬编码：大华对讲固定 8 kHz/16 bit 单声道。
+   */
+  talkStart: (params) => post('/dahua/talk/start', params),
+  /**
+   * 送一帧裸 PCM（8 kHz/16 bit/单声道）。
+   *
+   * <p>body 直接是 ArrayBuffer：用 octet-stream 而不是 JSON/base64 ——
+   * 喊话每秒约 16 KB，base64 会凭空多 33%，且每次都要编解码。
+   */
+  talkSend: (talkId, arrayBuffer) =>
+    http.post('/dahua/talk/send', arrayBuffer, {
+      params: { talkId },
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: 5000
+    }),
+  talkStop: (talkId) => post('/dahua/talk/stop', { talkId }),
+  /** 设备当前是否被占用（`{busy, owner}`），进面板时查一次用于禁用按钮。 */
+  talkBusy: (params) => get('/dahua/talk/busy', params),
+
+  // ---------- 主动注册：设备连上来了，但缺账号密码 ----------
+
+  /** 注册表里的设备（`managed=false` 的才需要用户补凭据）。 */
+  registerList: () => get('/dahua/register/list'),
+  /** 用用户输入的账号密码纳管一台注册设备。 */
+  adoptRegister: (params) => post('/dahua/register/adopt', params),
+  /** 从注册表移除（不纳管，设备再注册时还会出现）。 */
+  ignoreRegister: (params) => post('/dahua/register/ignore', params)
+}
+
 /** 报警接口（`/api/v1/alarm/*`）。 */
 export const alarmApi = {
   list: (params) => get('/alarm/list', params),
@@ -217,11 +307,7 @@ export const opLogApi = {
 }
 
 /**
- * 菜单管理（`/api/v1/menu/*`）。
- *
- * <p>整棵菜单树（目录 D / 菜单 M / 按钮 B）存在 `gb_menu` 里：
- * `config` 任何登录用户可读（渲染侧栏、注册路由都要用），
- * 写入需 `menu:write`，`sync` 是幂等的种子补齐（所有人可调）。
+ * 菜单管理（/api/v1/menu/*）：config 登录可读；写入需 menu:write；sync 幂等补齐种子。
  */
 export const menuApi = {
   config: () => get('/menu/config'),
@@ -234,12 +320,7 @@ export const menuApi = {
     post('/menu/delete', { menu_key: menuKey, cascade: cascade ? 'true' : 'false' })
 }
 
-/**
- * 角色与权限点接口（`/api/v1/role/*`，需 user:read / user:write）。
- *
- * <p>权限点目录（{@code permissions}）来自后端常量，前端用它渲染勾选框 ——
- * 这样新增权限点只需改后端一处，页面自动出现。
- */
+/** 角色与权限点（/api/v1/role/*）：权限点目录来自后端常量，新增只改后端一处。 */
 export const roleApi = {
   list: () => get('/role/list'),
   permissions: () => get('/role/permissions'),
@@ -271,18 +352,18 @@ export const userApi = {
   remove: (id) => post('/user/remove', { id }),
   setEnable: (params) => post('/user/setenable', params),
   resetPassword: (params) => post('/user/resetpassword', params),
-  setPassword: (params) => post('/user/setpassword', params)
+  setPassword: (params) => post('/user/setpassword', params),
+  // API 密钥：自助管理，不需要 user:write。generate 返回明文，仅此一次
+  apiKey: () => get('/user/apikey'),
+  generateApiKey: () => post('/user/apikey/generate'),
+  revokeApiKey: () => post('/user/apikey/revoke')
 }
 
 /** WebRTC 接口（`/api/v1/webrtc/*`，免登录）。 */
 export const webrtcApi = {
   /**
-   * 交换 SDP。
-   *
-   * 后端是 `@RequestBody String offerSdp`，期望 body 就是**纯文本 SDP**。
-   * axios 对字符串 body 默认发 `application/x-www-form-urlencoded`，
-   * 且会做表单转义（SDP 里的 `=`、`\r\n` 会被破坏），因此必须显式指定
-   * `Content-Type: application/sdp` 并禁止 axios 做任何变换。
+   * 交换 SDP。后端是 @RequestBody String，期望 body 是纯文本 SDP；
+   * 必须显式 application/sdp 并禁止 axios 表单转义（否则 = 与 \r\n 会被破坏）。
    */
   play: (stream, peerId, offerSdp) =>
     http.post('/webrtc/play', offerSdp, {

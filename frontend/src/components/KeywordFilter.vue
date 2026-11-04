@@ -1,8 +1,5 @@
 <template>
-  <!--
-    聚合搜索框：一个输入框同时匹配多个字段（本地过滤，数据量小无需后端分页查询）。
-    用法与 el-input 一致，v-model 绑定关键词即可。
-  -->
+  <!-- 聚合搜索框：一个输入框本地匹配多个字段（数据量小，无需后端分页查询） -->
   <el-input
     v-model="keyword"
     class="keyword-filter"

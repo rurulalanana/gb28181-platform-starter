@@ -1,16 +1,9 @@
 <template>
   <!--
-    系统设置：左侧分区导航 + 右侧内容区。
-
-    <p><b>为什么改成这种结构</b>：原先是四张卡片竖着堆，每张卡内部又各用一套
-    版式（el-descriptions / el-table / hint 网格），视觉跳且信息密度低；
-    说明文字全部平铺在正文里，滚动一屏全是灰字，真正要改的配置项反而找不着。
-
-    <p>现在：左侧分区固定不随内容滚动，右侧一次只呈现一个主题；
-    所有解释性文字收进问号 tooltip（{@code HelpTip}），正文只留「标签 + 值 + 操作」。
+    系统设置：左侧分区导航 + 右侧内容区。左侧固定不随内容滚动，一次只呈现一个主题；
+    解释性文字收进 HelpTip，正文只留「标签 + 值 + 操作」。
   -->
   <div class="settings">
-    <!-- ==================== 左侧分区导航 ==================== -->
     <aside class="settings-side">
       <div class="side-head">
         <div class="side-title">系统设置</div>
@@ -38,9 +31,7 @@
       <div class="side-foot mono">接口 v{{ server.interfaceVersion || '—' }}</div>
     </aside>
 
-    <!-- ==================== 右侧内容 ==================== -->
     <div class="settings-body">
-      <!-- ---------- 运行概览 ---------- -->
       <section v-show="active === 'overview'" class="sec">
         <header class="sec-head">
           <div>
@@ -52,7 +43,7 @@
           </el-button>
         </header>
 
-        <!-- 读数条：设备 / 通道在线情况 / 运行时长 -->
+        <!-- 读数条 -->
         <div class="kpi-grid">
           <div class="kpi">
             <div class="kpi-label">
@@ -115,9 +106,8 @@
           <div class="panel-head">
             <span class="panel-title">媒体服务</span>
             <!--
-              标注浏览器默认走哪条通路。原来写的是「WebSocket-FLV（默认）」，
-              但默认协议早已改为 WebRTC（见 resolvePlayUrls 的 LIVE_DEFAULT_PROTOCOL），
-              这里一并改正 —— 否则排障时会照着这条去查 FLV 端口。
+              默认协议是 WebRTC（见 resolvePlayUrls 的 LIVE_DEFAULT_PROTOCOL）。
+              曾错标为 WebSocket-FLV，排障时会照着去查 FLV 端口。
             -->
             <el-tag size="small" effect="plain" type="success">默认 WebRTC</el-tag>
           </div>
@@ -133,7 +123,6 @@
         </div>
       </section>
 
-      <!-- ---------- 服务运维 ---------- -->
       <section v-show="active === 'service'" class="sec">
         <header class="sec-head">
           <div>
@@ -184,7 +173,6 @@
         </div>
       </section>
 
-      <!-- ---------- 运行时配置 ---------- -->
       <section v-show="active === 'config'" class="sec">
         <header class="sec-head">
           <div>
@@ -223,9 +211,6 @@
                   <HelpTip :text="row.description" />
                 </span>
                 <span class="cfg-meta">
-                  <!--
-                    范围只对数值项有意义；布尔/字符串显示「范围 0 ~ 0」纯属噪音。
-                  -->
                   <template v-if="row.type === 'INT' || row.type === 'LONG'">
                     <span class="cfg-range" :class="{ 'is-bad': isInvalid(row) }">
                       范围 {{ fmtNum(row.min) }} ~ {{ fmtNum(row.max) }} {{ cfgUnit(row.key) }}
@@ -239,12 +224,7 @@
               </div>
 
               <div class="cfg-field">
-                <!--
-                  按类型分流渲染：
-                  - BOOLEAN → 开关（让人填 "true" 字符串是荒谬的）
-                  - 密码项 → 掩码输入
-                  - 其余 → 数字/文本输入
-                -->
+                <!-- BOOLEAN → 开关；密码项 → 掩码；其余 → 数字/文本 -->
                 <el-switch
                   v-if="row.type === 'BOOLEAN'"
                   :model-value="isOn(row)"
@@ -268,7 +248,6 @@
                 >
                   <template v-if="cfgUnit(row.key)" #append>{{ cfgUnit(row.key) }}</template>
                 </el-input>
-                <!-- 越界时直接在输入框下方说明，不依赖弹消息 -->
                 <div v-if="isInvalid(row)" class="cfg-error">
                   {{ outOfRangeMsg(row) }}
                 </div>
@@ -299,7 +278,6 @@
         <p v-if="!cfgGroups.length && !cfgLoading" class="empty-hint">暂无可调整的运行时配置</p>
       </section>
 
-      <!-- ---------- 接入控制（黑白名单） ---------- -->
       <section v-show="active === 'acl'" class="sec">
         <header class="sec-head">
           <div>
@@ -316,9 +294,8 @@
         </header>
 
         <!--
-          判定顺序写出来而不是只放进 tooltip：
-          黑白名单的语义容易凭直觉猜错（尤其「白名单为空」这一条），
-          猜错的结果是所有设备掉线或全部放行，代价太大。
+          判定顺序写在界面上而不是只放 tooltip：黑白名单语义容易凭直觉猜错
+          （尤其「白名单为空」），猜错就会所有设备掉线或全部放行。
         -->
         <div class="acl-flow">
           <span class="acl-step">
@@ -419,7 +396,6 @@
         </div>
       </section>
 
-      <!-- ---------- HTTPS 与国密 ---------- -->
       <section v-show="active === 'tls'" class="sec">
         <header class="sec-head">
           <div>
@@ -432,7 +408,6 @@
           <el-button text :icon="Refresh" :loading="tlsLoading" @click="loadTls">刷新</el-button>
         </header>
 
-        <!-- 当前状态 -->
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">当前状态</span>
@@ -469,9 +444,8 @@
               </span>
             </div>
             <!--
-              检测结果单独展示：这是「本机 curl 通、浏览器打不开」的唯一解释来源，
-              必须把「安全组没放通」这个结论写在台面上，
-              否则运维会先去怀疑证书和 nginx，绕一大圈。
+              单独展示检测结果：本机 curl 通、浏览器打不开时，结论就在这里，
+              不写出来运维会先去怀疑证书和 nginx。
             -->
             <div v-if="tlsProbe" class="info-row">
               <span class="info-label">公网检测</span>
@@ -549,7 +523,6 @@
           </div>
         </div>
 
-        <!-- 安装 / 更新 -->
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">安装或更新证书</span>
@@ -592,10 +565,7 @@
               >
                 校验并启用
               </el-button>
-              <!--
-                改完端口后用它：只重写 nginx 配置，不需要把私钥再贴一遍。
-                私钥经手次数越多泄漏风险越大，而证书文件本来就在磁盘上。
-              -->
+              <!-- 改完端口用它：只重写 nginx 配置，不必再贴一次私钥（私钥经手越多泄漏风险越大） -->
               <el-button
                 v-if="tlsStatus.hasCertificate"
                 :loading="tlsRegenerating"
@@ -617,10 +587,7 @@
               </span>
             </div>
 
-            <!--
-              端口提示：国内云服务器常因备案限制用不了 443，
-              所以要明确告诉运维「端口在哪改」，而不是让对方去翻文档。
-            -->
+            <!-- 国内云服务器常因备案用不了 443，需明确告诉运维端口在哪改 -->
             <el-alert
               v-if="tlsStatus.hasCertificate && !tlsStatus.configured"
               type="info"
@@ -642,7 +609,6 @@
           </div>
         </div>
 
-        <!-- 国密就绪度 -->
         <div class="panel">
           <div class="panel-head">
             <span class="panel-title">GB/T 35114 国密就绪度</span>
@@ -717,7 +683,6 @@
         </div>
       </section>
 
-      <!-- ---------- 对象存储 ---------- -->
       <section v-show="active === 'storage'" class="sec">
         <header class="sec-head">
           <div>
@@ -767,7 +732,6 @@
         </div>
       </section>
 
-      <!-- ---------- 账号安全 ---------- -->
       <section v-show="active === 'security'" class="sec">
         <header class="sec-head">
           <div>
@@ -809,10 +773,62 @@
             </el-form-item>
           </el-form>
         </div>
+
+        <!--
+          API 密钥：给业务平台 / 脚本 / Postman 用。
+          浏览器登录要拖滑块，机器做不了，所以给每个账号一把可撤销的密钥。
+          明文只在生成时显示一次 —— 库里只存 SHA-256，服务端也拿不回来。
+        -->
+        <div class="panel panel--narrow">
+          <div class="panel-head">
+            <span class="panel-title">
+              API 密钥
+              <HelpTip text="供业务平台 / 脚本调用。登录时把密钥放进 X-Api-Key 请求头即可，不需要密码与验证码。生成后请立刻复制保存，页面不会再次显示明文。" />
+            </span>
+          </div>
+
+          <div class="apikey-body">
+            <template v-if="!apiKeyState.enabled">
+              <p class="apikey-tip">尚未生成。生成后可用于接口对接，随时可撤销。</p>
+            </template>
+            <template v-else>
+              <div class="apikey-row">
+                <span class="apikey-label">当前密钥</span>
+                <span class="mono">{{ apiKeyState.hint }}••••••••••••••••</span>
+              </div>
+              <div class="apikey-row">
+                <span class="apikey-label">生成时间</span>
+                <span>{{ apiKeyState.createdAt || '—' }}</span>
+              </div>
+            </template>
+
+            <!-- 明文只在这一块出现，刷新/关闭后不再可见 -->
+            <div v-if="newApiKey" class="apikey-new">
+              <div class="apikey-new-head">请立即复制，关闭后无法再次查看</div>
+              <div class="apikey-new-body">
+                <input class="apikey-new-input mono" :value="newApiKey" readonly @focus="$event.target.select()" />
+                <el-button size="small" @click="copyApiKey">复制</el-button>
+              </div>
+            </div>
+
+            <div class="apikey-actions">
+              <el-button
+                :type="apiKeyState.enabled ? 'default' : 'primary'"
+                :loading="apiKeyBusy"
+                @click="generateApiKey"
+              >
+                {{ apiKeyState.enabled ? '重新生成' : '生成密钥' }}
+              </el-button>
+              <el-button v-if="apiKeyState.enabled" :loading="apiKeyBusy" @click="revokeApiKey">
+                撤销
+              </el-button>
+              <span class="form-hint">重新生成或撤销后，旧密钥立即失效</span>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
 
-    <!-- ---------- 添加接入控制规则 ---------- -->
     <el-dialog
       v-model="aclDialog"
       title="添加接入控制规则"
@@ -891,7 +907,7 @@ import {
   RefreshRight,
   Setting
 } from '@element-plus/icons-vue'
-import { aclApi, configApi, systemApi, tlsApi, webrtcApi } from '@/api'
+import { aclApi, configApi, systemApi, tlsApi, userApi, webrtcApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import HelpTip from '@/components/HelpTip.vue'
 
@@ -899,30 +915,18 @@ const auth = useAuthStore()
 const router = useRouter()
 
 /**
- * 能否修改系统配置。
- *
- * <p>{@code system:read} 只够进来看看（运行概览、指标），
- * 改配置 / 装证书 / 重启服务都要 {@code system:write}。
- * 这两个权限点刻意分开：排障时经常需要「让人看得见状态但动不了」。
+ * 改配置 / 装证书 / 重启服务都需要 system:write；system:read 只够看概览。
+ * 两个权限点刻意分开：排障时常需「让人看得见状态但动不了」。
  */
 const canWrite = computed(() => auth.can('system:write'))
-/** 改运行时配置（按钮级）。 */
 const canConfig = computed(() => auth.can('system:config'))
-/** 维护黑白名单（按钮级）。 */
 const canAcl = computed(() => auth.can('system:acl'))
-/** 维护 TLS 证书（按钮级）。 */
 const canTls = computed(() => auth.can('system:tls'))
-/** 重启服务（按钮级）。 */
 const canRestart = computed(() => auth.can('system:restart'))
 
 /* ==================== 分区导航 ==================== */
 
-/**
- * 分区定义。
- *
- * <p>图标用 {@code markRaw} 包：组件对象一旦被 Vue 转成响应式代理，
- * 渲染时会带一堆无意义的依赖追踪开销（开发环境还会告警）。
- */
+/** 图标用 markRaw 包：组件对象被转成响应式代理会带来无意义的依赖追踪开销（开发环境还告警）。 */
 const SECTIONS = [
   { key: 'overview', label: '运行概览', icon: markRaw(Monitor) },
   { key: 'service', label: '服务运维', icon: markRaw(RefreshRight) },
@@ -933,10 +937,7 @@ const SECTIONS = [
   { key: 'security', label: '账号安全', icon: markRaw(Lock) }
 ]
 
-/** 当前分区。 */
 const active = ref('overview')
-
-/* ==================== 服务器信息 ==================== */
 
 const saving = ref(false)
 const restarting = ref(false)
@@ -945,7 +946,6 @@ const pwd = reactive({ oldpassword: '', newpassword: '', confirm: '' })
 const server = computed(() => auth.serverInfo || {})
 const mediaIp = ref('')
 
-/** 基础信息（概览页）。 */
 const basicRows = computed(() => {
   const info = server.value
   return [
@@ -973,7 +973,6 @@ const basicRows = computed(() => {
   ]
 })
 
-/** 媒体服务各端口（概览页）。 */
 const mediaRows = computed(() => {
   const info = server.value
   return [
@@ -1010,7 +1009,6 @@ const mediaRows = computed(() => {
   ]
 })
 
-/** 接口信息（服务运维页）。 */
 const apiRows = computed(() => {
   const info = server.value
   return [
@@ -1060,7 +1058,6 @@ function ossParamDesc(key) {
   return ''
 }
 
-/** 复制文本到剪贴板。 */
 async function copy(text) {
   try {
     await navigator.clipboard.writeText(text)
@@ -1088,21 +1085,13 @@ async function loadServer() {
   }
 }
 
-/* ==================== 运行时配置 ==================== */
-
 const cfgLoading = ref(false)
 const cfgSaving = ref('')
-/** 后端返回的全部配置项。 */
 const cfgItems = ref([])
 /** 编辑中的草稿（key → 值），与 cfgItems 分离，避免未保存就被刷新覆盖。 */
 const cfgDraft = reactive({})
 
-/**
- * 分组展示顺序与中文名。
- *
- * <p>顺序固定而不是按后端返回顺序：分类应该稳定，
- * 不然后端加一个配置项就会让分组顺序跳变。
- */
+/** 分组顺序固定而非按后端返回顺序，否则后端加一个配置项分组顺序就会跳变。 */
 const CFG_GROUPS = [
   { key: 'sip', label: '信令接入' },
   { key: 'device', label: '设备接入与采集' },
@@ -1112,7 +1101,6 @@ const CFG_GROUPS = [
   { key: 'data', label: '数据保留' }
 ]
 
-/** 实际有配置项的分组（后端未来可能新增分组）。 */
 const cfgGroups = computed(() => {
   const present = new Set(cfgItems.value.map((i) => i.group))
   const known = CFG_GROUPS.filter((g) => present.has(g.key))
@@ -1129,12 +1117,7 @@ function cfgRowsOf(group) {
   return cfgItems.value.filter((i) => i.group === group)
 }
 
-/**
- * 配置项的中文名。
- *
- * <p>后端只给 key 和长说明，标题由前端映射：说明文字会随实现变化，
- * 而「录像保留天数」这种标题应该稳定，便于运维快速定位。
- */
+/** 后端只给 key 和长说明，标题由前端映射：说明会随实现变化，而「录像保留天数」应稳定。 */
 const CFG_LABELS = {
   'sip.password': '设备统一接入密码',
   'device.offline-seconds': '设备离线判定阈值',
@@ -1168,12 +1151,7 @@ function cfgLabel(key) {
 }
 
 /**
- * 输入框右侧的单位后缀。
- *
- * <p>只按 key 后缀映射常见单位，其余留空 —— 乱标单位比不标更容易误导。
- *
- * @param {string} key 配置键
- * @returns {string}
+ * 输入框右侧的单位后缀。只按 key 后缀映射，其余留空 —— 乱标单位比不标更易误导。
  */
 function cfgUnit(key) {
   if (key.endsWith('-ms')) return '毫秒'
@@ -1184,38 +1162,25 @@ function cfgUnit(key) {
   return ''
 }
 
-/** 草稿与已保存值是否不同（决定「保存」是否可点）。 */
 function isDirty(row) {
   return String(cfgDraft[row.key] ?? '').trim() !== String(row.value ?? '').trim()
 }
 
 /**
- * 布尔项当前是否为「开」。
- *
- * <p>后端把 BOOLEAN 归一化成 {@code "true"} / {@code "false"}，
- * 但历史数据或手工写库可能是 {@code 1/0/on/off}，统一在这里兜住。
- *
- * @param {object} row 配置项
- * @returns {boolean}
+ * 布尔项当前是否为「开」。后端归一化成 "true"/"false"，但历史数据可能是
+ * 1/0/on/off，统一在这里兜住。
  */
 function isOn(row) {
   const v = String(row.value ?? '').trim().toLowerCase()
   return v === 'true' || v === '1' || v === 'on'
 }
 
-/** 是否为需要掩码显示的敏感项。 */
 function isSecret(key) {
   return key === 'sip.password'
 }
 
 /**
- * 切换布尔项并立即保存。
- *
- * <p>开关型配置没有「改完再点保存」的必要 —— 拨动就是意图。
- * 立即提交能让「设备统一接入密码」这类项的行为更符合直觉。
- *
- * @param {object} row 配置项
- * @param {boolean} on  新状态
+ * 切换布尔项并立即保存：开关型配置拨动就是意图，没有「改完再点保存」的必要。
  */
 async function toggleBool(row, on) {
   cfgDraft[row.key] = on ? 'true' : 'false'
@@ -1223,20 +1188,11 @@ async function toggleBool(row, on) {
 }
 
 /**
- * 数值是否越界。
- *
- * <p><b>为什么前端也要校验</b>：后端 `ConfigKeys.Def#validate` 会拒绝越界值
- * 并返回 400，但那意味着「点了保存、等一个来回、才看到报错」。
- * 输入时就能标红，用户不必试错；后端校验仍保留（前端只是体验层，不是安全边界）。
- *
- * <p>判据取自后端下发的 `min` / `max`，不在这里写死 —— 后端调范围时界面自动跟上。
- *
- * @param {object} row 配置项
- * @returns {boolean} 越界或非数字时返回 true
+ * 数值是否越界。前端校验只为体验（后端 ConfigKeys.Def#validate 会返回 400），
+ * 判据取自后端下发的 min/max，不写死。非数字或非整数也算越界。
  */
 function isInvalid(row) {
-  // 只有数值类型才谈得上越界；STRING（密码）和 BOOLEAN 不参与校验，
-  // 否则密码 "abc123" 会被 Number() 判成 NaN 而误标红
+  // 只有数值类型才谈得上越界；STRING/BOOLEAN 不参与，否则密码会被 Number() 判成 NaN 而误标红
   if (row.type !== 'INT' && row.type !== 'LONG') return false
   const raw = String(cfgDraft[row.key] ?? '').trim()
   // 空值不算「越界」，由保存时的「不能为空」提示处理
@@ -1275,13 +1231,8 @@ function outOfRangeMsg(row) {
 }
 
 /**
- * 大数字加千分位。
- *
- * <p>毫秒类配置动辄 60000 / 86400000，裸数字数零很容易看错一位，
- * 而「少一个零」在这个页面意味着磁盘被填满或录像被秒删。
- *
- * @param {number|string} v
- * @returns {string}
+ * 大数字加千分位：毫秒类配置动辄 60000 / 86400000，裸数字很容易看错一位，
+ * 而「少一个零」意味着磁盘被填满或录像被秒删。
  */
 function fmtNum(v) {
   const n = Number(v)
@@ -1290,15 +1241,8 @@ function fmtNum(v) {
 }
 
 /**
- * 默认值的展示文案。
- *
- * <p>数值要走 {@link fmtNum}：范围那一行是「范围 10,000 ~ 600,000」，
- * 默认值却是「默认 60000」，同一行里两种写法看着像两种口径 ——
- * 而且裸的 600000 正是最容易被读错一位的那种数字。
- * 字符串项的空值写「空」，比一个看不见的空白更明确。
- *
- * @param {object} row 配置项
- * @returns {string}
+ * 默认值展示文案。数值必须走 fmtNum，否则同一行里范围是 10,000~600,000、
+ * 默认值却是 60000，像两种口径。字符串空值写「空」比看不见的空白明确。
  */
 function defaultText(row) {
   if (row.type === 'STRING') return row.defaultValue || '空'
@@ -1322,19 +1266,12 @@ async function loadConfig() {
 }
 
 /**
- * 保存单项配置。
- *
- * <p>保存成功后用后端返回的值回填：后端可能对值做规范化
- * （如布尔统一成 true/false），用返回值才不会出现「界面显示 abc、实际生效 true」。
+ * 保存单项配置。成功后用后端返回值回填：后端可能规范化值（如布尔统一成
+ * true/false），否则会出现「界面显示 abc、实际生效 true」。
  */
 async function saveConfig(row) {
   const value = String(cfgDraft[row.key] ?? '').trim()
-  /*
-   * 空值是否允许，按类型区分：
-   * - STRING（如设备统一接入密码）允许留空 —— 留空本身就是有意义的操作
-   *   （关闭鉴权）。一刀切拦掉的话，用户就没法关掉密码。
-   * - 数值类型不允许空，否则清理/保活任务会拿到无意义的值。
-   */
+  // STRING（如设备统一接入密码）允许留空：留空本身就是关闭鉴权；数值类型不允许空
   if (!value && row.type !== 'STRING') {
     ElMessage.warning('配置值不能为空')
     return
@@ -1390,12 +1327,8 @@ async function resetConfig(row) {
 
 /* ==================== 重启 / 改密 ==================== */
 
-/**
- * 重启平台服务（需服务由守护进程拉起，否则重启后不会自动恢复）。
- *
- * <p>重启后轮询探测恢复：登录态已持久化（sa_token_store），
- * 服务起来后旧 token 依然有效，无需重新登录。
- */
+/** 重启平台服务（需由守护进程拉起，否则不会自动恢复）。重启后轮询探测：
+ * 登录态已持久化（sa_token_store），旧 token 依然有效，无需重新登录。 */
 async function restartServer() {
   if (!(await confirmAction(
     '确定重启平台服务？\n\n服务将优雅停机并由守护进程自动拉起（约 10 秒），期间功能暂停。\n若服务没有守护进程（裸 java -jar 启动），重启后不会自动恢复。',
@@ -1453,10 +1386,95 @@ async function changePassword() {
   }
 }
 
-/* ==================== 接入控制（黑白名单） ==================== */
+/* ---------------- API 密钥 ---------------- */
+
+/** 当前密钥状态（enabled / hint / createdAt），不含明文。 */
+const apiKeyState = reactive({ enabled: false, hint: '', createdAt: '' })
+/** 刚生成的明文，仅本次操作后显示。 */
+const newApiKey = ref('')
+const apiKeyBusy = ref(false)
+
+async function loadApiKey() {
+  try {
+    const d = await userApi.apiKey()
+    apiKeyState.enabled = !!d?.enabled
+    apiKeyState.hint = d?.hint || ''
+    apiKeyState.createdAt = d?.createdAt || ''
+  } catch (e) {
+    // 密钥状态取不到不该影响其它设置项，静默即可
+  }
+}
+
+async function generateApiKey() {
+  const tip = apiKeyState.enabled
+    ? '重新生成会让当前密钥立即失效，正在使用它的对接程序会立刻无法登录。继续？'
+    : '生成后请立刻复制保存，页面不会再次显示明文。继续？'
+  if (!(await confirmAction(tip, 'API 密钥', { confirmButtonText: '生成' }))) {
+    return
+  }
+  apiKeyBusy.value = true
+  try {
+    const d = await userApi.generateApiKey()
+    newApiKey.value = d?.key || ''
+    apiKeyState.enabled = !!d?.enabled
+    apiKeyState.hint = d?.hint || ''
+    apiKeyState.createdAt = d?.createdAt || ''
+    ElMessage.success('已生成，请立刻复制')
+  } catch (e) {
+    ElMessage.error(e.message || '生成失败')
+  } finally {
+    apiKeyBusy.value = false
+  }
+}
+
+async function revokeApiKey() {
+  if (!(await confirmAction('撤销后使用该密钥的对接程序将立即无法登录。继续？', '撤销 API 密钥',
+    { confirmButtonText: '撤销' }))) {
+    return
+  }
+  apiKeyBusy.value = true
+  try {
+    await userApi.revokeApiKey()
+    newApiKey.value = ''
+    apiKeyState.enabled = false
+    apiKeyState.hint = ''
+    apiKeyState.createdAt = ''
+    ElMessage.success('已撤销')
+  } catch (e) {
+    ElMessage.error(e.message || '撤销失败')
+  } finally {
+    apiKeyBusy.value = false
+  }
+}
+
+/** 复制密钥：优先 clipboard，非安全上下文下回落 execCommand。 */
+async function copyApiKey() {
+  const text = newApiKey.value
+  if (!text) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制')
+      return
+    }
+  } catch (e) {
+    // 落到下面的兜底
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    ta.remove()
+    ElMessage.success('已复制')
+  } catch (e) {
+    ElMessage.error('复制失败，请手动选中复制')
+  }
+}
 
 const aclLoading = ref(false)
-/** 明细列表（按当前筛选）。 */
 const aclRows = ref([])
 /** 筛选：'' 全部 / 'BLACK' / 'WHITE'。 */
 const aclFilter = ref('')
@@ -1471,7 +1489,6 @@ const aclDialog = ref(false)
 const aclSaving = ref(false)
 const aclForm = reactive({ listType: 'BLACK', kind: 'DEVICE', value: '', remark: '' })
 
-/** 匹配方式的界面名称。 */
 function aclKindLabel(kind) {
   switch (kind) {
     case 'PREFIX':
@@ -1499,7 +1516,6 @@ const aclPlaceholder = computed(() => {
   }
 })
 
-/** 匹配方式的说明。 */
 const aclKindHint = computed(() => {
   switch (aclForm.kind) {
     case 'PREFIX':
@@ -1582,8 +1598,6 @@ async function removeAcl(row) {
   }
 }
 
-/* ==================== HTTPS 与国密 ==================== */
-
 const tlsLoading = ref(false)
 const tlsInstalling = ref(false)
 const tlsRegenerating = ref(false)
@@ -1616,13 +1630,8 @@ async function loadGm() {
 }
 
 /**
- * 选择本地文件并读入文本框。
- *
- * <p>用文件选择而不是强制粘贴：证书链 PEM 往往几千字符，
- * 手工复制粘贴极易漏掉中间证书或尾部的 END 行，而这类错误
- * 在「证书能解析但链不完整」时最难排查。
- *
- * @param {'cert'|'key'} which
+ * 用文件选择而不是强制粘贴：PEM 证书链往往几千字符，手工复制易漏中间证书
+ * 或尾部 END 行，而这类错误在「能解析但链不完整」时最难排查。
  */
 function pickFile(which) {
   const input = document.createElement('input')
@@ -1674,10 +1683,8 @@ async function regenerateTls() {
 }
 
 /**
- * 检测端口能否从公网访问。
- *
- * <p>它回答的是「证书/nginx 都配对了，为什么浏览器打不开」——
- * 在本机 curl 永远通，必须走公网地址才能命中云安全组。
+ * 检测端口能否从公网访问：回答「证书/nginx 都配对了，为什么浏览器打不开」。
+ * 本机 curl 永远通，必须走公网地址才能命中云安全组。
  */
 async function probeTls() {
   tlsProbing.value = true
@@ -1713,16 +1720,13 @@ onMounted(() => {
   loadAcl()
   loadTls()
   loadGm()
+  loadApiKey()
 })
 </script>
 
 <style scoped>
-/* ==================== 整体骨架 ==================== */
-
 /*
- * 左导航 + 右内容。
- *
- * <p>左栏固定宽度且 sticky：设置项再多，导航也始终可见，
+ * 左导航 + 右内容。左栏固定宽度且 sticky：设置项再多导航也始终可见，
  * 不用滚回顶部才能切分区。
  */
 .settings {
@@ -1731,8 +1735,6 @@ onMounted(() => {
   gap: var(--sp-5);
   align-items: start;
 }
-
-/* ==================== 左侧导航 ==================== */
 
 .settings-side {
   position: sticky;
@@ -1847,12 +1849,9 @@ onMounted(() => {
   color: var(--ink-500);
 }
 
-/* ==================== KPI 读数：只调字重与颜色 ==================== */
-
 /*
- * 字号沿用全局 --fs-xs，不放大。
- * 读数本身已经很大（.kpi-value 27px），标签再放大反而抢主次；
- * 让它「明显」的办法是字重 500 + ink-600，而不是字号。
+ * 字号沿用全局 --fs-xs，不放大：读数已经 27px，标签再大会抢主次；
+ * 让它「明显」靠字重 500 + ink-600。
  */
 .kpi-label {
   font-weight: 500;
@@ -1862,8 +1861,6 @@ onMounted(() => {
 .kpi-foot {
   color: var(--ink-500);
 }
-
-/* ==================== 右侧内容 ==================== */
 
 .settings-body {
   min-width: 0;
@@ -1889,11 +1886,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   margin: 0;
-  /*
-   * 与其他页面标题同一档（--fs-lg）。
-   * 全站只保留 --fs-xs/sm/md/lg/xl 五档字号，这边不能自成一套 19/22px，
-   * 否则切页时标题大小会跳一下。
-   */
+  /* 与其他页面标题同一档（--fs-lg），不自成一套 19/22px，否则切页时标题会跳一下 */
   font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.2px;
@@ -1913,12 +1906,7 @@ onMounted(() => {
   gap: var(--sp-2);
 }
 
-/* ==================== 面板 ==================== */
-
-/*
- * 这里的「面板」不用 el-card：设置项不需要卡片阴影堆叠，
- * 一条发丝线分隔更整齐，也更省垂直空间。
- */
+/* 不用 el-card：设置项不需要卡片阴影堆叠，一条发丝线分隔更整齐也更省垂直空间 */
 .panel {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1953,13 +1941,9 @@ onMounted(() => {
   color: var(--text-primary);
 }
 
-/* ==================== 键值行 ==================== */
-
 /*
- * 文本型读数（如「0 天 0 小时 24 分」）。
- *
- * <p>全局 .kpi-value 是给纯数字用的 27px 等宽字体 —— 中文时段放进去会被撑得很宽；
- * 这里降到 --fs-lg（与页面标题同号），保持同一行的三个读数视觉重量一致。
+ * 文本型读数（如「0 天 0 小时 24 分」）。全局 .kpi-value 是给纯数字的 27px 等宽字体，
+ * 中文时段放进去会被撑很宽；降到 --fs-lg 让同一行三个读数重量一致。
  */
 .kpi-value--text {
   font-family: var(--sans);
@@ -1974,11 +1958,8 @@ onMounted(() => {
 }
 
 /*
- * 成对键值（如媒体服务的「信令地址 0.0.0.0:45060」）。
- *
- * <p>和上面「标签左、值右贴边」的行不同：这里值紧跟在标签后面、左对齐。
- * 因为这类面板是多列网格，若值右贴边，每格内会拉出一条长空白，
- * 一眼看过去标签和值对应不上（实测三列时尤其明显）。
+ * 成对键值（如「信令地址 0.0.0.0:45060」）：值紧跟在标签后、左对齐，不右贴边。
+ * 多列网格里值右贴边会拉出一条长空白，一瞬看过去标签和值对应不上（三列时尤明显）。
  */
 .info-list--pairs {
   grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
@@ -2063,21 +2044,14 @@ onMounted(() => {
   color: var(--text-tertiary);
 }
 
-/* ==================== 运行时配置行 ==================== */
-
 .cfg-list {
   display: flex;
   flex-direction: column;
 }
 
 /*
- * 三栏网格：名称（含范围/默认值） / 输入框 / 操作。
- *
- * <p>用 grid 而不是 flex：三栏要竖向对齐成一列，
- * flex 会被最长的那一项撑开，导致每行输入框的起始位置都不一样。
- *
- * <p>行高给到 72px：配置项是这一页的主要操作对象，挤在一起会让
- * 「改哪个、范围是多少」全都得逐个看，反而更慢。
+ * 三栏网格（名称 / 输入框 / 操作）。用 grid 而不是 flex：flex 会被最长项撑开，
+ * 每行输入框的起始位置就不再对齐。行高 72px：配置项是主操作对象，挤在一起反而更慢。
  */
 .cfg-row {
   display: grid;
@@ -2109,11 +2083,7 @@ onMounted(() => {
   min-width: 0;
 }
 
-/*
- * 配置项名称：--fs-sm + 600。
- * 字号与表格正文一致，但字重更重、颜色更深，在一屏十几个条目里能立住；
- * 之前是 --fs-sm 常规字重，和旁边说明文字分不开。
- */
+/* --fs-sm + 600：字号与表格正文一致，靠字重和颜色在一屏十几个条目里立住 */
 .cfg-label {
   display: flex;
   align-items: center;
@@ -2211,8 +2181,6 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
-/* ==================== 其它 ==================== */
-
 /* 有 hover 说明的文本：虚线下划线，暗示可悬停 */
 .dotted {
   border-bottom: 1px dashed var(--ink-400);
@@ -2243,7 +2211,74 @@ onMounted(() => {
   color: var(--ink-500);
 }
 
-/* ==================== 接入控制（黑白名单） ==================== */
+/* ---------- API 密钥 ---------- */
+.apikey-body {
+  padding: var(--sp-4);
+}
+
+.apikey-tip {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--ink-500);
+}
+
+.apikey-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.apikey-label {
+  flex: none;
+  width: 72px;
+  color: var(--ink-500);
+}
+
+/*
+ * 明文区块用醒目底色：它只出现这一次，用户很容易在点完「生成」后
+ * 直接关页面，然后再也拿不回来。
+ */
+.apikey-new {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--brand-300, var(--line-soft));
+  border-radius: var(--r-md, 6px);
+}
+
+.apikey-new-head {
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--brand-600);
+}
+
+.apikey-new-body {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.apikey-new-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  background: var(--white, #fff);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 4px);
+  outline: none;
+}
+
+.apikey-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
 
 .acl-head-actions {
   display: flex;
@@ -2252,11 +2287,8 @@ onMounted(() => {
 }
 
 /*
- * 判定流程条。
- *
- * <p>把「先黑后白」和「白名单为空 = 不限制」这两条语义写在界面上，
- * 而不是只藏进 tooltip：这两点最容易凭直觉猜错，猜错的后果是
- * 所有设备掉线或全部放行 —— 一次误判的代价远高于多占一行版面。
+ * 把「先黑后白」和「白名单为空 = 不限制」写在界面上而不是藏进 tooltip：
+ * 这两条最容易凭直觉猜错，猜错就是所有设备掉线或全部放行。
  */
 .acl-flow {
   display: flex;
@@ -2344,8 +2376,6 @@ onMounted(() => {
   font-family: var(--mono);
 }
 
-/* ==================== HTTPS 与国密 ==================== */
-
 .panel-hint {
   font-size: var(--fs-xs);
   color: var(--ink-500);
@@ -2366,10 +2396,7 @@ onMounted(() => {
   margin-bottom: var(--sp-2);
 }
 
-/*
- * PEM 用等宽 + 小字号：内容是一行行 64 字符的 Base64，
- * 非等宽字体会让「行数对不对」变得看不出来（少一行 END 是常见错误）。
- */
+/* PEM 用等宽 + 小字号：一行行 64 字符的 Base64，非等宽看不出「行数对不对」（漏 END 是常见错误） */
 .tls-field :deep(.el-textarea__inner) {
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -2426,8 +2453,6 @@ onMounted(() => {
   color: var(--text-secondary);
   white-space: normal;
 }
-
-/* ==================== 窄屏 ==================== */
 
 @media (max-width: 900px) {
   .settings {

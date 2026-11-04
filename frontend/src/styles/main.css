@@ -1203,6 +1203,24 @@ body {
 .el-tag--danger { color: var(--danger-500); border-color: transparent; background: var(--danger-50); }
 .el-tag--info { color: var(--ink-600); border-color: transparent; background: var(--ink-50); }
 
+/*
+ * el-tag 的进入过渡会永久卡住，标签直接看不见 —— 必须兜底。
+ *
+ * Element Plus 的 el-tag 自带 <Transition name="el-zoom-in-center">，进场时先挂上
+ * `el-zoom-in-center-enter-from`（opacity: 0 + transform: scaleX(0)），
+ * 靠 Vue 在下一帧（requestAnimationFrame）把类名摘掉来放行。
+ * 但 rAF 在**后台标签页里会被浏览器暂停**：如果在后台标签里打开/刷新页面，
+ * 进场永远走不完，类名就一直留在元素上，标签既透明又宽度为 0。
+ * 实测报警列表 20 行的「级别」标签全部不可见，切到前台也不会自己恢复
+ * （类名已经错过了摘除时机）。代价是一个 300ms 的缩放装饰，换标签一定可见。
+ */
+.el-tag.el-zoom-in-center-enter-from,
+.el-tag.el-zoom-in-center-enter-active,
+.el-tag.el-zoom-in-center-leave-active {
+  opacity: 1;
+  transform: none;
+}
+
 .el-dialog {
   border-radius: var(--r-xl);
   border: 1px solid var(--line);

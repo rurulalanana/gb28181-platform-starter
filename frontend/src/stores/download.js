@@ -7,28 +7,16 @@ import { downloadFile } from '@/utils/download'
 /**
  * 后台下载任务（全局）。
  *
- * <h3>为什么不放在页面组件里</h3>
- * 录像下载的耗时是「录像段时长 ÷ 倍速」，动辄几分钟到几十分钟。
- * 早先下载状态放在 {@code PlaybackView} 组件内，带来两个问题：
- * <ul>
- *   <li>用户切到别的页面（组件卸载）后，轮询停止、进度丢失；</li>
- *   <li>离开页面时的 {@code playback/stop} 会把回放流停掉，下载直接中断。</li>
- * </ul>
- * 现在任务由服务端持有（{@code DownloadService}），前端只负责定时拉列表，
- * 因此<b>切页面、刷新浏览器都不影响下载</b>，且任意页面都能看到进度。
- *
- * <h3>轮询放在 store 里</h3>
- * store 是单例、不随组件卸载，所以轮询可以持续到整个应用关闭。
- * 未登录或没有任务时停止轮询，避免空转。
+ * 下载耗时是「录像段时长 ÷ 倍速」，可能几十分钟。状态放页面里会有两个问题：
+ * 切页面后轮询停止、进度丢失；离开页面时的 playback/stop 会中断下载。
+ * 任务由服务端 DownloadService 持有，前端只定时拉列表，切页面/刷新都不影响；
+ * 轮询放单例 store，未登录或无任务时停止以免空转。
  */
 export const useDownloadStore = defineStore('download', () => {
   /** 全部任务（进行中在前，已完成在后）。 */
   const tasks = ref([])
-  /** 正在下载的任务。 */
   const running = computed(() => tasks.value.filter((t) => !t.finished))
-  /** 已完成（成功或失败）的任务。 */
   const done = computed(() => tasks.value.filter((t) => t.finished))
-  /** 进行中的任务数（顶栏徽标用）。 */
   const runningCount = computed(() => running.value.length)
 
   let timer = null
@@ -45,8 +33,7 @@ export const useDownloadStore = defineStore('download', () => {
       notifyFinished()
     } catch (e) {
       /*
-       * 拉取失败（未登录/服务重启）时不弹错误：这是后台轮询，
-       * 弹窗会打扰用户。清空列表，等下一次成功拉取自然恢复。
+       * 后台轮询失败（未登录/服务重启）不弹错误，清空列表等下次成功自然恢复。
        */
       tasks.value = []
     }

@@ -1,24 +1,13 @@
 <template>
   <div class="play-page" :class="{ 'is-embed': embedMode }">
-    <!--
-      顶部标题栏：对齐 CMS play.html 的 .navbar —— 高 50px、通栏、
-      标题居中、白色加粗。CMS 用 #556677，这里换成我们的品牌主色 --brand-600。
-
-      <p>嵌入模式（{@code aspect=fullscreen} 或 被 iframe 嵌入）时整条隐藏：
-      宿主页面已经把「这是哪个摄像头」写在它自己的标题上了，
-      这里再画一条顶栏只是白白占高度。
-    -->
+    <!-- 顶部标题栏对齐 CMS 的 .navbar（50px 通栏、标题居中），配色换成本平台主色。
+         嵌入模式整条隐藏：宿主页面自己写了这是哪个摄像头，这里再画一条只白占高度。 -->
     <header v-if="!embedMode" class="play-header">
       <h1 class="play-title">{{ title }}</h1>
     </header>
 
     <main class="play-content">
-      <!--
-        播放区：CMS 是 16:9 的居中黑块。这里同样按 16:9，但用 max-width 限制
-        最大宽度 —— 超宽屏上铺满会让画面过大、首屏看不到下方的分享面板。
-
-        <p>嵌入模式下把宽度上限与间距全部取消，画面吃满整个视口。
-      -->
+      <!-- 播放区 16:9；宽屏用 max-width 限住，否则首屏看不到下方分享面板。 -->
       <div class="play-stage" :class="{ 'is-stretch': stretchMode }">
         <div ref="videoContainer" class="play-video" />
         <div v-if="!playing" class="play-placeholder">
@@ -28,29 +17,12 @@
         </div>
 
         <!--
-          云台悬浮块：1:1 复刻 LiveGBS play.html 的 .ptz-block。
+          云台悬浮块，1:1 复刻 LiveGBS play.html 的 .ptz-block：默认只露中心半透明圆，
+          鼠标移入才展开六向；中心可拖动把整块挪到画面任意位置。
+          尺寸写死 150×220（格子 50）是因为数字间是整除关系，改相对单位会出现 1px 缝。
 
-          <h3>交互方式（CMS 的原设计，照搬不改）</h3>
-          <ul>
-            <li>默认<b>只显示中心那个半透明圆形</b>（四向箭头），不挡画面；</li>
-            <li>鼠标移入整块区域才展开 8 个格子：4 个方向 + 2 个变倍（外加中心）；</li>
-            <li>中心格子可<b>拖动</b>，把整个控制块挪到画面任意位置 ——
-                默认贴右上角，但摄像头画面主体未必在中间，能挪是必要的。</li>
-          </ul>
-
-          <h3>尺寸为何写死</h3>
-          150×220 是 CMS 的实测值，格子 50×50、中心圆 50 直径。
-          用 rem/百分比都做不到「格子严丝合缝拼成一个十字」——
-          这些数字之间是整除关系（3 格宽 = 150、4 格高 = 200 + 20 余量），
-          改成相对单位反而会在某些缩放下出现 1px 缝。
-
-          <h3>为什么用 Teleport</h3>
-          <p>手机竖屏的播放区只有 ~366×206，比云台块（150×220）<b>还矮</b> ——
-          浮在画面上会盖攩近半个画面。所以窄屏时用 {@code Teleport}
-          把这一块投到下方分享卡片右侧的宿主容器里（`.ptz-mobile-host`）；
-          宽屏保持就地渲染，即浮在画面右上角。
-          {@code Teleport} 的 {@code disabled} 为真时就地渲染，
-          刚好用来做这种「同一个组件两处落子」，不用把模板写两遍。
+          窄屏必须用 Teleport 投到下方卡片：竖屏播放区 ~366×206 比云台块还矮，
+          浮在画面上会盖掉近半个画面。disabled 为真时就地渲染，一份模板两处落子。
         -->
         <Teleport :to="ptzMobileHost" :disabled="!isMobile || embedMode">
           <div
@@ -77,12 +49,7 @@
                 <path :d="c.path" fill="currentColor" />
               </svg>
             </div>
-            <!--
-              中心是拖动手柄，与方向键分开渲染：它不响应云台指令。
-              触摸设备没有 hover，这个圆同时充当「展开/收起方向键」的开关
-              （点一下切展开态，按住拖动则只移动面板，见 startDrag/endDrag）。
-              窄屏投到分享卡片右侧后是常显静态面板，这个手柄无意义，已隐藏。
-            -->
+            <!-- 中心是拖动手柄，不响应云台指令。触摸设备靠它展开/收起六向。 -->
             <div
               class="ptz-cell ptz-center"
               :title="ptzOpen ? '拖动可移动，点一下收起' : '点一下展开，拖动可移动'"
@@ -97,30 +64,14 @@
       </div>
 
       <!--
-        下半区卡片：分享 / 云台控制 两个面板。
-
-        <p><b>宽屏</b>只有一个「分享」面板 —— 云台浮在画面右上角（更符合
-        监控操作的肌肉记忆：看着画面转云台）。
-
-        <p><b>窄屏</b>（≤640px）播放区只有 ~366×206，比云台块（150×220）
-        还矮 —— 浮在画面上会盖掉近半个画面，浮到卡片旁边又会把分享内容
-        挤成 240px 宽（输入框只看得见半截链接）。所以窄屏改成
-        <b>Tab 切换</b>：一次只展示一个面板，两个都拿到满宽。
-
-        <p><b>嵌入模式整块不渲染</b>：宿主页面只会把 iframe 当画面用，
-        分享链接 / 二维码 / 嵌入代码对它毫无意义；而那块卡片至少占 400px 高，
-        在 640×360 的 iframe 里直接超出一整屏，画面被挤得只剩顶部一条。
-
-        <p><b>云台块反而保留</b>：它是浮在画面上的（默认只露一个半透明圆点，
-        鼠标移入才展开），不占布局高度，而「能转云台」正是嵌入方最想要的能力
-        之一。若宿主想自己做一套，同名接口 {@code /api/v1/share/ptz} 也可直接用。
+        下半区卡片。宽屏只有「分享」：云台浮在画面上（看着画面转云台更顺手）。
+        窄屏改 Tab 切换：播放区太矮浮不了，挤在卡片旁又只剩 240px 宽。
+        嵌入模式整块不渲染（卡片至少 400px 高，会占满 640×360 的 iframe），
+        但云台块保留 —— 它浮在画面上不占高度，而「能转云台」正是嵌入方要的。
       -->
       <div v-if="!embedMode" class="play-lower">
         <section class="share-card">
-          <!--
-            Tab 条。宽屏时只有「分享」一项 —— 保持改造前那个标签页的观感
-            （底线 + 品牌色），不额外引入一个只有单项的怪异 Tab 条。
-          -->
+          <!-- 宽屏只有「分享」一项，看起来就是原来的标签页，不额外引入单项 Tab 条。 -->
           <div class="share-tabs" role="tablist">
             <button
               class="share-tab"
@@ -130,15 +81,8 @@
               :aria-selected="activeTab === 'share'"
               @click="activeTab = 'share'"
             >
-              <!--
-                图标用 Element Plus 的 Share。
-
-                <p>原来这里是手写的两条 SVG path，其中一条的包围盒到
-                {@code y=18.4}，而 viewBox 只有 16 —— 底部被裁掉，
-                渲染出来是两段对不上的钩子，根本不像「分享」。
-                {@code @element-plus/icons-vue} 已在 main.js 全量注册，
-                用 el-icon 不增加任何额外依赖。
-              -->
+              <!-- 用手写 SVG 时一条 path 的包围盒到 y=18.4，而 viewBox 只有 16，底部被裁掉。
+                   el-icon 已在 main.js 全量注册，不增加依赖。 -->
               <el-icon class="share-tab-icon"><Share /></el-icon>
               分享
             </button>
@@ -205,10 +149,21 @@
                   class="share-qr-img"
                   :src="qrSrc"
                   alt="扫码直播"
-                  @error="qrFailed = true"
+                  @error="onQrError"
                 />
-                <div v-else class="share-qr-fallback">
+                <!--
+                  失败态写在「生成中」之前判断：两者都表现为「没有图」。
+                  但只有 {@code qrFailed} 为真才能断定真失败了 ——
+                  把它放到 {@code v-else} 里的话，首帧（还没开始生成）
+                  就会命中，页面一打开先闪一句「二维码生成失败」，
+                  几十毫秒后才出图，看起来像报错后又自己好了。
+                -->
+                <div v-else-if="qrFailed" class="share-qr-state is-failed">
                   二维码生成失败<br />请直接复制上方链接
+                </div>
+                <div v-else class="share-qr-state">
+                  <span class="share-qr-spinner" aria-hidden="true"></span>
+                  <span>二维码生成中…</span>
                 </div>
               </div>
             </div>
@@ -298,12 +253,8 @@ import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileCli
 /**
  * 直播分享页（免登录）。
  *
- * <p>对齐 LiveGBS 的 {@code play.html?serial=&code=}：一个只有标题栏 +
- * 播放器 + 分享面板的独立页面，不套主框架的侧栏与顶栏 ——
- * 它是给外部人员看的，多一个导航栏只会让人以为还需要登录。
- *
- * <p>配色换成本平台的设计令牌（{@code --brand-*} / {@code --ink-*}），
- * 布局与信息层级保持与 CMS 一致。
+ * <p>对齐 LiveGBS 的 {@code play.html?serial=&code=}：只有标题栏 + 播放器 + 分享面板，
+ * 不套主框架的侧栏与顶栏 —— 它是给外部人员看的，多一个导航栏只会让人以为还要登录。
  */
 const route = useRoute()
 
@@ -320,31 +271,18 @@ const playing = computed(() => player.playing.value)
 /**
  * 当前播放协议。
  *
- * <p>分享页必须提供切换入口：外部人员通过这个页面看画面，
- * 遇到 H.265 通道（FLV 播不了）或 UDP 被拦（WebRTC 连不上）时，
- * 除了换协议没有任何别的办法 —— 他们连平台后台都进不去。
+ * <p>分享页必须能切协议：外部人员遇到 H.265（FLV 播不了）或 UDP 被拦（WebRTC 连不上）时，
+ * 除了换协议没有别的办法 —— 他们连后台都进不去。
  */
 const proto = ref(LIVE_DEFAULT_PROTOCOL)
 
-/**
- * 当前协议的显示名（控制栏按钮上那一段文字）。
- *
- * <p>从 {@code protoOptions} 里查而不是写死一个映射表：
- * 两份名字一旦不同步，就会出「菜单写 WS-FLV、按钮写 FLV」的错位。
- */
+/** 当前协议显示名。从 protoOptions 查而不是另写映射表，两份名字一旦不同步就会错位。 */
 const protoShort = computed(() => {
   const hit = protoOptions.value.find((o) => o.value === proto.value)
   return hit ? hit.label : proto.value
 })
 
-/**
- * 可选的协议：<b>只列本浏览器真能播的</b>。
- *
- * <p>iPhone / iPad Safari 没有 {@code MediaSource}，flv.js 起不来 ——
- * 菜单里还摆着 WS-FLV / FLV 的话，用户点了只会得到一片黑屏
- * （实测iPhone 上就是这个现象）。{@code availableProtocols()} 按能力过滤，
- * 手机上自然只剩 WebRTC 与 HLS。
- */
+/** 可选协议：只列本浏览器真能播的。iPhone 无 MediaSource，摆着 FLV 只会点了黑屏。 */
 const protoOptions = computed(() => availableProtocols())
 
 /** 协议菜单是否展开（锚定在控制栏那个按钮上）。 */
@@ -353,15 +291,10 @@ const protoMenuVisible = ref(false)
 const protoAnchorEl = ref(null)
 
 /**
- * 控制栏按钮点击。
+ * 控制栏按钮点击：只把锚点交给 popover，展开由它自己 toggle。
  *
- * <p>只负责把锚点交给 popover，<b>是否展开由 el-popover 自己管</b>：
- * {@code virtual-triggering} 会把 click 监听挂到锚点元素上自行 toggle。
- * 这里若也写 {@code visible = true}，第二次点击会变成「它 toggle 成 false、
- * 我又设回 true」，菜单就关不掉了。
- *
- * <p>例外是「第一次拿到锚点」那次点击 —— 监听要等 popover 重新渲染才挂上，
- * 那一次它收不到，所以手动开一次。
+ * <p>这里不能再写 {@code visible = true} —— 第二次点击会变成「它 toggle 成 false、我又设回 true」，
+ * 菜单就关不掉了。只有「首次拿到锚点」那次例外（监听要等 popover 重渲染才挂上）。
  */
 function onControlButton(id, el) {
   if (id !== 'proto') return
@@ -400,13 +333,8 @@ const code = computed(() => String(route.query.code || '').trim())
 /**
  * 是否被 iframe 嵌入。
  *
- * <p><b>为什么用 {@code frameElement} 而不是 {@code window.top !== window.self}</b>：
- * 两者语义相同，但访问 {@code window.top} 在<b>跨域</b>嵌入时会抛
- * {@code SecurityError}（同源策略），必须包 try/catch；
- * {@code window.frameElement} 跨域时返回 {@code null} 而不抛错 —— 但那样就
- * 分不清「嵌入在不同源」与「根本没嵌入」。
- * 所以两者都用：{@code frameElement} 能读到就直接判定，抛错/为 null 时再看
- * {@code top !== self}（跨域下这个比较是允许的，只是不能读 top 的属性）。
+ * <p>两个判据都要用：访问 {@code window.top} 在跨域嵌入时会抛 SecurityError，
+ * 而 {@code frameElement} 跨域时返回 null，单靠它分不清「跨域嵌入」与「根本没嵌入」。
  */
 const inIframe = computed(() => {
   if (typeof window === 'undefined') return false
@@ -419,30 +347,14 @@ const inIframe = computed(() => {
   }
 })
 
-/**
- * 嵌入模式：只留播放画面，标题栏与分享面板全部去掉。
- *
- * <p>两种触发方式：
- * <ul>
- *   <li>被 iframe 嵌入 —— 宿主页面自己管标题与控件，本页画蛇添足只会挤压画面；</li>
- *   <li>显式传 {@code aspect=fullscreen} —— 对齐 CMS 的
- *       {@code play.html?...&aspect=fullscreen}。用于「直接新窗口打开当播放器」，
- *       此时没人会去点分享面板。</li>
- * </ul>
- */
+/** 嵌入模式：只留画面。被 iframe 嵌入，或显式传 {@code aspect=fullscreen}（对齐 CMS）。 */
 const embedMode = computed(() => {
   if (inIframe.value) return true
   const aspect = String(route.query.aspect || '').trim().toLowerCase()
   return aspect === 'fullscreen' || aspect === 'full'
 })
 
-/**
- * 是否拉伸画面填满容器。
- *
- * <p>对齐 CMS 的 {@code stretch=yes}：监控现场常见「球机画面是 16:9、
- * 墙面电视墙格子却是方的」，等比显示会留黑边，值班室要求铺满。
- * 拉伸会让画面变形，所以只是<b>可选</b>，默认仍是等比（contain）。
- */
+/** 是否拉伸填满（CMS 的 {@code stretch=yes}）：电视墙格子和画面比例不一致时用，默认等比。 */
 const stretchMode = computed(() => {
   const v = String(route.query.stretch || '').trim().toLowerCase()
   return v === 'yes' || v === '1' || v === 'true'
@@ -456,31 +368,18 @@ const title = computed(() => {
   return '直播分享'
 })
 
-/**
- * 本页的对外地址（分享链接）。
- *
- * <p>用 {@code location.origin + location.pathname + location.search} 而不是
- * 自己拼参数：用户可能通过带额外参数（如 {@code &proto=webrtc}）的链接进来，
- * 原样传下去才不会丢掉那些设置。
- */
+/** 本页对外地址。用 location.href 而不是自己拼参数，否则会把带进来的额外参数（如 proto=webrtc）丢掉。 */
 const pageUrl = computed(() => {
   if (typeof window === 'undefined') return ''
   return window.location.href
 })
 
 /**
- * iframe 嵌入用的地址。
+ * iframe 嵌入地址。必须强制带 {@code aspect=fullscreen}，否则 640×360 的 iframe 里
+ * 会被 400px 高的分享卡片挤得只剩一条画面。
  *
- * <p><b>必须强制带上 {@code aspect=fullscreen}</b>：分享页默认形态是
- * 「标题栏 + 画面 + 一整块分享卡片」，那是给人用浏览器直接打开的；
- * 而 iframe 是固定尺寸的小窗口（通常 640×360），
- * 分享卡片本身就有 400 多像素高 —— 不加这个参数，别人嵌进去看到的
- * 是「顶部标题栏 + 一条画面」，下面全被截掉，等于不能用。
- *
- * <p>用 {@code URL} 对象改参数而不是字符串拼 {@code &aspect=fullscreen}：
- * 当前地址可能已经带了这个参数（在嵌入模式里再点复制），拼字符串会出现
- * 两个 {@code aspect=}，取哪个由各浏览器自行决定。{@code searchParams.set}
- * 是覆盖而不是追加，天然幂等。
+ * <p>用 searchParams.set 而非字符串拼参数：地址里可能已经有 aspect=，
+ * 拼出两个同名参数后取哪个由浏览器自定。set 是覆盖，天然幂等。
  */
 const embedUrl = computed(() => {
   if (!pageUrl.value) return ''
@@ -494,16 +393,7 @@ const embedUrl = computed(() => {
   }
 })
 
-/**
- * iframe 嵌入代码。
- *
- * <p>{@code allow="autoplay; fullscreen"} 是必需的：浏览器默认禁止 iframe 内
- * 自动播放与全屏，不带这两项时嵌到别人页面里点全屏没反应。
- * 宽高取 16:9 的 640×360，与 CMS 一致。
- *
- * <p>{@code title} 也给上：缺它时某些无障碍检查会报错，
- * 而且多标签页环境下浏览器需要它来区分框内容。
- */
+/** iframe 代码。{@code allow="autoplay; fullscreen"} 不能省 —— 缺了它嵌到别人页面里点全屏无反应。 */
 const iframeCode = computed(() => {
   if (!embedUrl.value) return ''
   return `<iframe src="${embedUrl.value}" width="640" height="360" `
@@ -514,49 +404,65 @@ const iframeCode = computed(() => {
 /* ---------------- 二维码 ---------------- */
 
 /**
- * 二维码图片地址（由后端生成 PNG）。
+ * 二维码（浏览器本地生成）。
  *
- * <p><b>为什么不前端生成</b>：引一个 QR 编码库要多打包 20~30KB，
- * 而本项目主包已经很大；后端用 zxing 一次编码 + 浏览器缓存即可，
- * 前端只需一个 {@code <img>}。
+ * <p>早先由后端 zxing 出 PNG，怕「撑大主包」—— 理由不成立：本页是懒加载路由，
+ * 库只进 LiveShareView 这个 chunk。反而省了三个代价：免登录的图片编码端点、
+ * 595KB 的 zxing 依赖、每次进页面的 HTTP 往返。
  *
- * <p>用 {@code encodeURIComponent} 而不是手拼：分享地址里可能带 {@code &}，
- * 不编码会把 {@code text} 参数截断，扫出来的链接就不完整。
+ * <p>动态 import：嵌入模式下分享面板不渲染，没必要下载这个库。
+ *
+ * <p>参数与原后端版对齐：180px、margin 1、纠错 M、纯黑白。
  */
 const qrSrc = ref('')
 const qrFailed = ref(false)
 
-function buildQr() {
+async function buildQr() {
+  // 重新生成时先复位失败标志：否则上一次失败留下的文案会盖住「生成中」
   qrFailed.value = false
-  if (!pageUrl.value) {
+  const text = pageUrl.value
+  // 嵌入模式没有分享面板，不必生成
+  if (!text || embedMode.value) {
     qrSrc.value = ''
     return
   }
-  qrSrc.value = `/api/v1/share/qr?size=180&text=${encodeURIComponent(pageUrl.value)}`
+  try {
+    const { default: QRCode } = await import('qrcode')
+    const url = await QRCode.toDataURL(text, {
+      width: 180,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000ff', light: '#ffffffff' }
+    })
+    // 编码期间地址变了就别用旧结果覆盖新结果
+    if (pageUrl.value === text) qrSrc.value = url
+  } catch (e) {
+    // 同样是「地址变了」就丢弃：那次请求会有新的 buildQr 接手
+    if (pageUrl.value !== text) return
+    qrSrc.value = ''
+    qrFailed.value = true
+  }
+}
+
+/**
+ * 图片加载失败（data URL 理论上不会，兼一层）。
+ *
+ * <p>必须清空 {@code qrSrc} 而不能只置 {@code qrFailed}：否则重新生成时复位失败标志，
+ * 模板又会去加载那个坏地址。
+ */
+function onQrError() {
+  qrSrc.value = ''
+  qrFailed.value = true
 }
 
 /* ---------------- 复制 ---------------- */
 
 /**
- * 复制到剪贴板，并给出提示。
+ * 复制到剪贴板并提示。
  *
- * <h3>为什么要两段兜底，而不是「有 clipboard 就用它」</h3>
- *
- * <p>{@code navigator.clipboard} 存在 ≠ 能用。除了「非安全上下文（http+IP）
- * 下该 API 不存在」这个已知情况，还有两种更隐蔽的失败：
- * <ul>
- *   <li><b>权限被拒</b>：浏览器把它列为敏感权限，用户在站点设置里关掉后
- *       {@code writeText} 直接抛 {@code NotAllowedError}；</li>
- *   <li><b>文档未获得焦点</b>：iOS Safari 与部分 Chrome 版本要求调用时
- *       文档处于聚焦状态，从 iframe 或后台标签触发时必然失败。</li>
- * </ul>
- * 这两种情况下 API 是<b>存在</b>的，只是调用抛错 —— 早先的写法在
- * {@code catch} 里直接报「复制失败」，压根没试 {@code execCommand}，
- * 于是在这些环境里点复制永远失败（用户反馈「复制没有反馈」）。
- *
- * <p>现在：先试 clipboard，失败就试 execCommand，两个都失败才报错。
- *
- * @param {string} text 要复制的文本
+ * <p>两段兜底而不是「有 clipboard 就用它」：该 API 存在 ≠ 能用 ——
+ * 权限被拒（NotAllowedError）、文档未聚焦（iOS Safari / 部分 Chrome）都会抛错。
+ * 早先的写法在 catch 里直接报失败、不试 execCommand，于是那些环境里点复制永远没反应。
  */
 async function copy(text) {
   if (!text) return
@@ -599,13 +505,8 @@ async function copy(text) {
   }
 }
 
-/**
- * 轻量提示：不引 ElMessage（分享页想尽量少带依赖，避免弹层样式受主框架影响）。
- *
- * <p><b>必须渲染到模板里才有用</b> —— 这个 ref 之前定义了却没出现在
- * 模板中，于是 {@code copy()} 里的 {@code flash('已复制')} 只是改了个
- * 没人看的变量，用户点「复制」完全没有反馈。
- */
+/** 轻量提示：不引 ElMessage（少带依赖，也避免弹层样式受主框架影响）。
+ *  必须渲染到模板里 —— 这个 ref 曾经定义了却没出现在模板中，点「复制」完全没反馈。 */
 const toast = ref('')
 let toastTimer = null
 function flash(msg) {
@@ -654,34 +555,18 @@ async function play() {
     return
   }
   notice.value = ''
-  /*
-   * 每次播放都重新算：手机旋转/桌面改窗口宽度后应跟着变。
-   */
   const phone = isMobileClient()
   await player.play(`${data.deviceId}/${data.channelId}`, urls, {
-    /*
-     * 手机端固定 WebRTC，不提供切换。
-     *
-     * <p>手机上能用的只剩下 WebRTC（FLV 没有可用 MSE，HLS 延迟 6s+ 且
-     * 非 Safari 解不了 G.711），给三个选项只会让用户点到必然失败的那个。
-     * 详见 {@code isMobileClient} 的注释。
-     */
+    // 手机固定 WebRTC：FLV 无可用 MSE，HLS 延迟 6s+ 且非 Safari 解不了 G.711，
+    // 给三个选项只会让人点到必然失败的那个。详见 isMobileClient 的注释。
     proto: phone ? LIVE_DEFAULT_PROTOCOL : proto.value,
-    /*
-     * 控制栏里的「播放协议」按钮：<b>仅桌面端提供</b>。
-     *
-     * <p>手机上不给这个入口 —— 那里的可选项本身就不靠谱（见上），
-     * 按钮只会变成「点了就黑屏」的陷阱。
-     */
+    // 协议切换按钮仅桌面端：手机上的可选项本身就不靠谱，按钮只会变成「点了就黑屏」的陷阱
     controlButtons: phone
       ? null
       : [{ id: 'proto', title: '播放协议', text: protoShort.value }],
     onControlButton,
-    /*
-     * 浏览器放不了所选协议时，引擎会自动降级。
-     * 手机上不会发生（只有 WebRTC），但桌面端带 &proto=hls 这类
-     * 会被分享的链接进来时仍可能走到这里。
-     */
+    // 浏览器放不了所选协议时引擎会自动降级。手机上不会走到（只有 WebRTC），
+    // 但桌面端带 &proto=hls 这类链接进来时仍可能命中。
     onProtoChange: (used, wanted) => {
       proto.value = used
       if (wanted && wanted !== used) {
@@ -690,9 +575,7 @@ async function play() {
       }
     },
     onFatal: (msg) => { notice.value = msg || '播放失败' },
-    /*
-     * 说明文字按端区分：手机上不能换协议，让它去换只会白试。
-     */
+    // 文案按端区分：手机上不能换协议，让它去换只会白试
     onStall: () => {
       notice.value = phone
         ? '画面未就绪，请检查手机网络后刷新重试'
@@ -704,12 +587,7 @@ async function play() {
 
 /* ---------------- 云台 ---------------- */
 
-/**
- * 云台格子的图标路径（24×24 viewBox 的 SVG path）。
- *
- * <p>换成内联 SVG 而不是引 Font Awesome：CMS 那边整站用 FA，
- * 我们只为 7 个图标引一整套字体（~900KB）不划算，而 SVG path 加起来不到 1KB。
- */
+/** 云台图标路径。用内联 SVG 而不是引 Font Awesome：为 7 个图标引一整套字体（~900KB）不划算。 */
 const ARROW_UP = 'M12 6l6 7h-4v5h-4v-5H6z'
 const ARROW_DOWN = 'M12 18l-6-7h4V6h4v5h4z'
 const ARROW_LEFT = 'M6 12l7-6v4h5v4h-5v4z'
@@ -719,11 +597,7 @@ const ZOOM_OUT = 'M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16m0 2a6 6 0 1 1 0 12 6 6 0 0
 /** 中心拖动柄：四向箭头。 */
 const PTZ_CENTER_PATH = 'M12 2l3 3h-2v4h4V7l3 3-3 3v-2h-4v4h2l-3 3-3-3h2v-4H7v2l-3-3 3-3v2h4V5H9z'
 
-/**
- * 六个云台格子：位置由 CSS 类定（与 CMS 的 {@code .ptz-up{top:10px;left:50px}} 一致）。
- *
- * <p>不含中心格 —— 那是拖动柄，不响应云台指令，单独渲染。
- */
+/** 六个云台格子（位置由 CSS 类定）。不含中心格 —— 那是拖动柄，不响应云台指令。 */
 const PTZ_CELLS = [
   { cmd: 'up', cls: 'ptz-up', title: '上', path: ARROW_UP },
   { cmd: 'left', cls: 'ptz-left', title: '左', path: ARROW_LEFT },
@@ -733,42 +607,21 @@ const PTZ_CELLS = [
   { cmd: 'zoomout', cls: 'ptz-minus', title: '缩小', path: ZOOM_OUT }
 ]
 
-/**
- * 该类型是否支持云台控制。
- *
- * <p>0（未知）与 3（固定枪机）不支持：前者设备没报，后者物理上就不能转。
- * 与通道管理页的 {@code supportsPtz} 保持同一套判据 ——
- * 两处不一致会出现「列表里显示不可控、分享页却弹出方向盘」。
- */
+/** 该类型是否要显示云台面板：只有明确是固定枪机（3）才隐藏。
+ *  判据必须与通道管理页的 supportsPtz 一致，否则会出现「列表说不可控、分享页却弹方向盘」。
+ *  0 = 设备没报，不等于不能转：国标设备普遍不报，SDK 直连设备恒为 0。 */
 function supportsPtz(type) {
-  return type === 1 || type === 2 || type === 4
+  return type !== 3
 }
 
-/**
- * 云台面板是否可用。
- *
- * <p>三个条件缺一不可：
- * <ul>
- *   <li>拿到了通道信息，且没有「设备离线 / 通道不存在」这类提示；</li>
- *   <li>设备在线 —— 离线时指令发不出去，方向盘摆着只会让人白点；</li>
- *   <li><b>通道确实是球机/半球/遥控枪机</b>。这一条之前漏了：判据只看
- *       「在线 + 无提示」，于是固定枪机的分享页也弹出了方向盘
- *       （用户反馈「非球机也出来了控制」）。</li>
- * </ul>
- */
+/** 云台面板是否可用：拿到通道信息 + 设备在线 + 通道确实是球机/半球/遥控枪机。 */
 const ptzReady = computed(() => {
   const d = info.value
   if (!d || d.deviceOnline !== true || d.notice) return false
   return supportsPtz(d.ptzType)
 })
 
-/**
- * 面板位置。
- *
- * <p>默认贴右上角（与 CMS 相同的 {@code right:20px; top:20px}），
- * 用户拖动后改用自己的偏移量。用 {@code left/top} 而不是 {@code right/bottom}：
- * 拖动只需要写两个数，不用在「贴右」和「贴左」之间换算容器的宽度。
- */
+/** 面板位置。默认贴右上角，拖动后用 left/top 偏移（不用 right/bottom，拖动只需写两个数）。 */
 const ptzPos = ref(null)
 const ptzStyle = computed(() => {
   const p = ptzPos.value
@@ -816,12 +669,10 @@ function onMobileChange(e) {
 }
 
 /**
- * 按下方向键：立刻发一次指令，并在按住期间每 {@link PTZ_REPEAT_MS} 续发。
+ * 按住方向键的续发间隔。
  *
- * <h3>为什么要续发</h3>
- * GB/T 28181 的云台指令是<b>「开始转」和「停止转」两条</b>，设备收到后持续转，
- * 直到收到 {@code stop}。但部分设备/下级平台有内部超时（3~5 秒），
- * 不续发会中途停住。续发是行业惯例（CMS 也是这么做的）。
+ * <p>国标云台是「开始转 / 停止转」两条指令，部分设备有 3~5 秒内部超时，
+ * 不续发会中途停住。续发是行业惯例（CMS 也这么做）。
  */
 const PTZ_REPEAT_MS = 150
 
@@ -840,12 +691,10 @@ function startPtz(cmd) {
 }
 
 /**
- * 松开 / 移出：发 {@code stop}。
+ * 松开 / 移出：必须发 {@code stop}，不发设备会一直转下去。
  *
- * <p><b>必须发</b>：不发设备会一直转下去，是这一页最危险的失败模式。
- * 因此除了 mouseup/mouseleave，还在 {@code window} 上兜了一层
- * （见 {@link onMounted}）—— 用户按下后把鼠标拖出窗口再松开时，
- * 元素上的 mouseup 收不到。
+ * <p>除 mouseup/mouseleave 外还在 window 上兜了一层（见 onMounted）：
+ * 用户按住后把鼠标拖出窗口再松开，元素上的 mouseup 收不到。
  */
 function stopPtz() {
   if (ptzTimer) {
@@ -872,11 +721,8 @@ async function sendPtz(command) {
 /* ---------------- 面板拖动 / 展开 ---------------- */
 
 /**
- * 方向键是否展开。
- *
- * <p>桌面端靠 {@code :hover} 展开，这个状态没用；触摸设备没有 hover，
- * 必须有一个显式开关，否则要么永远点不到云台、要么整块十字常显
- * （150×220 比竖屏里的 16:9 播放区还高，会盖掉近半个画面）。
+ * 方向键是否展开。桌面端靠 :hover，触摸设备没有 hover 必须给显式开关，
+ * 否则要么点不到、要么整块十字常显（比竖屏播放区还高，会盖掉近半个画面）。
  */
 const ptzOpen = ref(false)
 
@@ -891,21 +737,14 @@ let dragMoved = false
 const DRAG_THRESHOLD = 6
 
 function startDrag(ev) {
-  /*
-   * 窄屏下云台块是「分享卡片旁边的静态面板」，不在画面上浮动，
-   * 没有可拖动的位置 —— 而且它的父节点已变成宿主 div，
-   * 用那里的矩形做边界夹紧会把面板锁在原地。直接不启用。
-   */
+  // 窄屏下云台块是卡片旁的静态面板，父节点已变成宿主 div，夹紧会把面板锁死，直接不启用
   if (isMobile.value) return
   const el = ptzBlock.value
   const stage = el?.parentElement
   if (!el || !stage) return
   const elRect = el.getBoundingClientRect()
   const stageRect = stage.getBoundingClientRect()
-  /*
-   * 记录指针在块内的相对位置，而不是「块相对容器的位置 + 指针位移」——
-   * 后者在块贴右（right:20px）时会算出一个负的 left，第一次拖动就会跳一下。
-   */
+  // 记录指针在块内的相对位置：若用「块相对容器位置 + 位移」，块贴右时首次拖动会跳一下
   dragOffset = {
     x: ev.clientX - elRect.left,
     y: ev.clientY - elRect.top,
@@ -913,11 +752,8 @@ function startDrag(ev) {
   }
   dragStartPt = { x: ev.clientX, y: ev.clientY }
   dragMoved = false
-  /*
-   * 用 Pointer Events 而不是 mouse 事件：一套代码同时覆盖鼠标与触摸。
-   * 触摸下浏览器会把 touch 转成模拟 mouse 事件，但滚动/长按会打断它，
-   * 拖动时松手可能收不到 mouseup，面板就「粘」在指针上。
-   */
+  // 用 Pointer Events 而非 mouse：一套代码覆盖鼠标与触摸。触摸下滚动/长按会打断
+  // 模拟 mouse 事件，松手可能收不到 mouseup，面板就「粘」在指针上。
   window.addEventListener('pointermove', onDragMove)
   window.addEventListener('pointerup', endDrag)
   window.addEventListener('pointercancel', endDrag)
@@ -936,20 +772,14 @@ function onDragMove(ev) {
   if (!el) return
   const w = el.offsetWidth
   const h = el.offsetHeight
-  /*
-   * 夹在容器内：不夹的话可以把面板拖到画面外，之后再也找不回来
-   * （它自己是唯一的拖动入口）。
-   */
+  // 夹在容器内，否则可以拖到画面外再也找不回来（它是唯一的拖动入口）
   const nx = Math.min(Math.max(0, ev.clientX - stageRect.left - x), Math.max(0, stageRect.width - w))
   const ny = Math.min(Math.max(0, ev.clientY - stageRect.top - y), Math.max(0, stageRect.height - h))
   ptzPos.value = { x: Math.round(nx), y: Math.round(ny) }
 }
 
 function endDrag() {
-  /*
-   * 没有位移 = 点了一下中心圆 → 切换方向键展开态。
-   * 只有在真的按下过（dragOffset 非空）时才判定，避免卸载时的空调用翻转状态。
-   */
+  // 没有位移 = 点了一下中心圆 → 切换展开态。只在真按下过时判定，避免卸载时空调用翻转状态
   if (dragOffset && !dragMoved) ptzOpen.value = !ptzOpen.value
   dragOffset = null
   dragStartPt = null
@@ -962,19 +792,11 @@ function endDrag() {
 /* ---------------- 生命周期 ---------------- */
 
 onMounted(async () => {
-  /*
-   * 云台兜底：在窗口层面监听 mouseup 强制停止转向。
-   *
-   * <p>用户按住方向键后把鼠标拖出窗口再松开，元素上的 mouseup 收不到，
-   * 设备就会一直转 —— 必须在 window 上补一层。这是「控件一旦失灵就是
-   * 机械损坏」的场景，宁可多挂一个监听。
-   */
+  // 云台兜底：在 window 上监听 mouseup。用户按住后拖出窗口再松开，元素上的 mouseup
+  // 收不到，设备会一直转 —— 这是「控件失灵就是机械损坏」的场景，宁可多挂一个监听。
   window.addEventListener('mouseup', stopPtz)
   window.addEventListener('blur', stopPtz)
-  /*
-   * 窄屏判断：初始 false（见 isMobile 声明处的注释），这里立即纠正，
-   * 并监听后续的横竖屏切换/窗口缩放。
-   */
+  // 窄屏判断：初始 false（否则首帧 Teleport 目标还没挂载），这里立即纠正
   mobileMql = window.matchMedia('(max-width: 640px)')
   isMobile.value = mobileMql.matches
   mobileMql.addEventListener('change', onMobileChange)
@@ -1488,16 +1310,50 @@ watch(ptzReady, (ok) => {
   object-fit: contain;
 }
 
-.share-qr-fallback {
+/* 二维码占位（生成中 / 失败共用几何属性，只有颜色与图标不同）。 */
+.share-qr-state {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   padding: 12px;
   font-size: var(--fs-xs);
+  line-height: 1.5;
   color: var(--text-tertiary);
   text-align: center;
+}
+
+/* 失败态用 secondary 而非 tertiary：它需要被读到 */
+.share-qr-state.is-failed {
+  color: var(--text-secondary);
+}
+
+/* 本地编码通常几十毫秒，转圈多半一闪而过 —— 但不能省：没有它时用户看到空框，
+   分不清「在算」与「坏了」。 */
+.share-qr-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--ink-200);
+  border-top-color: var(--brand-500);
+  border-radius: 50%;
+  animation: share-qr-spin 0.7s linear infinite;
+}
+
+@keyframes share-qr-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 开启「减少动态效果」时不转，改成一个静态圆环（不删，否则又变成空框） */
+@media (prefers-reduced-motion: reduce) {
+  .share-qr-spinner {
+    animation: none;
+    border-top-color: var(--ink-200);
+  }
 }
 
 /* ---- 页脚 ---- */
@@ -1517,11 +1373,8 @@ watch(ptzReady, (ok) => {
 
   .share-row {
     flex-direction: column;
-    /*
-     * 关键：flex-direction:column 下 align-items 仍是基类的 flex-start，
-     * 交叉轴（水平）上子项会按内容宽收缩 —— .share-field 于是只剩 185px，
-     * 分享链接只看得见「http://IP」，看起来像样式坏了。
-     */
+    /* 必须显式 stretch：column 下沿用的是基类 flex-start，交叉轴上子项会按内容宽收缩，
+       .share-field 只剩 185px，链接只看得见 http://IP。 */
     align-items: stretch;
     gap: var(--sp-2);
   }
@@ -1536,18 +1389,8 @@ watch(ptzReady, (ok) => {
     padding: var(--sp-4);
   }
 
-  /*
-   * 分享链接的字号。
-   *
-   * <p><b>为什么要配 {@code pointer-events: none}</b>：iOS Safari 在
-   * 「可聚焦」表单元素的字号 < 16px 时，聚焦瞬间会<b>自动放大整页</b>，
-   * 而且失焦后不缩回去。上一版为了绕这个坑把字号提到 16px，
-   * 结果链接看起来又大又笨（一行只能放下半条）。
-   *
-   * <p>这里反过来解：字号降到 13px（与桌面一致），同时让它
-   * <b>不可聚焦</b> —— 不聚焦就不会触发缩放。代价是不能长按选中，
-   * 但右侧就有一键复制按钮，分享链接也从来不需要只挑其中几个字。
-   */
+  /* pointer-events:none 是为了绕 iOS Safari 的坑：可聚焦元素字号 <16px 时聚焦会放大整页
+     且失焦不缩回。提到 16px 又太笨（一行放不下半条链接），所以改成不可聚焦。 */
   .share-input {
     font-size: var(--fs-sm);
     pointer-events: none;
@@ -1562,43 +1405,20 @@ watch(ptzReady, (ok) => {
     padding: var(--sp-5) var(--sp-3);
   }
 
-  /*
-   * 静态面板：{@code position: relative} 而不是 static —— 内部格子是
-   * position:absolute，没有定位祖先会飞到页面左上角。
-   *
-   * <h3>尺寸</h3>
-   * 上一版取 64~104px（390px 屏上 86px），按下去确实准，
-   * 但六个大圆角方块堆在一起显得笨重。这里收到 46~60px
-   * （390px 屏 → 54px），仍高于 Apple HIG 的 44pt 最小可点尺寸，
-   * 同时靠 {@code --ptz-gap} 拉开间距 —— <b>防误触靠的是间距，不是无限放大</b>：
-   * 两个 54px 的格子中间隔着 7px，指腹落在哪一格很清楚；
-   * 而没有间距的 86px 方格，反而容易按到边界上。
-   */
+  /* 静态面板必须 position:relative —— 内部格子是 absolute，没有定位祖先会飞到页面左上角。
+     尺寸 46~60px（高于 HIG 的 44pt），靠 --ptz-gap 拉开间距防误触 —— 是间距而不是无限放大。
+     宽高由基类公式推导，这里只改定位方式与两个尺寸变量。 */
   .ptz-mobile-host .ptz-block {
     --ptz-cell: clamp(46px, 14vw, 60px);
     --ptz-gap: calc(var(--ptz-cell) * 0.14);
-    /*
-     * 只改「定位方式 + 两个尺寸变量」。宽高由基类的公式推导
-     * （--ptz-gap 已参与计算），这里再写一遍只会写出不一致的值。
-     */
     position: relative;
     top: auto;
     right: auto;
     border-radius: 0;
   }
 
-  /*
-   * 去掉整块的灰底。
-   *
-   * <p>基类的 {@code .ptz-block:hover} 是给<b>画面上的浮层</b>用的：
-   * 鼠标移入时把整块染灰，提示「这块可以操作」。
-   * 但窄屏下这里是卡片里的静态面板，而且手机浏览器点一下就会置上
-   * {@code :hover} 且不再取消 —— 结果整个面板永远挂着一块灰底，
-   * 看起来像「选中了」或者「样式坏了」。
-   *
-   * <p>选择器要写成 {@code .ptz-mobile-host .ptz-block:hover}（比基类多一层），
-   * 否则同权重下会被基类后加载的规则盖掉。
-   */
+  /* 去掉灰底：手机的 :hover 一点就置上且不再取消，整个面板会永远挂着一块灰。
+     选择器要比基类多一层，否则同权重下会被后加载的规则盖掉。 */
   .ptz-mobile-host .ptz-block,
   .ptz-mobile-host .ptz-block:hover {
     background: transparent;
@@ -1609,24 +1429,16 @@ watch(ptzReady, (ok) => {
     display: block;
   }
 
-  /*
-   * 中心拖动柄在这里没有意义（面板是静态的，不需要挪位置），要藏掉。
-   *
-   * <p>选择器必须写成 {@code .ptz-block .ptz-center} 这一级 ——
-   * 基类的 {@code .ptz-block:hover .ptz-cell} 是 0,3,0，
-   * 只写 {@code .ptz-mobile-host .ptz-center}（0,2,0）压不住它，
-   * 手机上一点就露出那个灰圆（正是用户反馈的那块灰）。
-   */
+  /* 中心拖动柄在静态面板里无意义，必须隐藏。
+     选择器要写成 .ptz-block .ptz-center —— 基类 .ptz-block:hover .ptz-cell 是 0,3,0，
+     只写 .ptz-mobile-host .ptz-center（0,2,0）压不住，手机上一点就露出那个灰圆。 */
   .ptz-mobile-host .ptz-block .ptz-center,
   .ptz-mobile-host .ptz-block:hover .ptz-center,
   .ptz-mobile-host .ptz-block.is-open .ptz-center {
     display: none;
   }
 
-  /*
-   * 按键外观：不要粗边框 + 高饱和图标（上一版就是这两样显得土）。
-   * 换成「浅灰底 + 一层内在描边」，圆角按格子比例走，看着更像一个控件。
-   */
+  /* 浅灰底 + 内在描边，圆角按格子比例（粗边框 + 高饱和图标显得土） */
   .ptz-mobile-host .ptz-cell:not(.ptz-center) {
     display: flex;
     align-items: center;

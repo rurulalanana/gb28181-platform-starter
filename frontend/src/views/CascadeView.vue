@@ -1,7 +1,6 @@
 <template>
   <div class="page is-fill">
 
-    <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
       <KeywordFilter v-model="keyword" placeholder="搜索名称 / 平台编码 / 地址" width="280px" />
       <span class="filter-bar-spacer" />
@@ -97,12 +96,11 @@
       />
     </el-card>
 
-    <!-- 编辑对话框 -->
-    <!-- 布局说明：级联表单字段名普遍较长（「上级平台编码」「共享全部通道」等），
-         早先用 label-width=130px + 两列 el-col span=12 时，每个输入框只剩约 200px，
-         而「上级端口/本地地址/本地端口」三个字段挤在 span=8 里更只剩 130px，
-         数字输入框的增减按钮直接把内容压没了。改为单列 + 分组卡片：
-         每个字段占满整行宽度，长编码也有足够空间完整显示。 -->
+    <!--
+      表单用单列 + 分组卡片：字段名普遍较长（「上级平台编码」「共享全部通道」），
+      早先 label-width=130 + 两列 span=12 时输入框只剩约 200px，
+      「上级端口/本地地址/本地端口」挤在 span=8 里只剩 130px，增删按钮把内容压没了。
+    -->
     <el-dialog
       v-model="editDialog"
       :title="form.ID ? '编辑级联' : '新增级联'"
@@ -111,7 +109,6 @@
       top="6vh"
     >
       <el-form :model="form" label-width="120px" label-position="right">
-        <!-- 基础信息 -->
         <div class="form-section">
           <div class="form-section-title">基础信息</div>
           <el-form-item label="名称">
@@ -125,7 +122,6 @@
           </el-form-item>
         </div>
 
-        <!-- 网络配置 -->
         <div class="form-section">
           <div class="form-section-title">网络配置</div>
           <el-form-item label="上级平台地址">
@@ -170,7 +166,6 @@
           </el-form-item>
         </div>
 
-        <!-- 鉴权（可选） -->
         <div class="form-section">
           <div class="form-section-title">
             鉴权
@@ -184,7 +179,6 @@
           </el-form-item>
         </div>
 
-        <!-- 行为开关 -->
         <div class="form-section">
           <div class="form-section-title">行为开关</div>
           <el-form-item label="启用">
@@ -208,11 +202,8 @@
 
     <!-- ---------- 选择共享通道 ---------- -->
     <!--
-      为什么要有这个弹窗：
-      没有它的时候，级联只有一个「共享全部通道」开关 —— 要么全共享，要么一个都不共享。
-      而现场最常见的需求恰恰是「只给上级看这几路」：既满足上级调阅要求，
-      又不把无关通道（比如内部区域、宿舍楼）暴露出去。
-      参考站也有独立的「选择通道」入口，这是级联功能可用性的最低要求。
+      没有这个弹窗时只能「全共享 / 全不共享」，而现场最常见的需求是「只给上级看这几路」，
+      不把无关通道（内部区域、宿舍楼）暴露出去。
     -->
     <el-dialog
       v-model="channelDialog"
@@ -279,13 +270,8 @@
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
         <!--
-          自定义通道国标编号：行内编辑，与上级平台（LiveGBS）一致 ——
-          点一下单元格就地变成输入框，回车/失焦保存，Esc 取消。
-          用弹框改一个 20 位字符串太重：改错一位就要重开弹框，
-          而且看不到相邻行做对照（编号通常是按设备顺序批量微调的）。
-          编辑框预填的是**当前生效的编号**（自定义编号，没有则原编号），
-          用户可以在此基础上改几位，而不是对着空框重打 20 位。
-          改的是 custom_id，不动 channel_id —— 后者是设备实际使用的编号。
+          行内编辑（与 LiveGBS 一致）：点一下就地变输入框，回车/失焦保存、Esc 取消。
+          预填「当前生效的编号」改几位即可；改的是 custom_id，不动 channel_id。
         -->
         <el-table-column label="自定义通道国标编号" prop="customId" width="190" sortable="custom">
           <template #default="{ row }">
@@ -381,16 +367,12 @@ const auth = useAuthStore()
 
 /** 改级联配置会影响对端平台的目录，用独立的 cascade:write。 */
 const canWrite = computed(() => auth.can('cascade:write'))
-/** 选择共享通道（按钮级）。 */
 const canShare = computed(() => auth.can('cascade:share'))
-/** 推送目录（按钮级）。 */
 const canPush = computed(() => auth.can('cascade:push'))
-/** 删除级联（按钮级）。 */
 const canDelete = computed(() => auth.can('cascade:delete'))
 
 const list = ref([])
 
-/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
 const tableRef = ref(null)
 useFillTableRows(tableRef, () => list.value.length)
 const loading = ref(false)
@@ -417,7 +399,6 @@ const emptyForm = () => ({
 
 const form = reactive(emptyForm())
 
-/** 聚合搜索关键词（名称 / 平台编码 / 对端地址 / 本地地址）。 */
 const keyword = ref('')
 
 const { pager, offset, onPageChange, onSizeChange } = usePagination({
@@ -443,7 +424,6 @@ async function load() {
   }
 }
 
-/** 关键词命中名称 / 平台编码 / 对端地址 / 本地地址。 */
 const filteredList = computed(() => {
   const q = keyword.value.trim().toLowerCase()
   if (!q) return list.value
@@ -454,7 +434,6 @@ const filteredList = computed(() => {
   )
 })
 
-/** 当前页切片。 */
 const pagedList = computed(() =>
   filteredList.value.slice(offset.value, offset.value + pager.size)
 )
@@ -527,17 +506,9 @@ async function pushCatalog(row) {
 }
 
 /* ==================== 共享通道 ==================== */
-/*
- * 对齐上级平台（LiveGBS）的「选择通道」弹窗：
- * 服务端分页 + 服务端筛选/排序，而不是把全部通道拉到前端再过滤。
- *
- * 为什么改成服务端分页：原来一次性拉全部通道（limit=0）在 500 条时还能忍，
- * 但现场接入十几个下级平台后通道数是几千级，一次几 MB 的 JSON
- * 加上浏览器渲染几千行表格，弹窗要卡好几秒。
- *
- * 为什么勾选状态与列表分开存：翻页会换掉整个数据集，
- * 只看当前页的勾选会丢掉其它页的选择。已选集合独立维护，
- * 表格用 reserve-selection 保留本页勾选，保存时提交整个集合。
+/**
+ * 对齐 LiveGBS 的「选择通道」弹窗：服务端分页 + 筛选/排序；勾选状态与列表分开存，
+ * 翻页会换掉数据集，只看当前页会丢掉其它页的选择。
  */
 
 const channelDialog = ref(false)
@@ -561,11 +532,8 @@ const channelSort = reactive({ prop: 'deviceId', order: 'asc' })
 const channelSharedAll = ref(new Set())
 
 /**
- * 表格行唯一键。
- *
- * <p>不能用通道编码：不同设备的通道编码可以完全相同（国标允许），
- * 用编码做 row-key 会让两台设备的同号通道被当成同一行，
- * 勾一行等于勾了两行、reserve-selection 也会串。
+ * 表格行唯一键。不能用通道编码：不同设备的通道编码可以相同（国标允许），
+ * 会让两台设备的同号通道被当成一行，reserve-selection 串行。
  */
 function rowKeyOf(row) {
   return `${row.deviceId}:${row.id}`
@@ -580,8 +548,7 @@ function resetChannelDialog() {
   channelOnlyRelated.value = false
   channelPage.value = 1
   channelTotal.value = 0
-  // 行内编辑态必须清掉：下次打开弹窗时 editingCustomId.row 指向的是
-  // 上一批（已丢弃的）行对象，引用比对永远不成立，输入框会卡在编辑态
+  // 行内编辑态必须清掉：否则 editingCustomId.row 指向上一批已丢弃的行对象，输入框会卡在编辑态
   cancelCustomId()
 }
 
@@ -645,11 +612,8 @@ async function openChannels(row) {
   channelPage.value = 1
   channelDialog.value = true
   try {
-    /*
-     * 单独取一次「全部已共享通道」用于初始化勾选集合。
-     * 不能只靠当前页的 cascadeId 判断：翻到第 5 页时前三页的已选状态就丢了，
-     * 保存时会把这些通道当成「取消勾选」而删掉。
-     */
+    // 单独取一次「全部已共享通道」初始化勾选：只看当前页会在翻页后丢掉前几页的已选，
+    // 保存时把它们当成「取消勾选」删掉
     const shared = await cascadeApi.channelList({
       id: row.id,
       related: true,
@@ -666,12 +630,8 @@ async function openChannels(row) {
 }
 
 function onChannelSelect(rows) {
-  /*
-   * 只更新「当前页覆盖到的那部分」：
-   *   1. 先把本页所有行从已选集合里删掉（它们的状态由本次事件全权代表）
-   *   2. 再把当前勾选的行加回去
-   * 这样其它页的选择不受影响 —— 直接整体替换会丢掉跨页选择。
-   */
+  // 只更新当前页覆盖的那部分：先把本页行从已选里删掉（它们由本次事件全权代表），
+  // 再把勾选的加回去。其它页的选择不受影响，直接整体替换会丢掉跨页选择
   const next = new Set(channelSharedAll.value)
   channelRows.value.forEach((r) => next.delete(rowKeyOf(r)))
   rows.forEach((r) => next.add(rowKeyOf(r)))
@@ -680,11 +640,8 @@ function onChannelSelect(rows) {
 }
 
 /**
- * 自定义通道国标编号的行内编辑状态。
- *
- * <p>同一时刻只允许编辑一行：`row` 保存正在编辑的那一行对象本身，
- * 提交时用引用比对确认「这次提交属于当前编辑行」——
- * 只用行号判断会在列表刷新/翻页后错位。
+ * 同一时刻只允许编辑一行：row 存正在编辑的行对象本身，提交时用引用比对确认
+ * 「这次提交属于当前编辑行」—— 只用行号会在列表刷新/翻页后错位。
  */
 const editingCustomId = reactive({
   row: null,
@@ -694,12 +651,8 @@ const editingCustomId = reactive({
 const customIdInputRef = ref(null)
 
 /**
- * 通道当前「对外生效」的编号。
- *
- * <p>设置过自定义编号就用它，否则用原通道编号 —— 与列里的显示保持一致。
- * 编辑时必须基于这个值预填，不能用 {@code customId || ''}：
- * 大多数通道没有自定义编号，那样一进编辑框就是空的，
- * 用户还得把 20 位原编号手打一遍才能改一位，等于不能改。
+ * 通道对外生效的编号：有自定义就用它，否则用原通道编号。编辑时必须基于它预填，
+ * 不能用 customId || '' —— 大多数通道没自定义编号，用户要手打完 20 位才能改一位。
  */
 function effectiveChannelId(row) {
   return row.customId || row.id || ''
@@ -716,12 +669,8 @@ async function startEditCustomId(row) {
   if (!target) return
   target.focus?.()
   /*
-   * 光标放在末尾而不是全部选中。
-   *
-   * 全选看着「方便重新输入」，实际很坑：编号是 20 位，最常见的操作是
-   * 改末尾几位（按设备顺序微调）。全选状态下随手敲一个数字就把整串冲掉，
-   * 接着就弹「必须是 20 位数字」，还得重来一遍。
-   * 放末尾可以正常退格/方向键修改；要整体替换按 Ctrl+A 即可。
+   * 光标放末尾而不是全选：编号 20 位，最常见的是改末尾几位。全选下随手敲一个数字
+   * 就把整串冲掉，还弹「必须是 20 位数字」；要整体替换按 Ctrl+A。
    */
   const inner = target.input || target.$el?.querySelector?.('input')
   const len = (editingCustomId.value || '').length
@@ -732,22 +681,14 @@ async function startEditCustomId(row) {
   }
 }
 
-/** 退出行内编辑（不保存）。 */
 function cancelCustomId() {
   editingCustomId.row = null
   editingCustomId.value = ''
 }
 
 /**
- * 提交行内编辑。
- *
- * <p>回车与失焦都会调到这里，必须幂等：
- * 回车后输入框会被移除，若同时触发 blur 就会重复提交。
- *
- * <p>判定「有没有真的改过」要比较<b>生效编号</b>而不是输入框原文：
- * 编辑框是带着原编号进去的，用户什么都没动就提交时，
- * 原文 {@code 34020000001320000001} 与 {@code customId=''} 并不相等，
- * 按原文比较会把每个通道都写成「自定义编号=原编号」的冗余记录。
+ * 提交行内编辑。回车与失焦都会调到这里，必须幂等（回车后输入框被移除会再触发 blur）。
+ * 判「改过没有」比较生效编号而非输入框原文：什么都没动就提交时，原文与 customId='' 不相等。
  */
 async function commitCustomId(row) {
   // 已经不是当前编辑行（Esc 取消、或已被另一次提交收尾）→ 直接忽略
@@ -770,11 +711,8 @@ async function commitCustomId(row) {
   }
   editingCustomId.saving = true
   try {
-    /*
-     * 与通道原编号相同时存 null 而不是原样存下来：
-     * 存了也能显示对，但库里会多出一条「自定义编号 = 原编号」的无意义记录，
-     * 日后排查「这条通道到底被人改过没有」时会造成误判。
-     */
+    // 与原编号相同时存 null 而不是原样存：否则库里多一条「自定义=原编号」的无意义记录，
+    // 日后排查「这通道被人改过没有」会误判
     const toSave = value === row.id ? '' : value
     // 必须带 serial：通道编码只在单设备内唯一，只传 code 会改到别的设备的同号通道
     await deviceApi.setChannelId({
@@ -810,10 +748,7 @@ async function saveChannels() {
       channelTarget.value.shareAllChannel = shareAllLocal.value
     }
     const keys = [...channelSharedAll.value]
-    /*
-     * 不勾任何通道时给出明确警告：上级会看不到本级的通道，
-     * 而界面上只会显示「已选 0 路」，容易被误当成「还没加载完」。
-     */
+    // 不勾任何通道时明确警告：上级看不到本级通道，而界面只显示「已选 0 路」，容易被当成没加载完
     if (keys.length === 0 && !shareAllLocal.value) {
       ElMessage.warning('未选择任何通道，上级将看不到本级的通道')
     }
@@ -850,11 +785,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-/* .card-header 由 styles/main.css 统一提供 */
-
-/* 对话框高度自适应：内容较长时可滚动，不撑破视口。
-   注意必须同时约束 .el-dialog 本身（它是 flex 容器，body 才能拿到剩余高度），
-   只给 __body 加 max-height 在 flex 布局下不生效，底部按钮会被挤出视口。 */
+/* 对话框高度自适应可滚动。必须同时约束 .el-dialog 本身（flex 容器，body 才能拿剩余高度），否则底部按钮会被挤出视口 */
 :deep(.cascade-dialog.el-dialog) {
   display: flex;
   flex-direction: column;
@@ -899,14 +830,12 @@ onMounted(load)
   color: var(--text-tertiary);
 }
 
-/* 开关类字段右侧的说明文字 */
 .form-item-hint {
   margin-left: var(--sp-2);
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
 }
 
-/* 让输入框/数字框/下拉框撑满整行可用宽度 */
 .full-width {
   width: 100%;
 }
@@ -921,7 +850,6 @@ onMounted(load)
   padding-right: 40px;
 }
 
-/* 开关行垂直居中对齐，避免与标签错位 */
 :deep(.cascade-dialog .el-form-item) {
   margin-bottom: var(--sp-3);
 }
@@ -930,11 +858,9 @@ onMounted(load)
   margin-bottom: 0;
 }
 
-/* ==================== 共享通道选择 ==================== */
-
 /*
- * 顶部工具条：搜索在左、批量操作在右。
- * 通道数量可能上百，不提供搜索就只能一屏屏翻 —— 而现场往往只记得通道名。
+ * 顶部工具条：搜索在左、批量操作在右。通道数量可能上百，
+ * 不提供搜索就只能一屏屏翻 —— 而现场往往只记得通道名。
  */
 .ch-head {
   display: flex;
@@ -945,7 +871,6 @@ onMounted(load)
   flex-wrap: wrap;
 }
 
-/* 弹窗顶部工具栏：搜索 / 类型 / 只看已选 / 全部共享 */
 .ch-toolbar {
   display: flex;
   align-items: center;
@@ -990,8 +915,7 @@ onMounted(load)
   font-size: 16px;
 }
 
-/* 在线绿色 / 离线灰色：与上级平台的配色习惯一致，
-   不用 badge 圆点是因为通道列表行高小，圆点太占视觉。 */
+/* 在线绿 / 离线灰：与上级平台配色习惯一致；行高小，不用 badge 圆点 */
 .ch-online {
   color: var(--success-600, #16a34a);
   font-weight: 600;
@@ -1001,14 +925,12 @@ onMounted(load)
   color: var(--text-3, #c0c4cc);
 }
 
-/* 分页右对齐：左侧留白让「共 N 条」不贴着表格边框 */
 .ch-pager {
   display: flex;
   justify-content: flex-end;
   margin-top: var(--sp-3);
 }
 
-/* 行内编辑输入框：与单元格等宽，不留内边距造成的错位 */
 .cid-input {
   width: 100%;
 }
@@ -1017,7 +939,6 @@ onMounted(load)
   padding: 0 var(--sp-2);
 }
 
-/* 「全部共享」开启时表格仅作浏览：勾选不生效，操作它只会造成误解 */
 :deep(.is-disabled) .el-table__body,
 :deep(.is-disabled) .el-table__header {
   opacity: 0.55;
@@ -1029,7 +950,6 @@ onMounted(load)
   gap: var(--sp-2);
 }
 
-/* 已选数量：等宽数字，勾选时不会因位数变化而左右抖动 */
 .ch-count {
   font-family: var(--mono);
   font-size: var(--fs-sm);

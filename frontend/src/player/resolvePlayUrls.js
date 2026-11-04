@@ -1,21 +1,10 @@
 /**
- * 从后端返回的流信息构造「浏览器可用」的播放地址。
+ * 从后端返回的流信息构造浏览器可用的播放地址。
  *
- * <p>后端返回的地址是按<b>设备可达地址</b>（{@code gb28181.media-ip}）拼的，
- * 那是给设备 / VLC 用的；浏览器访问时主机名可能不同
- * （平台部署在 160.202.254.65，用户却从内网 192.168.x.x 访问；
- * 或本机开发时用 localhost）。
- *
- * <p>两种处理方式：
- * <ol>
- *   <li><b>开发模式（vite dev）</b>：走同源相对路径，由 vite 的 {@code /rtp}
- *       代理转发到媒体服务。这样无论后端在本地还是远程测试服务器，
- *       浏览器都只访问 {@code localhost:5173}，不存在跨域与端口不可达问题。</li>
- *   <li><b>生产模式（jar 内置前端）</b>：前端与媒体服务同机部署，
- *       把主机名替换为当前页面主机、保留端口即可。</li>
- * </ol>
- *
- * <p>RTSP / RTMP 保持原样（给 VLC / ffplay 用，浏览器播不了）。
+ * 后端按设备可达地址（gb28181.media-ip）拼地址，浏览器侧主机名可能不同：
+ * 开发模式统一走 vite 代理的同源相对路径；生产模式替换为当前页面主机。
+ * HTTPS 页面必须转同源路径，否则 ws/http 会被当混合内容拦掉。
+ * RTSP/RTMP 保持原样（只给 VLC/ffplay）。
  *
  * @param {object} streamInfo 后端 play 接口返回的流信息
  * @param {number} [mediaHttpPort] 媒体 HTTP 端口（后端地址缺失时兜底拼 ws-flv）
@@ -54,22 +43,10 @@ export function resolvePlayUrls(streamInfo, mediaHttpPort) {
   }
 
   /*
-   * HTTPS 页面必须把媒体地址改成同源路径。
-   *
-   * <p><b>不这么做的后果</b>：媒体服务（ZLM）只监听 http/ws，不提供 TLS。
-   * 页面是 https 时，浏览器会把 ws:// 与 http:// 的资源判定为**混合内容**
-   * 并直接阻止 —— 表现为「实时预览一直转圈、控制台报
-   * Mixed Content: The page at 'https://…' was loaded over HTTPS,
-   * but attempted to connect to the insecure WebSocket endpoint」。
-   * 而 HTTPS 本身是通的、登录也正常，很容易误判成流服务出问题。
-   *
-   * <p>做法：去掉协议与端口、只留路径（如 {@code /rtp/xxx.live.flv}），
-   * 由 nginx 在 HTTPS 端口上把这些路径反代到 ZLM（见生成的 nginx 配置）。
-   * 浏览器眼中它就变成同源请求，既没有混合内容问题，也不需要为媒体服务
-   * 单独申请证书或开放额外端口。
-   *
-   * <p>HTTP 页面保持原样（直连媒体端口）：那条链路已经稳定运行，
-   * 没有理由为了「统一」去动它、冒回归风险。
+   * HTTPS 页面必须转同源路径：ZLM 只提供 http/ws，浏览器会把 ws://、http://
+   * 判为混合内容直接阻断（控制台报 Mixed Content），而 HTTPS 与登录都正常，易误判成流服务故障。
+   * 去掉协议与端口只留路径，由 nginx 在 443 上反代到 ZLM。
+   * HTTP 页面保持直连——那条链路已稳定，不为统一而冒回归风险。
    */
   if (location.protocol === 'https:') {
     out.wsFlv = toSameOriginPath(out.wsFlv, 'ws')
@@ -80,12 +57,10 @@ export function resolvePlayUrls(streamInfo, mediaHttpPort) {
 }
 
 /**
- * 把媒体地址改成「同源、仅路径」形式，供 HTTPS 页面使用。
+ * 把媒体地址改成「同源、仅路径」形式（HTTPS 页面用）。
  *
- * <p>`ws://1.2.3.4:48089/rtp/x.live.flv` → `wss://当前主机/rtp/x.live.flv`
- * <br>`http://1.2.3.4:48089/rtp/x.live.flv` → `/rtp/x.live.flv`
- *
- * <p>已经是不带主机名的相对路径时原样返回 —— 幂等，重复调用不会出错。
+ * ws://1.2.3.4:48089/rtp/x.live.flv → wss://当前主机/rtp/x.live.flv
+ * 已是不带主机名的相对路径时原样返回（幂等）。
  */
 function toSameOriginPath(url, scheme) {
   if (!url) return url
@@ -107,10 +82,10 @@ function toSameOriginPath(url, scheme) {
 }
 
 /**
- * 把媒体地址改写成同源代理路径（仅开发模式用）。
+ * 把媒体地址改写成同源代理路径（仅开发模式）。
  *
- * <p>`ws://1.2.3.4:48089/rtp/x.live.flv` → `ws://localhost:5173/rtp/x.live.flv`
- * <br>`http://1.2.3.4:48089/rtp/x.live.flv` → `/rtp/x.live.flv`
+ * ws://1.2.3.4:48089/rtp/x.live.flv → ws://localhost:5173/rtp/x.live.flv
+ * http://1.2.3.4:48089/rtp/x.live.flv → /rtp/x.live.flv
  */
 function toProxyPath(url, scheme) {
   if (!url) return url
@@ -141,56 +116,19 @@ function rewriteHost(url) {
 }
 
 /**
- * 直播默认播放协议。
- *
- * <p><b>为什么是 WebRTC 而不是 FLV</b>：两者跑在不同传输层上，
- * 性能差异是协议决定的，不是代码质量能弥补的：
- * <ul>
- *   <li><b>WebRTC 走 UDP</b>，带 NACK / FEC / 抖动缓冲。丢包只是局部花屏，
- *       几百毫秒内自愈，不阻塞后续数据。</li>
- *   <li><b>FLV 走 TCP</b>（无论是 ws-flv 还是 http-flv）。
- *       TCP 是可靠传输 —— 一旦丢包，<b>所有后续数据都会等重传</b>
- *       （队头阻塞），表现为整个画面停住。国标设备经公网推流时
- *       丢失很常见，这就是「FLV 播两秒 loading 一下」的根本原因，
- *       换 flv.js / mpegts.js / jessibuca 都不会改变这一点。</li>
- * </ul>
+ * 直播默认协议。WebRTC 走 UDP（NACK/FEC、抖动缓冲），丢包只是局部花屏、几百毫秒自愈；
+ * FLV 走 TCP，丢包后所有后续数据等重传（队头阻塞），换 flv.js/mpegts.js/jessibuca 也一样。
  */
 export const LIVE_DEFAULT_PROTOCOL = 'webrtc'
 
 /**
- * 直播可选的播放协议（统一在这里定义，避免各页面各写一份、改一处漏一处）。
+ * 直播可选协议（统一在这里定义，避免各页面各写一份）。
  *
- * <p>列在这里的都是<b>浏览器真能播</b>的通路：
- * <ul>
- *   <li>{@code webrtc} —— 延迟最低（≈ 0.3s）、<b>最流畅</b>（UDP）。
- *       媒体面完全交给 liveplayer 的 {@code Webrtc} tech，信令走本平台的
- *       {@code /api/v1/webrtc/srs} 适配端点。
- *       <b>G.711（PCMA/PCMU）通道有声音</b>（ZLM 原样透传，浏览器原生解码），
- *       <b>H.265 也能播</b>（实测 2560×1440 稳定 25fps、488 帧丢 1 帧）。
- *       <b>但 AAC 通道没声音</b>：浏览器不支持 AAC-in-WebRTC，
- *       嵌入式 ZLM 也没有 ffmpeg 可转码，这类通道要声音只能换设备侧编码。</li>
- *   <li>{@code wsflv} —— WebSocket-FLV，liveplayer（video.js + flv.js）。
- *       <b>没有声音</b>：flv.js 不认 ZLM 转出的 G.711（{@code audio codec idx 7}），
- *       AAC 也会在 MSE 初始化时失败，一并关掉后画面才稳。
- *       优势是缓冲能攒到 15 秒以上，弱网下比 WebRTC 抗抖动；</li>
- *   <li>{@code httpflv} —— HTTP-FLV，同一路流换传输层，特性同 ws-flv，
- *       能穿代理/防火墙；</li>
- *   <li>{@code hls} —— 纯 HTTP、无需长连接，延迟 ≈ 3 个切片（ZLM 配 2s×3）。
- *       <b>没有声音</b>，只在极端网络环境下当最后手段。</li>
- * </ul>
- * RTSP / RTMP 不在此列：浏览器没有原生支持，只给 VLC / ffplay 用。
- *
- * <p><b>标签只写协议名</b>：括号里的特性说明（有没有声音、缓冲深不深）会让
- * 下拉项过长、挤在一起读不清，且这些特性会随设备编码变化（同一路流，
- * H.264 与 H.265 的表现就不同），写死在标签上反而会误导。
- * 各协议的实测特性以上面的注释为准。
- *
- * <p><b>两个 FLV 用短名</b>：{@code WS-FLV} 与 {@code FLV}。
- * 原来写全称 {@code WebSocket-FLV} 时是 13 个字符，在下拉里比
- * {@code WebRTC} 宽一倍，一列排下来像没对齐；
- * 而 {@code HTTP-FLV} 直接去掉 "HTTP-" 叫 {@code FLV} ——
- * 浏览器场景下 HTTP-FLV 才是默认认知（ws-flv 是它的 WebSocket 变体），
- * 所以短名留给它、长一点的那个加 {@code WS-} 前缀区分。
+ * WebRTC：≈0.3s、最流畅；G.711 有声音、H.265 可播（实测 2560×1440 25fps）；
+ * AAC 无声（浏览器不支持 AAC-in-WebRTC）。
+ * WS-FLV / FLV：无声音（flv.js 不认 G.711 idx 7 与 AAC），抗抖动好、能穿代理。
+ * HLS：无声音、延迟约 3 个切片，极端弱网兜底。
+ * 标签只写协议名；两个 FLV 用短名（WS-FLV / FLV），否则下拉宽度不齐。
  */
 export const LIVE_PROTOCOLS = [
   { value: 'webrtc', label: 'WebRTC' },
@@ -200,13 +138,11 @@ export const LIVE_PROTOCOLS = [
 ]
 
 /**
- * 该协议在给定地址集合里是否有可用地址。
- *
- * <p>FLV 的两种承载是同一路流，任一存在即可（见 {@code WsFlvStream}），
- * 所以 {@code wsflv} 与 {@code httpflv} 互相兜底 —— 但只有<b>全都没有</b>才算缺地址。
+ * 该协议在地址集合里是否可用。
+ * wsflv 与 httpflv 是同一路流的两种承载，互相兜底，全都没有才算缺地址。
  *
  * @param {string} proto 协议名
- * @param {object} urls  {@link resolvePlayUrls} 的返回值
+ * @param {object} urls resolvePlayUrls 的返回值
  */
 export function hasPlayUrl(proto, urls) {
   if (!urls) return false
@@ -219,74 +155,27 @@ export function hasPlayUrl(proto, urls) {
 /* ==================== 浏览器能力检测 ==================== */
 
 /**
- * 本浏览器能否播放 FLV（ws-flv / http-flv）。
+ * 本浏览器能否播放 FLV。
  *
- * <h3>为什么必须检测</h3>
+ * FLV 不是原生容器，必须靠 flv.js 解封装灌进 MediaSource。iOS 17.1 之前完全
+ * 没有 MediaSource；17.1+ 的 ManagedMediaSource 会让 flvjs.isSupported() 返回 true，
+ * 但 flv.js 自管 SourceBuffer 与托管缓冲对不上，实测 iPhone 微信内置浏览器
+ * 选项可点、点后无画面。故 Apple WebKit 一律判不支持，让用户走 WebRTC / 原生 HLS。
+ * 再用 avc1.42E01E 探一次 isTypeSupported：有 MediaSource 但拒绝所有 mime 的内核同样放不了。
  *
- * <p>FLV <b>不是浏览器原生容器</b> —— 没有任何浏览器能靠
- * {@code <video src="x.flv">} 播放它（原生只认 MP4/WebM/OGG，
- * Safari 额外认 HLS）。所以 FLV 一定要靠 JS 解封装后灌进
- * {@code MediaSource}（MSE），由浏览器的 MSE 管线解码。
- *
- * <h3>iOS 上为什么不行</h3>
- *
- * <ul>
- *   <li><b>iOS 17.1 之前 WebKit 完全没有 {@code MediaSource}</b>，
- *       这条路根本不存在；</li>
- *   <li>iOS 17.1 起提供了 {@code ManagedMediaSource}（另一套 API：
- *       缓冲由系统托管，而不是页面自己 append/清理）；</li>
- *   <li><b>iOS 上所有浏览器都是 WebKit</b>（苹果强制），
- *       Chrome / Edge / Firefox 一样没有 MSE —— 换浏览器解决不了。</li>
- * </ul>
- *
- * <h3>为什么我们连 {@code ManagedMediaSource} 也不认</h3>
- *
- * <p>注意：打包进来的 flv.js <b>是认它的</b>（{@code getMediaSource()} 里
- * 优先返回 {@code ManagedMediaSource}，见 {@code liveplayer-lib.min.js}），
- * 也就是说在 iOS 17.1+ 上 {@code flvjs.isSupported()} 很可能返回 true。
- * 但「API 存在」不等于「这路流能放」：
- * <ul>
- *   <li>ZLM 转出的 FLV 音频是 G.711（{@code audio codec idx 7}）或 AAC，
- *       MSE 不认 G.711 —— 这正是我们全程 {@code hasaudio=false} 的原因；</li>
- *   <li>ManagedMediaSource 要求缓冲由系统托管，而 flv.js 是「自己无脑 append
- *       + 自己清 SourceBuffer」的老模式，两者对不上，实测表现为
- *       append 被拒或缓冲涨到卡死；</li>
- *   <li>iOS 对 MSE 还有额外的播放策略限制（必须 muted + playsInline 且可见）。</li>
- * </ul>
- * 所以这里<b>刻意保守</b>：只认标准的 {@code MediaSource}，
- * iOS 上一律判为不支持，让用户走 WebRTC（最佳）或原生 HLS。
- * 这比「菜单里给一个点了必然失败的 FLV」好得多。
- *
- * <p>除了 MediaSource 是否存在，再探一次 {@code isTypeSupported}：
- * 某些精简内核有 MediaSource 对象但拒绝所有 mime，那种情况同样放不了。
- *
- * @returns {boolean} 可用返回 true
+ * @returns {boolean}
  */
 export function supportsFlv() {
   if (typeof window === 'undefined') return false
-  /*
-   * Apple WebKit 一律不可用。
-   *
-   * <p><b>不能只看 MediaSource 存不存在</b>：iOS 17.1+ 的 WKWebView
-   * （微信/QQ 内置浏览器都是它）会挂上 {@code ManagedMediaSource}，
-   * 某些版本甚至透出 {@code MediaSource}，此时下面的探测会通过、菜单里
-   * 就会出现 FLV。但 flv.js 那套「自己 append + 自己清 SourceBuffer」的
-   * 缓冲策略与托管缓冲对不上，真点下去必然黑屏。
-   *
-   * <p>实测环境：iPhone + 微信内置浏览器，FLV 选项可点、点后无画面。
-   */
+  // Apple WebKit 一律不可用：ManagedMediaSource 存在也不等于这路流能放（见函数注释）
   if (isAppleWebkit()) return false
   const MS = window.MediaSource || window.WebKitMediaSource
   if (!MS || typeof MS.isTypeSupported !== 'function') return false
   try {
-    /*
-     * 用 H.264 的 baseline profile 试探 —— ZLM 默认转出的就是它。
-     * HEVC（hvc1）= 部分安卓/桌面能过，但手机端普遍不行，
-     * 拿它当判据会把「能放 H.264」的设备误判成能放 H.265。
-     */
+    // 用 H.264 baseline 探针（ZLM 默认转出）；HEVC 会误判能放 H.264 的设备
     return MS.isTypeSupported('video/mp4; codecs="avc1.42E01E"')
   } catch (e) {
-    // 探针本身报错：保守当不支持，FLV 走不通还有 WebRTC 兜着
+    // 探针报错：保守当不支持，FLV 走不通还有 WebRTC 兜着
     return false
   }
 }
@@ -294,42 +183,14 @@ export function supportsFlv() {
 /**
  * 本浏览器能否播放 HLS。
  *
- * <p>两条通路，任一可用即可：
- * <ul>
- *   <li>原生 HLS（Safari / iOS）：{@code video.canPlayType('application/vnd.apple.mpegurl')}
- *       返回 {@code maybe}/{@code probably}。liveplayer 的 Hls source handler
- *       检测到原生支持时会主动让路，交给 {@code <video>} 自己解；</li>
- *   <li>hls.js（其余浏览器）：它同样依赖 MSE，判据与 {@link supportsFlv} 一致。</li>
- * </ul>
+ * 只认 Apple WebKit 的原生 HLS：liveplayer 打包的 VHS 缺失，contrib-hls handler
+ * 会把 m3u8 抢去 MSE，实测桌面 Chromium readyState 恒 0、报
+ * code=4 PipelineStatus::DECODER_ERROR；根因是 ZLM 分片为 H.264 + G.711，
+ * Chromium 无 G.711 解码器。Safari 原生能解，所以这条只在 Apple 上通。
  */
 export function supportsHls() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
-  /*
-   * HLS 只走「原生」，而且只给 Apple WebKit。
-   *
-   * <h3>为什么 Chromium 不给 HLS</h3>
-   *
-   * <p>打包进来的 {@code liveplayer-lib.min.js} 里 HLS 支持是残缺的：
-   * {@code videojs.getTech('Vhs')} 为 false（VHS 没打进来），而注册的
-   * contrib-hls source handler 会把 {@code application/x-mpegURL} 抢走、
-   * 把 src 改成 {@code blob:} 去走 MSE —— 那条路是死的。
-   * 实测（干净桌面 Chrome/Electron 环境）切到 HLS：
-   * {@code readyState} 恒为 0、报 {@code code=4
-   * PipelineStatus::DECODER_ERROR}。
-   *
-   * <p>更深一层，ZLM 的 HLS 分片是 H.264 + <b>G.711</b> 音频，
-   * Chromium 的 MSE/TS 管线拿不到 G.711 解码器，整条 pipeline 直接崩 ——
-   * 就算换了 hls.js 也一样。
-   *
-   * <p>而 Safari <b>原生</b>就能解 G.711-in-HLS，所以 Apple 上这条是通的。
-   *
-   * <h3>为何必须搭配原生播放（见 LivePlayerEngine#nativeHls）</h3>
-   *
-   * <p>光靠这个函数返回 true 不够：只要经过 video.js，source handler
-   * 还是会把它抢去 MSE（iOS 没有 MSE → 必挂）。所以
-   * {@code useLivePlayer} 走 {@code hls} 时会传 {@code nativeHls: true}，
-   * 直接用 {@code <video src=m3u8>}，完全绕开 video.js。
-   */
+  // 只要经过 video.js，handler 仍会抢去 MSE（iOS 没有 MSE 必挂），故必须配 nativeHls
   if (!isAppleWebkit()) return false
   try {
     const v = document.createElement('video')
@@ -341,14 +202,10 @@ export function supportsHls() {
 }
 
 /**
- * 当前浏览器是否是 Apple 的 WebKit 内核。
+ * 是否 Apple WebKit 内核。
  *
- * <p>iOS/iPadOS 上必须按<b>平台</b>判，不能按 UA 里的浏览器名：
- * 苹果强制所有 iOS 浏览器（含 Chrome for iOS、微信/QQ 内置浏览器）
- * 都用 WebKit，它们<b>同样没有可用 MSE、同样有原生 HLS</b>。
- *
- * <p>iPadOS 13+ 默认发桌面 UA（{@code Macintosh}），靠
- * {@code maxTouchPoints > 1} 兜住。
+ * 按平台判而非 UA 里的浏览器名：iOS 上所有浏览器（Chrome、微信/QQ 内置）都是 WebKit，
+ * 同样没有可用 MSE、同样有原生 HLS。iPadOS 13+ 发桌面 UA，用 maxTouchPoints > 1 兜住。
  */
 export function isAppleWebkit() {
   if (typeof navigator === 'undefined') return false
@@ -360,45 +217,18 @@ export function isAppleWebkit() {
   return vendor === 'Apple Computer, Inc.' && !/Chrome|Chromium|Edg|OPR|Electron/.test(ua)
 }
 
-/**
- * 本浏览器能否播放 WebRTC（LivePlayer 内置的 {@code Webrtc} tech）。
- *
- * <p>判据就是 {@code RTCPeerConnection} 是否存在 —— 与 tech 自己的
- * {@code isSupported} 完全一致（见 {@code liveplayer-lib.min.js}）。
- */
+/** 能否播放 WebRTC：判据与 tech 自己的 isSupported 一致（RTCPeerConnection 存在）。 */
 export function supportsWebrtc() {
   return typeof window !== 'undefined' && typeof window.RTCPeerConnection === 'function'
 }
 
 /**
- * 是否是手机端（决定要不要给用户「播放协议」这个选项）。
+ * 手机端判定（决定要不要给「播放协议」入口）。
  *
- * <h3>为什么手机端干脆不给切换入口</h3>
- *
- * <p>不是能力问题，是<b>取舍</b>：手机上可选的协议本来就剩不下几个，
- * 而每个都有明确的坑 ——
- * <ul>
- *   <li>FLV（ws/http）：Apple 全系没有可用 MSE，安卓某些定制浏览器也不行；</li>
- *   <li>HLS：延迟 3 个切片（≈6s+），且 ZLM 的 HLS 带 G.711 音频，
- *       非 Safari 解不了；</li>
- *   <li>WebRTC：手机端唯一既低延迟又有声音、还支持 H.265 的通路。</li>
- * </ul>
- * 把三个都摆出来，用户只会点到一个必然失败的选项，然后来问「为什么播不了」。
- * 与其在手机上调判断逻辑，不如<b>不给这个选项</b>：默认就是 WebRTC，
- * 它出不来时直接如实报错（比「切了个协议还是不行」清楚得多）。
- *
- * <p>桌面端保留完整切换入口 —— 那里四个协议真的都能用，
- * 排查时也需要逐条对照。
- *
- * <h3>判据</h3>
- *
- * <p>「Apple 移动端」或「窄视口」任一成立即算：
- * <ul>
- *   <li>UE 里带 iPad/iPhone/iPod，或 iPadOS 桌面 UA + 多点触控；</li>
- *   <li>视口窄于 {@code 820px} —— 覆盖安卓手机（竖屏一般 360~430）。</li>
- * </ul>
- * 桌面浏览器把窗口拖到很窄也会命中，那时少一个按钮无伤大雅，
- * 拉宽即恢复（{@code isMobile} 是响应式的，见视图里的 matchMedia 监听）。
+ * 手机上可选的协议本就剩不下几个：FLV 缺 MSE、HLS 延迟 6s+ 且 G.711 解不了，
+ * WebRTC 是唯一低延迟且有声音、支持 H.265 的通路。摆出必失败的选项只会引来
+ * 「为什么播不了」。默认 WebRTC，失败就如实报错。
+ * 判据：Apple 移动设备 / Android·HarmonyOS·Mobile UA / 视口 < 820px / 粗指针。
  */
 export function isMobileClient() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
@@ -406,15 +236,10 @@ export function isMobileClient() {
   // Apple 全系移动设备（横竖屏都算）
   if (/iPad|iPhone|iPod/.test(ua)) return true
   if (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1) return true
-  // 安卓 / 鸿蒙手机：UA 里有 Mobile（平板通常没有，但下面的 coarse 判据能兜住）
+  // Android/鸿蒙手机：UA 里有 Mobile（平板常没有，靠下面的粗指针兜底）
   if (/Android|HarmonyOS|Mobile/i.test(ua)) return true
   try {
-    /*
-     * 兜底两条，任一成立即算：
-     * - 窄视口：桌面浏览器拖窄、或某些精简 UA；
-     * - 粗指针：所有触屏设备。命中触屏笔记本时会少一个按钮，
-     *   但那台机器上少个协议切换无伤大雅，而漏判手机代价大得多。
-     */
+    // 兜底：窄视口或粗指针（触屏笔记本少一个按钮无伤大雅，漏判手机代价更大）
     return window.matchMedia('(max-width: 820px)').matches
       || window.matchMedia('(pointer: coarse)').matches
   } catch (e) {
@@ -423,12 +248,8 @@ export function isMobileClient() {
 }
 
 /**
- * 当前浏览器<b>实际能播</b>的协议列表。
- *
- * <p>用途：协议菜单只列这些，避免给用户一个点了必然失败的选项。
- * 顺序沿用 {@link LIVE_PROTOCOLS}（WebRTC 优先）。
- *
- * <p>典型差异：桌面 Chrome 四项全有；iPhone Safari 只有 WebRTC + HLS。
+ * 当前浏览器实际能播的协议，顺序沿用 LIVE_PROTOCOLS（WebRTC 优先）。
+ * 桌面 Chrome 四项全有；iPhone Safari 只有 WebRTC + HLS。
  */
 export function availableProtocols() {
   return LIVE_PROTOCOLS.filter((o) => {
@@ -450,13 +271,10 @@ export function isProtoSupported(proto) {
 }
 
 /**
- * 从候选协议里挑一个当前浏览器能播的。
- *
- * <p>用于「用户选了一个本机放不了的协议」时的降级：
- * 优先 WebRTC（延迟最低、H.265 也能放），其次按菜单顺序。
+ * 从候选协议里挑一个能播的：优先 WebRTC（延迟最低、H.265 也能放），其次按菜单顺序。
  *
  * @param {string} [preferred] 首选协议（能播就用它）
- * @returns {string|null} 可用协议名；一个都没有时返回 {@code null}
+ * @returns {string|null} 一个都没有时返回 null
  */
 export function pickSupportedProto(preferred) {
   if (preferred && isProtoSupported(preferred)) return preferred

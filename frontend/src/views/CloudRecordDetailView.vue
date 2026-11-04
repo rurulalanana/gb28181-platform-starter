@@ -1,15 +1,7 @@
 <template>
   <!--
-    布局对齐 LiveGBS 的「云端录像 / 时间轴视图」页
-    （路由 #/cloudrecord/timeview/<设备编码>/<通道编码>）：
-
-      标题（居中）
-      工具条：左 返回/分享页/下载，右 日期选择器 + 列表视图
-      播放器（居中，最大 700px，16:9）+ 可拖动进度条
-      时间轴（整宽，无录像段列表 —— 列表在独立页面）
-
-    注意不要用 .page.is-fill —— 那个类会把卡片压进一屏高度，
-    播放器会被挤成扁条（实测过）。
+    布局对齐 LiveGBS 的「云端录像 / 时间轴视图」页：标题居中 → 工具条 → 播放器（最大 700px）
+    → 24 小时时间轴。不要用 .page.is-fill，它会把卡片压进一屏高度、播放器挤成扁条。
   -->
   <div class="page detail-page">
     <el-card shadow="never" class="detail-card">
@@ -18,7 +10,7 @@
         云端录像({{ channelName }})-时间轴视图
       </div>
 
-      <!-- 工具条：左 返回/分享页/下载，右 日期选择器 + 列表视图 -->
+      <!-- 工具条 -->
       <div class="filter-bar">
         <el-button size="small" @click="goBack">
           <el-icon><ArrowLeft /></el-icon> 返回
@@ -32,11 +24,8 @@
         <span class="filter-bar-spacer" />
 
         <!--
-          日期选择器：用日历组件（el-date-picker）承载「本月有录像的日期」。
-
-          <b>没有录像的日期直接禁用</b>（disabledDate）—— 选了也是空，
-          不如让用户一眼看出哪天有录像。面板里再用 #default 槽把
-          有录像的日期标成蓝底，禁用不了的日期是灰的。
+          日期选择器承载「本月有录像的日期」：无录像的日期直接禁用，
+          有录像的日期用 #default 槽标成蓝底。
         -->
         <el-date-picker
           v-model="period"
@@ -60,24 +49,15 @@
         </el-button>
       </div>
 
-      <!-- 播放器：居中，最宽 1000px（与实时预览的播放弹窗观感一致） -->
+      <!-- 播放器：居中，最宽 1000px -->
       <div class="player-wrap">
         <div class="video-box">
           <!--
-            录像播放：统一用 xgplayer 渲染（挂载点是普通容器，播放器在内部自建 video），
-            与实时预览是同一套控制栏、同一套全屏与音量交互。
-
-            1) H.264：地址直接交给 xgplayer 走原生解码。Range 由容器实现，
-               首帧只下载文件头，秒开；拖动进度条是浏览器原生行为。
-            2) H.265：ZLM 录出的 MP4 里夹着残缺帧（UDP 丢包 → PS 解封装失败），
-               浏览器硬解不容错会 PIPELINE_ERROR_DECODE，只出首帧。
-               此时由 useRecordPlayer 内的 MSE 内核接管：先建 MediaSource
-               把 blob URL 交给 xgplayer 当媒体源，再按 GOP 灌 fMP4，
-               坏段跳过继续播（浏览器端只换容器，不转码）。
-
-            token 拼在 URL 上：/api/v1/... 通路带不了自定义头，
-            后端 Sa-Token 配了从 query 读（is-read-body）。
-            静态 /record/... 通路不过拦截器，不需要 token。
+            H.264 直接交给 xgplayer 原生解码：Range 由容器实现，首帧只下载文件头，秒开。
+            H.265 由 useRecordPlayer 的 MSE 内核接管：ZLM 录出的 MP4 夹着残缺帧（UDP 丢包），
+            浏览器硬解不容错会 PIPELINE_ERROR_DECODE、只出首帧；MSE 按 GOP 灌 fMP4、坏段跳过。
+            token 拼在 URL 上：/api/v1 通路带不了自定义头，后端 Sa-Token 从 query 读；
+            静态 /record/... 不过拦截器，不需要 token。
           -->
           <div v-if="playingRecord" ref="videoContainer" class="video-container" />
           <div v-else class="player-tip">
@@ -188,16 +168,12 @@ const auth = useAuthStore()
 const canDelete = computed(() => auth.can('cloud:delete'))
 
 /**
- * 生成分享链接需要 cloud:write。
- *
- * <p>分享页免登录、凭签名令牌访问 —— 生成分享等于把这段录像交给平台之外的人，
- * 属于「管理」而不是「观看」，因此不给只看不放的账号。
+ * 生成分享链接需 cloud:write：分享页免登录、凭签名令牌访问，
+ * 等于把录像交给平台之外的人，属于「管理」而不是「观看」。
  */
 const canWrite = computed(() => auth.can('cloud:write'))
-/** 分享（按钮级）。 */
 const canShare = computed(() => auth.can('cloud:share'))
 
-/** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
 const code = computed(() => String(route.query.code || ''))
 
@@ -208,16 +184,11 @@ const monthFlags = ref('')
 const channelName = ref('')
 const loadingDaily = ref(false)
 
-/**
- * 日期格子是否「有录像」/ 是否禁用（判据见 {@code utils/cloudRecord.js}）。
- *
- * <p>日历面板逐格调用（28~42 次），所以用 Set 而不是数组 {@code includes}。
- */
+/** 日历逐格调用（28~42 次），用 Set 而不是数组 includes。 */
 const recordDaySet = computed(() => new Set(recordDaysOf(monthFlags.value)))
 const cellHasRecord = (cell) => isRecordDay(cell, flagsMonth.value, recordDaySet.value)
 const cellDisabled = (date) => isDisabledDate(date, flagsMonth.value, recordDaySet.value)
 
-/** 跳到列表视图（独立页面，对齐 LiveGBS 的 #/cloudrecord/listview/...）。 */
 function goListView() {
   router.push({
     path: '/cloud/detail/list',
@@ -226,12 +197,8 @@ function goListView() {
 }
 
 /**
- * 日期变了就重新加载。
- *
- * <p><b>用 watch 而不是只靠 @change</b>：el-date-picker 用了 #default 槽
- * 自定义格子渲染后，Element 内部的 pick 流程与默认不完全一致，
- * 实测 @change 不触发（modelValue 变了但没有请求发出）。
- * watch modelValue 最可靠。
+ * 日期变了就重新加载。用 watch 而不是 @change：el-date-picker 用了 #default 槽
+ * 自定义格子后，内部 pick 流程与默认不一致，实测 @change 不触发（modelValue 变了但没发请求）。
  */
 watch(period, async (value, old) => {
   if (!value || value === old) return
@@ -242,10 +209,8 @@ watch(period, async (value, old) => {
   await loadDaily()
 })
 
-/** 播放中的录像（底栏展示用）。 */
 const playingRecord = ref(null)
 
-/** 播放状态（展示用，直接映射播放器状态）。 */
 const playState = computed(() => recordPlayer.state.value)
 const playStateType = computed(() => {
   if (playState.value === '播放中') return 'success'
@@ -257,11 +222,8 @@ const playStateType = computed(() => {
 const videoContainer = ref(null)
 
 /**
- * 录像播放器：LivePlayer。
- *
- * <p>与实时预览、设备录像回放是<b>同一个播放器</b>。
- * 云端录像是标准 mp4，走 LivePlayer 的官方点播通路：
- * {@code live=false} 显示进度条，支持拖动定位与倍速。
+ * 录像播放器：与实时预览、设备录像回放是同一个播放器。
+ * 云端录像是标准 mp4，走官方点播通路（live=false）：显示进度条，支持拖动与倍速。
  */
 const recordPlayer = useLivePlayer(videoContainer, {
   onFatal: (msg) => ElMessage.error('播放失败：' + msg),
@@ -269,20 +231,10 @@ const recordPlayer = useLivePlayer(videoContainer, {
 })
 
 /**
- * 自动连播下一段。
- *
- * <p>云端录像是一段段独立的 MP4（设备断线、码流中断都会切段），
- * 看完一段还要回头去点时间轴，连续看半小时得点二十次 —— 所以播完
- * 自动接下一段。到当天最后一段就停下，停在「播放结束」。
- *
- * <p><b>跳过仍在录制的段</b>：这种段没结束、文件还在增长，后端也不回填
- * {@code playUrl}，点它必然播放失败。连播遇到就跳过，否则自动续播会
- * 以一个错误提示收场。
- *
- * <p><b>为什么用 setTimeout 推迟而不是直接调 play</b>：本函数由
- * xgplayer 的 {@code ended} 事件触发，此时事件回调还在播放器内部栈上；
- * 直接 {@code play()} 会在回调里销毁当前播放器（{@code stop()}），
- * 容易触发播放器自身的清理竞态。推到下一个宏任务就绕开了。
+ * 自动连播下一段：云端录像是一段段独立 MP4（断线/中断都切段），不连播看半小时要点二十次。
+ * 跳过仍在录制的段（没结束、文件在增长，后端不回填 playUrl，点了必然失败）。
+ * 用 setTimeout 推迟：本函数由 xgplayer 的 ended 事件触发，直接 play() 会在回调里
+ * 销毁当前播放器，容易触发清理竞态；推到下一个宏任务就绕开了。
  */
 function playNext() {
   const cur = playingRecord.value
@@ -314,8 +266,6 @@ function playNext() {
     play(next)
   }, 0)
 }
-
-/* ==================== 时间轴 ==================== */
 
 const nowPercent = ref(null)
 const nowText = ref('')
@@ -382,10 +332,6 @@ const timelineSummary = computed(() => {
   return `合计约 ${h ? h + ' 小时 ' : ''}${m} 分钟`
 })
 
-/* ==================== 数据加载 ==================== */
-
-/* fmtCompactTs / formatSize / uploadText / uploadColor 见 utils/cloudRecord.js */
-
 async function loadDaily() {
   if (!serial.value || !code.value) {
     ElMessage.warning('缺少通道参数')
@@ -434,33 +380,15 @@ function goBack() {
 /* ==================== 点播 / 下载 / 删除 ==================== */
 
 /**
- * 点播一段录像。
+ * 点播一段录像。H.264 / 探测不出编码 → 原生直连 playUrl（/record/... 是静态资源映射，
+ * Range 由容器实现，秒开）；H.265 → 容错通路。H.265 的 MP4 几乎必然夹着残缺帧
+ * （UDP 丢包 → PS 解封装失败），浏览器硬解只报 PIPELINE_ERROR_DECODE，且拿到 src 后
+ * 会预取整个文件（实测 57MB 全下完才报错），所以先探几十 KB 编码再决定。
  *
- * <p>播放器统一用 xgplayer（与实时预览同一套控制栏），这里只负责挑通路：
- *
- * <ul>
- *   <li><b>H.264 / 探测不出编码</b> → 原生直连。
- *       接口回填的 {@code playUrl}（{@code /record/...}）是 Spring 静态资源映射，
- *       Range 由容器实现，首帧只下载文件头，秒开，拖动进度条是浏览器原生行为。</li>
- *   <li><b>H.265</b> → 直接走容错通路。ZLM 录出的 H.265 MP4 里几乎必然夹着
- *       残缺帧（UDP 丢包 → PS 解封装失败 → 残帧仍被写进文件），浏览器硬解不容错，
- *       原生播放只会 {@code PIPELINE_ERROR_DECODE}；而且浏览器拿到 {@code src}
- *       后会<b>预取整个文件</b>（实测 57MB 全下完才报错），
- *       所以先花几十 KB 探一下编码，H.265 直接跳过原生尝试。</li>
- * </ul>
- *
- * <p><b>不调 {@code /cloudrecord/play}</b>：那个接口是把 MP4 拉进 ZLM
- * 转成 ws-flv/webrtc 地址，供「流式」播放用。本页直接播文件，
- * 那些地址一个都用不上；调它反而会让 ZLM 白读一遍文件、多等一个来回。
+ * 不调 /cloudrecord/play：那是把 MP4 拉进 ZLM 转 ws-flv/webrtc 的接口，本页直接播文件用不上。
  */
 async function play(record) {
-  /*
-   * 正在录制的段点不了。
-   *
-   * <p>这种段 {@code endTime} 为 null、文件还在增长：后端不回填
-   * {@code playUrl}（媒体索引尚未定稿），走受保护接口也会失败。
-   * 与其让用户看到「播放失败」，不如直接说清原因。
-   */
+  // 录制中的段 endTime 为 null、文件还在增长，后端不回填 playUrl，必然失败
   if (record.recording) {
     ElMessage.warning('该段仍在录制中，录制结束后才能回放')
     return
@@ -481,23 +409,16 @@ async function play(record) {
   }
 }
 
-/**
- * 停止点播。
- *
- * <p>销毁播放器会释放 MediaSource，并中止对录像文件的请求。
- */
+/** 停止点播：销毁播放器会释放 MediaSource，并中止对录像文件的请求。 */
 function stopPlay() {
   recordPlayer.stop()
   playingRecord.value = null
 }
 
 /**
- * 下载一段录像（判据与动作统一在 {@code utils/cloudRecord.js}，与列表页共用）。
- *
- * <p>本地录像的 {@code downloadUrl} 就是播放用的同源静态路径，交给
- * {@code downloadFile} 让浏览器原生下载即可 —— 有进度、能续传、不占内存。
- * 对象存储的地址是跨域的签名 URL，会新开窗口，由服务端的
- * {@code Content-Disposition} 决定文件名。
+ * 下载（判据与动作统一在 utils/cloudRecord.js，与列表页共用）。
+ * 本地录像的 downloadUrl 就是播放用的同源静态路径，浏览器原生下载有进度、能续传；
+ * 对象存储的签名 URL 跨域，会新开窗口，文件名由服务端 Content-Disposition 决定。
  */
 function download(record) {
   downloadRecord(record, channelName.value)
@@ -508,11 +429,7 @@ function downloadCurrent() {
   if (playingRecord.value) download(playingRecord.value)
 }
 
-/**
- * 生成分享链接。
- *
- * <p>分享页免登录（凭签名令牌），把这一段录像分享给不登录平台的人看。
- */
+/** 生成分享链接（分享页免登录，凭签名令牌访问）。 */
 async function shareCurrent() {
   if (!playingRecord.value?.recordId) {
     ElMessage.warning('请先点播一段录像')
@@ -606,10 +523,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/*
- * 表格与工具条沿用全局样式（.filter-bar / .el-table），
- * 与「设备管理」「通道管理」保持一致，这里只补标题与时间轴。
- */
+/* 表格与工具条沿用全局样式，这里只补标题与时间轴 */
 .box-title {
   text-align: center;
   font-size: 15px;
@@ -618,15 +532,9 @@ onUnmounted(() => {
   padding: 4px 0 12px;
 }
 
-/* ==================== 播放器 ==================== */
-
 /*
- * 播放器居中，最大 700px —— 对齐 LiveGBS 的
- * `.player-wrapper { max-width: 700px; margin: 0 auto }`。
- *
- * <p><b>为什么不用 .page.is-fill</b>：那个类会让卡片「吃掉一屏高度」，
- * 内部再放播放器 + 时间轴 + 分段表，播放器就会被 flex 挤成扁条
- * （实测画面被压成一条）。本页内容本来就要滚动，故不撑满。
+ * 播放器居中，最大 1000px。不用 .page.is-fill：它让卡片吃掉一屏高度，
+ * 播放器会被 flex 挤成扁条（实测画面被压成一条）。
  */
 .player-wrap {
   max-width: min(1000px, 100%);
@@ -647,13 +555,8 @@ onUnmounted(() => {
 }
 
 /*
- * xgplayer 内部的 video。
- *
- * <p>xgplayer 自己会给 video 设 {@code width/height: 100%}，
- * 但 <b>object-fit 只有在根节点带 data-xgfill 时才生效</b>。
- * 这里再兜一层 contain：录像分辨率（如 2560×1440）与 16:9 容器
- * 比例一致时看不出差别，一旦容器被拉成别的比例（窄屏、右侧留白），
- * 缺了它画面就会被<b>非等比拉伸</b> —— 这正是之前"画面变形"的原因。
+ * xgplayer 内部的 video。object-fit 只有在根节点带 data-xgfill 时才生效，
+ * 再兜一层 contain：容器被拉成非 16:9 时缺了它画面会被非等比拉伸（曾出现「画面变形」）。
  */
 .video-container :deep(video) {
   object-fit: contain;
@@ -671,14 +574,9 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-/* ==================== 日历 ==================== */
-
 /*
- * 日期选择器里的日期格：当天有录像的用蓝底高亮，一眼看出「哪天有录像」。
- *
- * <p>Element 的日期面板逐格渲染，走 #default 槽
- * （basic-cell-render 里 renderSlot(slots,'default',cell)），
- * 所以可以完全接管格子的渲染。
+ * 日期格：有录像的蓝底高亮。Element 的日期面板逐格渲染 #default 槽，
+ * 可以完全接管格子渲染。
  */
 .cal-cell {
   width: 100%;
@@ -697,9 +595,8 @@ onUnmounted(() => {
 }
 
 /*
- * 没有录像的日期：Element 会给 td 加 .disabled，但默认样式太淡
- * （opacity 仍是 1、cursor 还是 pointer），看不出来点不了。
- * 这里明确置灰 + 禁止点击。
+ * 没有录像的日期：Element 默认样式太淡（opacity 仍为 1、cursor 还是 pointer），
+ * 看不出点不了，这里明确置灰 + 禁止点击。
  */
 .date-picker :deep(.el-date-table td.disabled .cal-cell) {
   color: var(--text-disabled, #c0c4cc);
@@ -717,8 +614,6 @@ onUnmounted(() => {
   width: 160px;
 }
 
-/* ==================== 时间轴 ==================== */
-
 .timeline-wrap {
   padding: 4px 0 16px;
   display: flex;
@@ -726,7 +621,6 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-/* 时间轴轨道本身只占固定高度，下方跟分段表 */
 .seg-table {
   margin-top: 14px;
 }
@@ -763,11 +657,7 @@ onUnmounted(() => {
   background: var(--bg-sunken);
   border: 1px solid var(--line);
   border-radius: 8px;
-  /*
-   * 两层刻度，对齐 LiveGBS 的 .time-day（288 个 5 分钟小格 + 小时线）：
-   *   细线 = 每 5 分钟一格（100% / 288）
-   *   粗线 = 每小时（100% / 24）
-   */
+  /* 两层刻度对齐 LiveGBS 的 .time-day：细线每 5 分钟（100%/288），粗线每小时 */
   background-image:
     repeating-linear-gradient(
       to right,

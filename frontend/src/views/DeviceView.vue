@@ -1,11 +1,7 @@
 <template>
   <div class="page is-fill">
 
-    <!--
-      工具条：筛选条件在左，操作按钮在右，一行放完。
-      早先分成「页头放刷新/导出」+「下面一条筛选栏」两行，
-      白白多占一行竖向空间，且页头与筛选栏离得远，操作与条件不在同一视觉区。
-    -->
+    <!-- 工具条：筛选在左、操作在右，一行放完（早先拆两行，白白多占竖向空间） -->
     <div class="filter-bar">
       <el-input
         v-model="query.q"
@@ -31,14 +27,52 @@
       <el-button size="small" title="导出设备列表（CSV）" @click="exportCsv">
         <el-icon><Download /></el-icon> 导出
       </el-button>
+      <!--
+        添加设备：三个入口收成一个分裂按钮。
+
+        <p>为什么不并排三个按钮：它们都是「让平台多一台设备」，并排会把工具栏挤满，
+        而且新人分不清「主动注册」和「按 IP 添加」该点哪个。主按钮放最常用的手工录入，
+        另外两个进下拉；主动注册那项带数量角标 —— 有设备排队却没提示，等于没这个功能。
+
+        <p>国标设备不需要这里：它由设备 REGISTER 推上来，平台从不主动建。
+      -->
+      <el-dropdown
+        v-if="canWrite"
+        split-button
+        type="primary"
+        size="small"
+        trigger="click"
+        class="add-device"
+        @click="openDahua()"
+        @command="onAddCommand"
+      >
+        添加设备
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="manual">
+              <el-icon><Plus /></el-icon> 按 IP 添加
+            </el-dropdown-item>
+            <el-dropdown-item command="register">
+              <el-icon><Connection /></el-icon> 主动注册设备
+              <el-badge
+                v-if="pendingRegistered > 0"
+                :value="pendingRegistered"
+                class="add-device-badge"
+              />
+            </el-dropdown-item>
+            <el-dropdown-item command="discover" divided>
+              <el-icon><Search /></el-icon> 搜索局域网设备
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <el-card shadow="never">
 
       <!--
-        table-layout="fixed"：列宽严格按 width/min-width 分配，不再随内容重算。
-        默认的 fit 布局会测量每列内容最大宽度，行内编辑的 input 一出现
-        （或某个操作按钮加载态变化），列宽就会重排，整张表跟着跳。
+        table-layout="fixed"：默认 fit 布局会测量每列内容最大宽度，行内编辑的 input
+        出现或按钮 loading 变化时列宽会重排，整张表跟着跳。
       -->
       <el-table ref="tableRef" v-loading="loading" :data="devices" stripe table-layout="fixed">
         <el-table-column prop="id" label="设备国标编号" width="180" fixed="left" sortable show-overflow-tooltip>
@@ -52,10 +86,7 @@
           show-overflow-tooltip
         >
           <template #default="{ row }">
-            <!--
-              按需编辑：常驻输入框会在每行渲染「点击修改」占位符，一屏几十行全是灰字，很脏。
-              改为平时显示文本、点击才换成输入框。
-            -->
+            <!-- 常驻输入框会在每行渲染「点击修改」占位符，一屏几十行全是灰字 -->
             <el-input
               v-if="row._editing"
               v-model="row.customName"
@@ -77,14 +108,9 @@
         <el-table-column label="流传输模式" width="112" align="center">
           <template #default="{ row }">
             <!--
-              用 el-dropdown（文字 + 箭头）而非 el-select：
-              select 在表格里是个带边框的输入框，一屏几十行全是灰框，很脏；
-              文字下拉既清爽又保留了切换能力。
-
-              【坑】el-dropdown 在表格里多行复用时，@command 只回传被选项的值，
-              不知道自己属于哪一行。实测点第 5 行的菜单，改的却是第 1 行。
-              解决：命令值带上设备编码（`设备编码|模式标识`），
-              由 handleTransportCommand 拆开，自己去对应行上应用。
+              用文字 + 箭头而不是 el-select（后者一屏几十行全是灰框）。
+              el-dropdown 在表格里复用时 @command 只回传值、不知道行（实测点第 5 行改的是第 1 行），
+              所以命令值带上设备编码，由 handleTransportCommand 拆开。
             -->
             <el-dropdown
               v-if="canWrite"
@@ -109,7 +135,6 @@
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <!-- 只读账号只看到当前模式，不给切换入口 -->
             <span v-else class="text-muted">{{ transportText(row) }}</span>
           </template>
         </el-table-column>
@@ -153,7 +178,14 @@
 
         <el-table-column label="操作" width="232" align="center" fixed="right">
           <template #default="{ row }">
-            <!-- 「更新通道」仅在线设备可用；「删除」仅离线设备可用（防误删在线设备）。 -->
+            <!--
+              删除按钮的可用条件按接入方式区分：
+                · SDK 直连设备（大华等）：连接是平台主动发起的，设备侧不会自己断开，
+                  所以<b>在线也能删</b>（后端会先登出 SDK 会话）。
+                · 国标设备：它自己在往平台 REGISTER，删了立刻注册回来，
+                  必须先离线才能删，否则等于没删。
+              早期一刀切用 !row.online，导致大华设备永远看不到删除按钮。
+            -->
             <div class="row-actions">
               <el-button link type="primary" @click="viewChannels(row)">查看通道</el-button>
               <el-button
@@ -164,7 +196,12 @@
                 @click="collect(row)"
               >更新通道</el-button>
               <el-button v-if="canWrite" link class="act-edit" @click="openEdit(row)">编辑</el-button>
-              <el-button v-if="!row.online && canDelete" link type="danger" @click="remove(row)">删除</el-button>
+              <el-button
+                v-if="canDelete && (isSdkDevice(row) || !row.online)"
+                link
+                type="danger"
+                @click="remove(row)"
+              >删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -181,7 +218,6 @@
       />
     </el-card>
 
-    <!-- 编辑设备 -->
     <el-dialog v-model="editDialog" title="编辑设备" width="820px">
       <el-form :model="form" label-width="130px" class="edit-form">
         <el-row :gutter="20">
@@ -246,7 +282,116 @@
       </template>
     </el-dialog>
 
-    <!-- 设备详情：状态记录 / 流量统计 / 移动轨迹 / 会话列表 -->
+    <!-- 接入 SDK 直连设备（大华 NetSDK） -->
+    <el-dialog v-model="dahuaDialog" title="接入 SDK 设备（大华 NetSDK）" width="460px">
+      <el-form :model="dahuaForm" label-width="92px">
+        <el-form-item label="设备编号" required>
+          <el-input v-model="dahuaForm.serial" placeholder="设备序列号，如 10001" />
+        </el-form-item>
+        <el-form-item label="设备地址" required>
+          <el-input v-model="dahuaForm.host" placeholder="192.168.10.156" />
+        </el-form-item>
+        <el-form-item label="SDK 端口" required>
+          <el-input-number v-model="dahuaForm.port" :min="1" :max="65535" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="用户名" required>
+          <el-input v-model="dahuaForm.username" placeholder="admin" />
+        </el-form-item>
+        <el-form-item label="密码" required>
+          <el-input v-model="dahuaForm.password" type="password" show-password placeholder="设备登录密码" />
+        </el-form-item>
+        <el-form-item label="显示名称">
+          <el-input v-model="dahuaForm.name" placeholder="留空则用设备编号" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dahuaDialog = false">取消</el-button>
+        <el-button type="primary" :loading="dahuaSaving" @click="submitDahua">接入</el-button>
+      </template>
+    </el-dialog>
+
+
+    <!--
+      主动注册设备：设备已经连上平台（9500），但平台不知道它的账号密码。
+
+      <p>为什么不自动纳管：不同现场设备密码各不相同，全局默认值只能覆盖一部分；
+      更糟的是自动纳管会覆盖用户手填的凭据（表现为「昨天能连，今天密码错」）。
+    -->
+    <el-dialog v-model="registerDialog" title="主动注册设备" width="720px">
+      <el-table :data="registerRows" size="small" max-height="360"
+                empty-text="没有等待纳管的设备">
+        <el-table-column prop="serial" label="序列号" width="110" />
+        <el-table-column prop="ip" label="IP" width="130" />
+        <el-table-column label="最后注册" width="150">
+          <template #default="{ row }">{{ fmtRegTime(row.lastSeenAt) }}</template>
+        </el-table-column>
+        <el-table-column label="账号" width="120">
+          <template #default="{ row }">
+            <el-input v-model="row.username" size="small" placeholder="admin" />
+          </template>
+        </el-table-column>
+        <el-table-column label="密码" width="140">
+          <template #default="{ row }">
+            <el-input
+              v-model="row.password"
+              size="small"
+              type="password"
+              show-password
+              placeholder="设备密码"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="130">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              type="primary"
+              link
+              :loading="row.adopting"
+              @click="adoptRegistered(row)"
+            >
+              纳管
+            </el-button>
+            <!-- 忽略：只是把它从这张待办表里去掉，设备下次注册还会回来 -->
+            <el-button size="small" link @click="ignoreRegistered(row)">忽略</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button size="small" @click="loadRegister">刷新</el-button>
+        <el-button size="small" @click="registerDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 局域网搜索：SDK 广播发现，只在同一广播域有效 -->
+    <el-dialog v-model="discoverDialog" title="搜索局域网大华设备" width="620px">
+      <div class="discover-bar">
+        <el-input
+          v-model="discoverLocalIp"
+          size="small"
+          placeholder="本机网卡 IP（多网卡机器建议填）"
+          style="width: 240px"
+        />
+        <el-button size="small" type="primary" :loading="discovering" @click="runDiscover">
+          {{ discovering ? '搜索中…' : '开始搜索' }}
+        </el-button>
+      </div>
+      <el-table :data="discoverRows" size="small" max-height="320" empty-text="尚未搜索，或该网段没有设备应答">
+        <el-table-column prop="serial" label="序列号" width="110" />
+        <el-table-column prop="ip" label="IP" width="130" />
+        <el-table-column prop="model" label="型号" />
+        <el-table-column prop="channels" label="通道" width="70" />
+        <el-table-column label="操作" width="100">
+          <template #default="{ row }">
+            <el-tag v-if="row.managed" size="small" type="success">已纳管</el-tag>
+            <el-button v-else size="small" type="primary" link @click="useDiscovered(row)">添加</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button size="small" @click="discoverDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
     <DeviceDetailDialog v-model:visible="detailVisible" :device="detailTarget" />
   </div>
 </template>
@@ -256,7 +401,7 @@ import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { useRouter } from 'vue-router'
-import { deviceApi } from '@/api'
+import { deviceApi, dahuaApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -266,21 +411,27 @@ import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 const auth = useAuthStore()
 const router = useRouter()
 
-/**
- * 能否编辑设备。
- *
- * <p>只读账号仍可「查看通道」与播放，但不再看到编辑/删除/切换传输模式 ——
- * 界面显隐只是不让用户白点一次，真正的拦截在后端 {@code device:write}。
- */
+/** 只读账号仍可查看通道/播放，但看不到编辑、删除、切换传输模式。真正拦截在后端 device:write。 */
 const canWrite = computed(() => auth.can('device:write'))
-/** 采集/同步设备目录与参数（按钮级）。 */
 const canSync = computed(() => auth.can('device:sync'))
-/** 删除设备（按钮级）。 */
 const canDelete = computed(() => auth.can('device:delete'))
+
+/**
+ * 是否 SDK 直连设备（大华等）。
+ *
+ * <p>判断依据是后端返回的 {@code source}（{@code gb_device.source}）。
+ * 需要这个区分是因为删除条件不同：
+ * SDK 设备的连接由平台发起，设备侧不会自己断开，所以<b>在线也能删</b>；
+ * 国标设备自己在往平台 REGISTER，必须先离线。
+ */
+function isSdkDevice(row) {
+  const s = String(row?.source || '').toLowerCase()
+  // netsdk 是大华的历史别名
+  return s === 'dahua' || s === 'netsdk' || s === 'sdk'
+}
 
 const devices = ref([])
 
-/** 行高随表体可用高度自适应，数据少时铺满、数据多时内部滚动。 */
 const tableRef = ref(null)
 useFillTableRows(tableRef, () => devices.value.length)
 const loading = ref(false)
@@ -288,7 +439,74 @@ const busy = ref('')
 const saving = ref(false)
 const query = reactive({ q: '', online: null })
 
-/** 重置筛选条件并重新查询。 */
+/* ==================== 接入 SDK 直连设备（大华 NetSDK） ==================== */
+
+const dahuaDialog = ref(false)
+const dahuaSaving = ref(false)
+const dahuaForm = reactive({
+  serial: '',
+  host: '',
+  port: 37777,
+  username: 'admin',
+  password: '',
+  name: ''
+})
+
+/**
+ * 打开手工录入弹窗。
+ *
+ * @param prefill 预填值：从「局域网搜索」点「添加」时带过来，
+ *                直接填好序列号/IP/端口，用户只差账号密码
+ */
+function openDahua(prefill) {
+  dahuaForm.serial = prefill?.serial || ''
+  dahuaForm.host = prefill?.host || ''
+  dahuaForm.port = prefill?.port || 37777
+  dahuaForm.username = prefill?.username || 'admin'
+  dahuaForm.password = prefill?.password || ''
+  dahuaForm.name = prefill?.name || ''
+  dahuaDialog.value = true
+}
+
+async function submitDahua() {
+  const serial = dahuaForm.serial.trim()
+  const host = dahuaForm.host.trim()
+  if (!serial || !host) {
+    ElMessage.warning('设备编号与设备地址必填')
+    return
+  }
+  if (!dahuaForm.username.trim() || !dahuaForm.password) {
+    ElMessage.warning('SDK 直连需要用户名与密码')
+    return
+  }
+  dahuaSaving.value = true
+  try {
+    await deviceApi.addDahua({
+      serial,
+      host,
+      port: dahuaForm.port,
+      username: dahuaForm.username.trim(),
+      password: dahuaForm.password,
+      name: dahuaForm.name.trim() || undefined
+    })
+    dahuaDialog.value = false
+    ElMessage.success('已接入，正在同步通道…')
+    await load()
+    try {
+      // SDK 设备不会自己上报目录，必须平台主动去问
+      await deviceApi.refreshSdk(serial)
+      await load()
+      ElMessage.success('通道同步完成')
+    } catch (e) {
+      ElMessage.warning('设备已接入，但通道同步失败：' + (e.message || e))
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '接入失败')
+  } finally {
+    dahuaSaving.value = false
+  }
+}
+
 function resetQuery() {
   query.q = ''
   query.online = null
@@ -298,7 +516,6 @@ function resetQuery() {
 /** 正在保存名称的设备编号集合（防重复提交）。 */
 const namePending = reactive(new Set())
 
-/** 正在切换流传输模式的设备编号集合。 */
 const transportPending = reactive(new Set())
 
 const editDialog = ref(false)
@@ -360,12 +577,8 @@ function viewChannels(row) {
   router.push({ path: '/channels', query: { serial: row.id } })
 }
 
-/**
- * 码流索引选项。
- *
- * <p>GB/T 28181—2022 附录 G：SSRC 的第 7~10 位是码流编号，
- * 0 表示主码流、1 表示子码流。「自动」保持原有行为（域内自增序号）。
- */
+/** GB/T 28181—2022 附录 G：SSRC 第 7~10 位是码流编号，0 主码流 / 1 子码流。
+ * 「自动」保持原有行为（域内自增序号）。 */
 const STREAM_INDEX_OPTIONS = [
   { value: 'auto', label: '自动选择', hint: '由设备决定推哪一路' },
   { value: 'streamnumber:0', label: '主码流', hint: '2022 标准，SSRC 后 4 位填 0' },
@@ -374,36 +587,25 @@ const STREAM_INDEX_OPTIONS = [
 
 const STREAM_INDEX_HINT = '指定后点播只拉该路码流；子码流分辨率低但省带宽'
 
-/**
- * 流传输模式选项。
- *
- * <p>TCP 分被动/主动：被动收流由平台主动发 INVITE，设备回推；
- * 主动推流则设备建流推给平台。模式会写进 SIP 协商，填错会协商失败。
- */
+/** TCP 分被动/主动：被动由平台发 INVITE、设备回推，主动则设备建流推给平台。
+ * 模式会写进 SIP 协商，填错会协商失败。 */
 const TRANSPORT_OPTIONS = [
   { value: 'UDP', label: 'UDP', transport: 'UDP', mode: 'passive' },
   { value: 'TCP', label: 'TCP 被动', transport: 'TCP', mode: 'passive' },
   { value: 'TCP_ACTIVE', label: 'TCP 主动', transport: 'TCP', mode: 'active' }
 ]
 
-/** 设备当前的流传输模式标识。 */
 function transportLabel(row) {
   const transport = (row.mediaTransport || 'UDP').toUpperCase()
   if (transport !== 'TCP') return 'UDP'
   return row.mediaTransportMode === 'active' ? 'TCP_ACTIVE' : 'TCP'
 }
 
-/** 设备当前的流传输模式显示文案。 */
 function transportText(row) {
   return TRANSPORT_OPTIONS.find((o) => o.value === transportLabel(row))?.label || 'UDP'
 }
 
-/**
- * 处理流传输下拉的命令。
- *
- * <p>命令值格式为 {@code 设备编码|模式标识}。
- * 必须自带设备编码：表格里多行共用 el-dropdown，命令本身不携带行信息。
- */
+/** 命令值格式「设备编码|模式标识」：表格多行共用 el-dropdown，命令本身不带行信息。 */
 function handleTransportCommand(cmd) {
   const sep = String(cmd).indexOf('|')
   if (sep < 0) return
@@ -414,7 +616,6 @@ function handleTransportCommand(cmd) {
   changeTransport(row, mode)
 }
 
-/** 切换流传输模式（只影响后续点播发流方式）。 */
 async function changeTransport(row, value) {
   const opt = TRANSPORT_OPTIONS.find((o) => o.value === value)
   if (!opt) return
@@ -433,12 +634,9 @@ async function changeTransport(row, value) {
   }
 }
 
-/* ---------------- 设备详情弹窗 ---------------- */
-
 const detailVisible = ref(false)
 const detailTarget = ref(null)
 
-/** 打开设备详情（状态记录 / 流量统计 / 移动轨迹 / 会话列表）。 */
 function openDetail(row) {
   detailTarget.value = row
   detailVisible.value = true
@@ -495,7 +693,6 @@ async function collect(row) {
   }
 }
 
-/** 进入名称编辑态。 */
 function startNameEdit(row) {
   if (row._editing) return
   row._editing = true
@@ -506,17 +703,12 @@ function startNameEdit(row) {
   })
 }
 
-/** 放弃编辑，还原原值。 */
 function cancelName(row) {
   row.customName = row._draftName || ''
   row._editing = false
 }
 
-/**
- * 行内保存名称。
- *
- * <p>值未变化时不发请求：否则点一下别处就会打一次接口。
- */
+/** 值未变化时不发请求：否则点一下别处就会打一次接口。 */
 async function saveName(row) {
   if (!row._editing) {
     return
@@ -603,7 +795,130 @@ async function remove(row) {
   }
 }
 
-onMounted(load)
+
+/* ==================== 添加设备：三个入口 ==================== */
+
+const registerDialog = ref(false)
+const registerRows = ref([])
+/** 待补凭据的设备数，用于下拉项角标。 */
+const pendingRegistered = ref(0)
+
+const discoverDialog = ref(false)
+const discoverRows = ref([])
+const discovering = ref(false)
+const discoverLocalIp = ref('')
+
+function onAddCommand(cmd) {
+  if (cmd === 'manual') {
+    openDahua()
+  } else if (cmd === 'register') {
+    registerDialog.value = true
+    loadRegister()
+  } else if (cmd === 'discover') {
+    discoverDialog.value = true
+  }
+}
+
+/**
+ * 读注册表（后端已过滤掉已纳管的设备，这里拿到的全是待办）。
+ *
+ * <p>每行补三个前端字段（username/password/adopting）：凭据只在提交时用一次，
+ * 不落库、不回显，所以放在行对象上而不是后端 VO 里。
+ */
+async function loadRegister() {
+  try {
+    const list = await dahuaApi.registerList()
+    registerRows.value = (list || []).map((r) => ({
+      ...r,
+      username: 'admin',
+      password: '',
+      adopting: false
+    }))
+    // 后端已经只返回待办，这里不再需要按 managed 过滤
+    pendingRegistered.value = registerRows.value.length
+  } catch (e) {
+    ElMessage.error(e.message || '读取注册表失败')
+  }
+}
+
+/** 纳管一台注册设备：账号密码由用户填，成功后立刻拉目录验证是否真的能登录。 */
+async function adoptRegistered(row) {
+  if (!row.username || !row.password) {
+    ElMessage.warning('请填写该设备的账号和密码')
+    return
+  }
+  row.adopting = true
+  try {
+    await dahuaApi.adoptRegister({
+      serial: row.serial,
+      username: row.username,
+      password: row.password,
+      port: row.sdkPort
+    })
+    ElMessage.success(`已纳管 ${row.serial}`)
+    await loadRegister()
+    await load()
+  } catch (e) {
+    ElMessage.error(e.message || '纳管失败')
+  } finally {
+    row.adopting = false
+  }
+}
+
+async function ignoreRegistered(row) {
+  try {
+    await dahuaApi.ignoreRegister({ serial: row.serial })
+    await loadRegister()
+  } catch (e) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+/** 搜索局域网设备（同步等待，5 秒左右，期间按钮转圈）。 */
+async function runDiscover() {
+  discovering.value = true
+  try {
+    const list = await deviceApi.discover({
+      localIp: discoverLocalIp.value || undefined,
+      seconds: 5
+    })
+    discoverRows.value = list || []
+    if (!discoverRows.value.length) {
+      ElMessage.info('该网段没有设备应答（跨网段请用「按 IP 添加」）')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '搜索失败')
+  } finally {
+    discovering.value = false
+  }
+}
+
+/** 把搜索结果带进手工录入弹窗：IP/序列号/端口都预填，只差账号密码。 */
+function useDiscovered(row) {
+  discoverDialog.value = false
+  openDahua({
+    serial: row.serial,
+    host: row.ip,
+    port: row.sdkPort || 37777,
+    username: 'admin',
+    password: ''
+  })
+}
+
+/** 后端返回的是 LocalDateTime 序列化串，去掉 T 便于阅读。 */
+function fmtRegTime(v) {
+  if (!v) {
+    return '—'
+  }
+  return String(v).replace('T', ' ').slice(0, 19)
+}
+
+onMounted(() => {
+  load()
+  // 顺带读一次注册表：有设备在排队时按钮上要显示角标，否则用户不会想到去点下拉
+  loadRegister()
+})
+
 </script>
 
 <style scoped>
@@ -657,7 +972,6 @@ onMounted(load)
   color: var(--brand-500, #2f5c94);
 }
 
-/* 弹窗底部说明 */
 .dialog-foot-tip {
   margin-top: 8px;
   font-size: var(--fs-xs);
@@ -669,7 +983,7 @@ onMounted(load)
   cursor: pointer;
   border-bottom: 1px dashed transparent;
   transition: border-color 0.15s, color 0.15s;
-  /* 单行显示：名称过长时靠 ellipsis 截断，绝不换行撑高行 */
+  /* 单行显示：过长靠 ellipsis 截断，不换行撑高行 */
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -684,8 +998,7 @@ onMounted(load)
 }
 
 /*
-  编辑态的输入框必须严格限制在单元格内：
-  el-input 默认 min-width 会把列撑宽，表格（fit 布局）随之重排。
+  编辑态输入框必须限制在单元格内：el-input 默认 min-width 会把列撑宽，
   table-layout="fixed" 之外再加这层约束，双保险。
 */
 .name-input {
@@ -741,5 +1054,18 @@ onMounted(load)
   margin-left: var(--sp-3);
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
+}
+
+/* ==================== 添加设备 ==================== */
+
+.add-device-badge {
+  margin-left: 6px;
+}
+
+.discover-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 </style>

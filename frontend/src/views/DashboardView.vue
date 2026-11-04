@@ -1,9 +1,6 @@
 <template>
   <div ref="pageRef" class="page is-fill dash-page">
-    <!--
-      标题与副标题各占一行却不带信息量，删掉把高度让给图表；
-      刷新与大屏是操作入口，保留但压成一行靠右，不单独占标题位。
-    -->
+    <!-- 标题与副标题不带信息量，腾出高度给图表；刷新/大屏压成一行靠右 -->
     <div class="dash-actions">
       <el-button size="small" :loading="loading" @click="load(true)">
         <el-icon><Refresh /></el-icon> 刷新
@@ -15,7 +12,6 @@
 
     <!-- 6 卡网格：3 列 × 2 行（通道信息 / 负载 / CPU / 存储 / 带宽 / 内存） -->
     <section ref="gridRef" class="dash-grid">
-      <!-- 1. 通道信息（两个圆环） -->
       <div class="dash-card">
         <div class="dc-title">通道信息</div>
         <div class="dc-body gauge-row">
@@ -39,19 +35,16 @@
         </div>
       </div>
 
-      <!-- 2. 负载信息（柱状） -->
       <div class="dash-card">
         <div class="dc-title">负载信息</div>
         <div class="dc-body"><div ref="loadRef" class="chart-fill" /></div>
       </div>
 
-      <!-- 3. CPU 使用（面积折线） -->
       <div class="dash-card">
         <div class="dc-title">CPU 使用</div>
         <div class="dc-body"><div ref="cpuRef" class="chart-fill" /></div>
       </div>
 
-      <!-- 4. 存储使用（横向条） -->
       <div class="dash-card">
         <div class="dc-title">存储使用</div>
         <div class="dc-body disk-body">
@@ -74,13 +67,11 @@
         </div>
       </div>
 
-      <!-- 5. 带宽使用（接收/发送双线） -->
       <div class="dash-card">
         <div class="dc-title">带宽使用 (Mbps)</div>
         <div class="dc-body"><div ref="netRef" class="chart-fill" /></div>
       </div>
 
-      <!-- 6. 内存使用（面积折线） -->
       <div class="dash-card">
         <div class="dc-title">内存使用</div>
         <div class="dc-body"><div ref="memRef" class="chart-fill" /></div>
@@ -99,12 +90,7 @@ import { deviceApi, metricsApi } from '@/api'
 
 echarts.use([BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
-/**
- * 轮询间隔（毫秒）。
- *
- * <p>与服务端采样间隔保持一致 —— 比它快只是重复取到同一份快照，
- * 比它慢则会丢掉中间点。
- */
+/** 轮询间隔与服务端采样间隔一致：更快只是取到同一份快照，更慢会丢中间点。 */
 const POLL_MS = 3000
 
 const pageRef = ref(null)
@@ -118,11 +104,8 @@ const loading = ref(false)
 const stats = ref(null)
 const metrics = ref(null)
 /**
- * 折线历史缓冲（由服务端快照直接覆盖，前端不自行累积）。
- *
- * <p>为什么不在前端累积：服务端以 3 秒恒定频率采样并保留固定长度的窗口，
- * 前端只需把快照画出来。两端各存一份历史必然会因为采样时刻不同而对不齐，
- * 表现为 X 轴重复刻度或曲线出现阶梯。
+ * 折线历史缓冲（由服务端快照直接覆盖，前端不自行累积）：两端各存一份历史
+ * 必然因采样时刻不同而对不齐，表现为 X 轴重复刻度或曲线出现阶梯。
  */
 const hist = { t: [], cpu: [], mem: [], rx: [], tx: [] }
 let timer = null
@@ -131,26 +114,16 @@ let ro = null
 const charts = {}
 
 /**
- * 组件是否已卸载。
- *
- * <p>用途见 {@link load}：{@code await} 期间用户可能切走页面，
- * 此时图表已全部 dispose，后续任何 {@code setOption}/{@code resize}
- * 都会在 ECharts 内部拿 null canvas 并抛
- * {@code Cannot read properties of null (reading 'tagName')}。
- *
- * <p>{@link disposeCharts} 也会清空 {@code charts}，两者互为双保险：
- * 标志位挡住异步回调，清空对象挡住同步遍历。
+ * 组件是否已卸载。await 期间用户可能切走页面，此时图表已 dispose，
+ * 再 setOption / resize 会在 ECharts 内部拿 null canvas 并抛
+ * Cannot read properties of null (reading 'tagName')。
+ * 与 disposeCharts 清空 charts 互为双保险：标志位挡异步，清空对象挡遍历。
  */
 let unmounted = false
 
 /**
- * 销毁全部图表并清空句柄。
- *
- * <p><b>必须清空 {@code charts}</b>：只 dispose 不删除引用的话，
- * 对象里留着一堆已销毁的实例，任何后续遍历（{@link onResize} 的
- * {@code c.resize()}、重复卸载）都会再次踩到它们。
- * 而 {@code charts} 是 setup 作用域内的对象，同一组件重新挂载时
- * 若沿用旧引用，新图表会被写进已被污染的对象。
+ * 销毁全部图表并清空句柄。必须清空 charts：只 dispose 不删引用的话，
+ * 后续遍历（onResize 的 resize、重复卸载）会再次踩到已销毁的实例。
  */
 function disposeCharts() {
   for (const k of Object.keys(charts)) {
@@ -164,13 +137,11 @@ function disposeCharts() {
   }
 }
 
-/* ---------------- 主题色（取自自家设计令牌） ---------------- */
 function cssVar(name, fallback) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
   return v || fallback
 }
 
-/* ---------------- 计算属性 ---------------- */
 const gauges = computed(() => {
   const s = stats.value || {}
   const brand = cssVar('--brand-500', '#2f5c94')
@@ -199,7 +170,6 @@ function fmtSize(bytes) {
   return gb.toFixed(1) + ' GB'
 }
 
-/* ---------------- 数据加载 ---------------- */
 async function load(manual = false) {
   if (manual) loading.value = true
   try {
@@ -207,18 +177,9 @@ async function load(manual = false) {
       deviceApi.onlineStats().catch(() => null),
       metricsApi.get().catch(() => null)
     ])
-    /*
-     * 卸载后不能再碰图表。
-     *
-     * <p>两个 await 期间用户完全可能切走页面：此时 onUnmounted 已把所有
-     * 图表 dispose 掉，而这里继续往下走就会对已销毁的实例调 setOption。
-     * ECharts 内部会用 canvas 的 DOM 做尺寸计算，拿到 null 后抛
-     * {@code TypeError: Cannot read properties of null (reading 'tagName')}
-     * —— 报错堆栈指向 echarts，看起来与页面毫无关系，极难定位。
-     *
-     * <p>放在 await 之后判断（而不是函数开头）：请求已经发出去了，
-     * 让它自然完成即可，只是不再写状态。
-     */
+    // 卸载后不能再碰图表：两个 await 期间用户可能切走页面，图表已 dispose，
+    // setOption 会在 ECharts 内部拿 null canvas 抛 'tagName' 的 TypeError，
+    // 堆栈指向 echarts、极难定位。放在 await 之后判断，让请求自然完成
     if (unmounted) return
     if (s) stats.value = s
     if (m) metrics.value = m
@@ -230,12 +191,8 @@ async function load(manual = false) {
 }
 
 /**
- * 用服务端历史铺满缓冲。
- *
- * <p><b>为什么不再本地追加</b>：服务端已按 3 秒恒定频率采样并保留 60 点，
- * 前端每次轮询直接取快照就是完整曲线。若前端再 push 一个「本地时刻」的点，
- * 会与快照里同一时刻的点重复 —— 表现为 X 轴出现两个相同刻度。
- * 采样源唯一，才能保证刻度与数据一一对应。
+ * 用服务端历史铺满缓冲，前端不再追加：服务端已按 3 秒恒定频率保留 60 点，
+ * 前端再 push 一个本地时刻的点会与快照重复，表现为 X 轴出现两个相同刻度。
  */
 function applyHistory(h) {
   if (!h?.time?.length) return
@@ -246,14 +203,9 @@ function applyHistory(h) {
   hist.tx = [...(h.tx || [])]
 }
 
-/* ---------------- 图表 ---------------- */
 function initCharts() {
-  /*
-   * 重复初始化会泄漏：echarts.init 在同一个 DOM 上再调一次会新建实例，
-   * 旧实例的 canvas 与事件监听都不会被回收。组件被 keep-alive 缓存后
-   * 反复激活/停用，或在同一挂载周期里被调用两次，就会堆出多份实例，
-   * 卸载时只 dispose 最后一份。
-   */
+  // 重复初始化会泄漏：echarts.init 在同一 DOM 上再调会新建实例，
+  // 旧实例的 canvas 与监听不回收；keep-alive 反复激活时只会 dispose 最后一份
   if (Object.keys(charts).length) return
   const ink = cssVar('--ink-400', '#909399')
   const line = cssVar('--line', '#e5e7eb')
@@ -327,7 +279,6 @@ function initCharts() {
   }
 }
 
-/** 通用面积折线配置。 */
 function lineOption(grid, axisCommon, unit, max, color) {
   const c = color || cssVar('--brand-500', '#2f5c94')
   return {
@@ -349,7 +300,6 @@ function lineOption(grid, axisCommon, unit, max, color) {
   }
 }
 
-/** 用最新数据刷新各图表。 */
 function updateCharts() {
   // 卸载后一律不碰：图表已 dispose，setOption 会在 ECharts 内部炸
   if (unmounted) return
@@ -373,7 +323,6 @@ function updateCharts() {
   }
 }
 
-/* ---------------- 大屏展示 ---------------- */
 function toggleFullscreen() {
   const el = pageRef.value
   if (!el) return
@@ -386,9 +335,8 @@ function toggleFullscreen() {
 
 function onResize() {
   /*
-   * ResizeObserver 的回调被 rAF 包过一层，意味着它总比 disconnect() 晚一拍：
-   * 用户切走页面时，卸载流程已经跑完，这一帧的回调才被调度进来。
-   * 此时图表全已 dispose，resize() 同样会在 ECharts 内部踩到 null canvas。
+   * ResizeObserver 回调被 rAF 包过一层，总比 disconnect() 晚一拍：卸载流程跑完后
+   * 这一帧的回调才被调度进来，此时图表已 dispose，resize() 会踩到 null canvas。
    */
   if (unmounted) return
   for (const c of Object.values(charts)) c.resize()
@@ -409,13 +357,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  /*
-   * 顺序很重要：先立标志位再清理。
-   *
-   * <p>标志位挡住「已在飞行中的异步回调」（{@link load} 的 await 之后、
-   * {@link onResize} 的 rAF），它们在本函数返回后仍会被调度执行；
-   * 先清 timer/observer 只能阻止「新」的回调产生。
-   */
+  // 顺序很重要：先立标志位再清理 —— 标志位挡住在飞行中的异步回调（load 的 await
+  // 之后、onResize 的 rAF），清 timer/observer 只能阻止新的回调产生
   unmounted = true
   if (timer) {
     clearInterval(timer)
@@ -428,7 +371,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 操作入口：靠右一行，不再单独占标题位 */
 .dash-actions {
   display: flex;
   justify-content: flex-end;
@@ -443,7 +385,6 @@ onUnmounted(() => {
   /* 行高由容器均分 —— 不写 minmax 下限，否则小窗口会把网格撑出滚动条 */
   grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  /* 吃掉 .page.is-fill 里除操作行外的全部高度 */
   flex: 1;
   min-height: 0;
 }
@@ -451,7 +392,6 @@ onUnmounted(() => {
 @media (max-width: 992px) {
   .dash-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    /* 2 列时 6 卡变 3 行 */
     grid-template-rows: repeat(3, minmax(0, 1fr));
   }
 }

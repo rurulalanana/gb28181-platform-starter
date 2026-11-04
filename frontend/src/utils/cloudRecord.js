@@ -2,14 +2,8 @@ import { ElMessage } from 'element-plus'
 import { downloadFile, recordFileName } from './download'
 
 /**
- * 云端录像的展示与交互工具。
- *
- * <p><b>为什么单独抽出来</b>：时间轴页（{@code CloudRecordDetailView}）与
- * 列表页（{@code CloudRecordListView}）展示的是同一份后端数据，格式化规则
- * 必须完全一致 —— 早先两页各存一份实现，改了一处另一页就显示不一致
- * （同一个文件在一页说「已上传」、另一页说「已 上传」）。
- *
- * <p>只放<b>纯函数</b>与一次性动作，不放组件状态。
+ * 云端录像的展示与交互工具。时间轴页与列表页展示同一份后端数据，格式化规则必须一致
+ * （早先两页各存一份，同一个文件一页说「已上传」另一页说「已 上传」）。只放纯函数。
  */
 
 /** 本地日期 {@code YYYY-MM-DD}（接口的 {@code period} 参数格式）。 */

@@ -1,19 +1,14 @@
 <template>
   <div class="page pb-page">
     <div class="pb-card">
-      <!--
-        标题：居中，格式对齐 CMS（LiveGBS）的「设备录像时间轴(设备-通道)」。
-      -->
+      <!-- 标题格式对齐 CMS（LiveGBS）：设备录像时间轴(设备-通道) -->
       <h4 class="pb-title">设备录像时间轴({{ timelineTitle }})</h4>
 
       <div class="pb-body">
 
         <!--
-          工具栏：单行两段。左段是「对哪条通道、怎么播」，右段是「看哪天、什么视角」。
-
-          <p>按钮尺寸对齐 CMS 的 Bootstrap {@code btn-sm}：高 29px、字号 12px、
-          圆角 3px、主色 {@code #556677}。不直接用 el-button 是为了拿到一致的高度 ——
-          element-plus 的 small 按钮是 24px，和日期框、下拉并排会参差不齐。
+          按钮尺寸对齐 CMS 的 Bootstrap btn-sm：高 29px、字号 12px、圆角 3px。
+          不用 el-button：element-plus 的 small 是 24px，和日期框并排会参差不齐。
         -->
         <div class="pb-toolbar">
           <div class="pb-tools-left">
@@ -21,10 +16,7 @@
               <span class="cms-ico">‹</span> 返回
             </button>
             <span class="cms-gap" />
-            <!--
-              通道选择：CMS 的通道来自路由参数，本平台的 /playback 没有，
-              所以必须留在页面上。尺寸压到和 cms-btn 同高。
-            -->
+            <!-- CMS 的通道来自路由参数，本平台 /playback 没有，只能留在页面上 -->
             <el-select
               v-model="query.channelKey"
               placeholder="选择通道"
@@ -67,7 +59,6 @@
           </div>
 
           <div class="pb-tools-right">
-            <!-- 日期：CMS 是一个输入框 + 日历图标；这里用日期选择器并保留前后翻页 -->
             <el-button-group class="pb-daynav">
               <button class="cms-btn cms-btn-sq" title="前一天" @click="shiftDay(-1)">‹</button>
               <button class="cms-btn cms-btn-sq" title="后一天" :disabled="isToday" @click="shiftDay(1)">›</button>
@@ -96,14 +87,8 @@
         </div>
 
         <!--
-          播放区：对齐 CMS 的 700×394 黑底居中。
-
-          <p>播放器用的是 LivePlayer 官方组件，<b>控制栏就是它自带的那个</b>
-          （播放/暂停、进度条、音量、全屏、截图），不另做一套 ——
-          自己画的控件既做不到全屏、截图这些能力，也会和组件内部状态打架。
-
-          <p>没有回放时显示「No Video」，与 CMS 一致：黑块上加一句白字，
-          比纯黑更像「播放器已就位、只是还没选片」，而不是「加载失败」。
+          播放区对齐 CMS 的 700×394 黑底居中。控制栏用 LivePlayer 自带的，不另做一套：
+          自绘控件做不到全屏/截图，还会和组件内部状态打架。
         -->
         <div ref="playStage" class="pb-player">
           <div ref="videoContainer" class="pb-video" />
@@ -112,38 +97,10 @@
         </div>
 
         <!--
-          这里<b>不再有</b>「时间范围 / 进度计数 / 停止回放」那一行。
-
-          <p>CMS（LiveGBS）的页面就是「标题 → 工具栏 → 播放器 → 时间轴」四段，
-          播放器下方直接接时间轴，没有任何信息行。之前我们额外加了一行，
-          显示 {@code 04:00~06:00}、{@code 01:08:40 / 02:00:00} 和「停止回放」，
-          与参照页面不一致，看起来就像多出来的一块。
-
-          <p>这些信息在新布局里由别处承担：
-          <ul>
-            <li><b>进度</b> —— 播放器自带控制栏的进度条（已把段时长喂给
-                {@code customDuration}），以及时间轴上的红色游标；</li>
-            <li><b>段范围</b> —— 点过的那个刻度块本身就是位置指示；</li>
-            <li><b>停止</b> —— 播放器控制栏的暂停，或直接点别的刻度块换段
-                （服务端会自动替换旧会话）。</li>
-          </ul>
-        -->
-
-        <!--
-          时间轴：1:1 对齐 CMS 的 LiveGBS 实现。
-
-          <p>结构（与 CMS 完全一致）：
-          <ul>
-            <li>{@code .time-rule} —— 外框，50px 高、灰底 {@code #ccc}、{@code overflow:hidden}；</li>
-            <li>{@code .time-day} —— 固定 1440px 宽（一天 1440 分钟，<b>1px = 1 分钟</b>），绝对定位；</li>
-            <li>288 个 {@code .time-minute}（每块 5px = 5 分钟，高 8px），有录像的加
-                {@code .active} 变深色 {@code #404d59}；</li>
-            <li>24 个 {@code .time-text}（每格 60px = 1 小时，高 25px），带 {@code #999} 左边框与上边框；</li>
-            <li>{@code .time-cursor} —— 2px 红竖线 + 下方白底红框时刻标签。</li>
-          </ul>
-
-          <p><b>外框是 {@code width:100% + max-width:1440px}，而内层固定 1440px</b>：
-          窗口窄于 1440px 时右侧会被裁掉，这是 CMS 的原样行为，保持一致。
+          时间轴 1:1 对齐 CMS：外框 50px 高、灰底；内层固定 1440px（1px = 1 分钟），
+          288 个 5px 刻度块，有录像的点亮；24 个 60px 小时格；2px 红游标。
+          外框 width:100% + max-width:1440px 而内层固定 1440px：窗口窄时右侧被裁掉，
+          这是 CMS 原样行为，不做自适应缩放（一改刻度就与 CMS 对不上）。
         -->
         <div
           v-show="viewMode === 'timeline'"
@@ -178,11 +135,8 @@
         </div>
 
       <!--
-        列表视角。与时间轴同源数据，只是呈现方式不同，切换不会重新发起 SIP 查询。
-
-        <p>{@code v-if} 而不是 {@code v-else}：上面的时间轴用 {@code v-show}
-        控制显隐（切换视角时保留 DOM，避免重建 288 个刻度块），
-        {@code v-else} 只能跟 {@code v-if} 配对。
+        列表与时间轴同源数据，切换不重新发起 SIP 查询。用 v-if 而非 v-else：
+        时间轴用 v-show 保留 DOM（避免重建 288 个刻度块），v-else 只能跟 v-if 配对。
       -->
       <el-table
         v-if="viewMode === 'list'"
@@ -242,13 +196,9 @@
         </span>
         <span class="lf-spacer" />
         <!--
-          下载倍速：档位来自设备目录应答的 Info/DownloadSpeed（如 1/2/4/8）。
-          标准 9.9.1 b) 规定倍速由请求方在 SDP 里携带（a=downloadspeed:N），
-          设备支持就快进推流 —— 8 倍速下 1 小时录像约 7.5 分钟就能拿完。
-          只对「下载」生效，回放永远是 1 倍速。
-
-          放在列表页脚而不是顶部筛选栏：时间轴视角根本不提供下载，
-          一个只能影响下载的设置摆在那里，既占位置又容易让人以为改了会影响回放。
+          档位来自设备目录应答的 Info/DownloadSpeed。标准 9.9.1 b) 规定倍速由请求方在
+          SDP 携带（a=downloadspeed:N），8 倍速下 1 小时录像约 7.5 分钟拿完。
+          只影响下载；放列表页脚是因为时间轴视角根本不提供下载。
         -->
         <template v-if="speedOptions.length > 1">
           <span class="lf-label">下载方式</span>
@@ -288,23 +238,10 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-/**
- * 能否下载录像。
- *
- * <p>后端对 {@code /playback/download/*} 要求 {@code cloud:write} ——
- * 下载会让服务器拉流并写盘，不只是「看」。没权限时干脆不画按钮，
- * 而不是让人点了才收到 403。
- */
+/** 后端下载接口要求 cloud:download，无权限时直接不画按钮，不让人点了才收 403。 */
 const canDownload = computed(() => auth.can('cloud:download'))
 
-/**
- * 返回上一页。
- *
- * <p>用 {@code router.back()} 而不是固定跳某个路由：本页可从「设备管理」
- * 的通道列表、通道管理、以及直接输入 URL 三种方式进入，
- * 回退到「用户来的地方」才符合直觉。没有历史记录时（直接打开链接）
- * 退回首页，避免点了没反应。
- */
+/** 本页有三个入口（通道列表/通道管理/直接打开），回退比固定路由更符合直觉；无历史时回首页。 */
 function goBack() {
   if (window.history.length > 1) {
     router.back()
@@ -319,36 +256,17 @@ const channels = ref([])
 const records = ref([])
 const searching = ref(false)
 const searched = ref(false)
-/**
- * 上一次检索设备是否应答。
- *
- * <p>用来区分「设备没答」与「设备答了：当天没录像」——两者都是空列表，
- * 但前者不能显示成「当日没有录像」（那是报假警）。
- */
+/** 区分「设备没答」与「答了但当天没录像」：两者都是空列表，但前者显示成没录像就是报假警。 */
 const deviceUnanswered = ref(false)
-/**
- * 设备未应答时后端给出的说明（含设备自己的拒绝原因）。
- *
- * <p>单独存一份而不只是弹一条消息：提示条几秒就消失了，
- * 而用户盯着空时间轴时需要可信的理由；设备返回的原文（如
- * {@code 400 wait for recordinfo timeout[15s]}）是判断「该找谁」的唯一线索。
- */
+/** 设备未应答时后端的说明。单独存一份：提示条会消失，而设备原文（如 400 wait for recordinfo timeout[15s]）是判断找谁的唯一线索。 */
 const deviceNotice = ref('')
 const query = reactive({ channelKey: '' })
 /** 呈现视角：`timeline` 时间轴（默认）/ `list` 明细列表。 */
 const viewMode = ref('timeline')
 
 /**
- * 查询日期，形如 {@code 2026-10-26}。
- *
- * <p><b>为什么只允许按天查</b>：设备侧录像检索的入参是一个时间段，
- * 平台的「起止时间任意选」看起来更灵活，实际有两个问题：
- * <ul>
- *   <li>时间轴上的色块没法定位——不知道用户选的区间落在一天的哪一段；</li>
- *   <li>设备返回的是「与该区间有交集」的录像段，随便框一个区间，
- *       拿回来的段往往一半在框外，用户会怀疑结果不准。</li>
- * </ul>
- * 固定成整天后，界面和时间轴一一对应，翻页（前一天/后一天）也顺。
+ * 查询日期，形如 2026-10-26。只允许按天查：设备返回的是「与区间有交集」的录像段，
+ * 任意区间会让一半结果落在框外，时间轴也无法定位色块。
  */
 const day = ref(todayStr())
 
@@ -365,26 +283,13 @@ const playing = computed(() => player.playing.value)
 const serial = computed(() => query.channelKey.split('/')[0] || '')
 const code = computed(() => query.channelKey.split('/')[1] || '')
 
-/**
- * 标题里的「(设备-通道)」。
- *
- * <p>格式对齐 CMS：{@code 设备录像时间轴(34020000001320000111-34020000001310000001)}。
- * 用编码而不是名称 —— 名称可能重名（本平台就有两个「南坑水库」），
- * 只有编码才能唯一定位到一路通道，运维报障时也是拿编码沟通。
- *
- * <p>未选通道时给占位文案，而不是留一对空括号：空括号看起来像数据没加载出来。
- */
+/** 标题用编码而非名称：本平台就有两个「南坑水库」，只有编码能唯一定位到一路通道。 */
 const timelineTitle = computed(() => {
   if (!serial.value || !code.value) return '未选择通道'
   return `${serial.value}-${code.value}`
 })
 
-/**
- * 当前通道设备声明支持的下载倍速档位。
- *
- * <p>来源是设备目录应答里的 {@code Info/DownloadSpeed}（本现场实测全部为
- * {@code 1/2/4/8}）。设备没报时只给 1 倍速，界面不会出现选不了的值。
- */
+/** 设备目录应答里的 Info/DownloadSpeed（本现场实测均为 1/2/4/8）；没报时只给 1 倍速。 */
 const speedOptions = computed(() => {
   const ch = channels.value.find((c) => `${c.deviceId}/${c.id}` === query.channelKey)
   const list = String(ch?.downloadSpeed || '')
@@ -395,14 +300,9 @@ const speedOptions = computed(() => {
 })
 
 /**
- * 下载倍速（只影响下载，不影响回放播放速度）。
- *
- * <p><b>默认 1 且不自动选最高档</b>：早先这里会「自动取设备声明的最高档」，
- * 实测后果很坑 —— 设备对 {@code a=downloadspeed:8} 的响应是
- * <b>只推关键帧</b>（同一个 3 分钟段：1 倍速产出 ≈360MB 的完整流，
- * 8 倍速产出 14MB 且媒体时间跨 851 秒），拿到的是一份快进片，
- * 而且因为推得快、平台又按墙钟计时，录到的内容范围完全控制不住。
- * 存档下载必须默认完整模式。
+ * 下载倍速，默认 1 且不自动取最高档：设备对 a=downloadspeed:8 只推关键帧
+ * （同一 3 分钟段：1 倍速 ≈360MB 完整流，8 倍速 14MB 且媒体时间跨 851 秒），
+ * 且按墙钟计时导致录制范围不可控。存档必须用完整模式。
  */
 const downloadSpeed = ref(1)
 
@@ -417,13 +317,7 @@ function rowKeyOf(row) {
   return `${row?.startTime || ''}|${row?.endTime || ''}`
 }
 
-/**
- * 本页结果里是否一条都没有 FilePath。
- *
- * <p>大量设备（LiveGBS、多数国产摄像机）按时间段管理录像、根本不填 FilePath，
- * 于是那一列每条都是破折号 —— 240px 的空白加上后面几列，直接把表格撑出
- * 横向滚动，“大小”这种有用信息反而要拖动才能看到。这种情况下整列隐藏。
- */
+/** 多数设备（LiveGBS、国产摄像机）不填 FilePath，240px 空列会把表格撑出横向滚动，整列隐藏。 */
 const allNoFileName = computed(
   () => records.value.length > 0 && records.value.every((r) => !r.filePath)
 )
@@ -440,14 +334,7 @@ const dayStartMs = computed(() => {
   return Number.isFinite(t) ? t : null
 })
 
-/**
- * 把后端时间串解析成本地毫秒时间戳。
- *
- * <p>设备应答里的时间是 {@code 2026-10-26T08:00:00}（ISO，本地时间无时区）。
- * {@code new Date('2026-10-26T08:00:00')} 在 ES2015+ 里按本地时区解析，
- * 符合预期；但带空格的形式 {@code '2026-10-26 08:00:00'} 在部分浏览器里
- * 直接返回 Invalid Date，所以统一把空格换成 T 再解析。
- */
+/** 时间串按本地时区解析。带空格的形式在部分浏览器返回 Invalid Date，统一换成 T。 */
 function parseWall(v) {
   if (!v) return NaN
   const t = new Date(String(v).trim().replace(' ', 'T')).getTime()
@@ -461,16 +348,9 @@ function fmtClock(ms) {
 }
 
 /**
- * 时间轴上的录像色块。
- *
- * <p><b>为什么必须裁剪到当天</b>：设备返回的是「与查询区间有交集」的录像段，
- * 计划录像常见 {@code 22:00 → 次日 06:00} 这种跨天段。直接拿原始起止算百分比，
- * left 会变成负数、left+width 会超过 100%，色块直接画到轨道外面去。
- * 显示按当天裁剪；播放仍用完整时间段（设备要原始入参才能取到流）。
- *
- * <p><b>为什么要设最小宽度</b>：一天的 0.1% 只有 86 秒。设备偶尔返回几秒的
- * 碎片段，按真实比例在 1000px 轨道上不足 1px，肉眼完全看不见，
- * 用户会以为「这段没查出来」。给 0.1% 下限后至少是一条可见的细线。
+ * 时间轴上的录像色块。必须裁剪到当天：计划录像常见 22:00→次日 06:00 的跨天段，
+ * 不裁剪 left 会为负、right 超 100%，色块画到轨道外。显示裁剪，播放仍用完整时间段。
+ * 最小宽度 0.1%（≈86 秒）：几秒的碎片段按真实比例不足 1px，看不见会被当成没查出来。
  */
 const timelineSegments = computed(() => {
   const base = dayStartMs.value
@@ -501,14 +381,7 @@ const timelineSegments = computed(() => {
 
 /* ==================== CMS 风格时间轴 ==================== */
 
-/**
- * 时间轴内层固定宽度：一天 1440 分钟，<b>1px = 1 分钟</b>。
- *
- * <p>与 CMS（LiveGBS）完全一致 —— 它的 {@code .time-day} 就是写死 1440px，
- * 外框 {@code width:100%; max-width:1440px}。窗口窄于 1440px 时右侧被裁掉，
- * 这是原样行为，不做「自适应缩放」的改良：一改，刻度和录像块的位置关系
- * 就与 CMS 对不上，用户对照两边看时会以为数据不同。
- */
+/** 一天 1440 分钟 → 1440px（1px = 1 分钟），与 CMS 写死的一致；窗口窄时右侧裁掉，不做自适应。 */
 const TIME_AXIS_PX = 1440
 
 /** 每个刻度块代表的分钟数：1440px / 288 块 = 5px = 5 分钟。 */
@@ -526,15 +399,8 @@ function pad2(n) {
 const hourTicks = Array.from({ length: 24 }, (_, i) => i)
 
 /**
- * 288 个刻度块，标记每个 5 分钟区间有没有录像。
- *
- * <p><b>为什么不复用 {@code timelineSegments} 的百分比</b>：CMS 的时间轴不是
- * 若干个彩色块，而是<b>一整排等宽小块</b>，有录像的变深色。要 1:1 就得
- * 按分钟网格离散化，而不是画任意位置任意宽度的矩形。
- *
- * <p>离散化规则：段覆盖到的每一块都算「有」。因此 1 秒的碎片段也会点亮
- * 它所在的 5 分钟块 —— 这与 CMS 的观感一致（它同样按整块点亮），
- * 也避免「明明查到了录像，时间轴上却什么都没有」。
+ * 288 个刻度块，标记每个 5 分钟区间有没有录像。CMS 是「一整排等宽小块」而不是
+ * 任意宽度的矩形，必须按分钟网格离散化：段覆盖到的块都点亮，1 秒的碎片段也点亮整块。
  */
 const minuteBlocks = computed(() => {
   const base = dayStartMs.value
@@ -560,13 +426,8 @@ const minuteBlocks = computed(() => {
 })
 
 /**
- * 红色游标的像素位置（相对 {@code .time-day} 左边缘）。
- *
- * <p>优先跟播放进度走（时间轴兼作进度条）；没在播放时退回「当前时刻」，
- * 与 CMS 一致 —— 它的红线就是「现在」。
- *
- * <p>返回 {@code null} 表示不显示：日期不是今天、且没在播放时，
- * 画一条「今天此刻」的线在历史日期上是错的。
+ * 红色游标的像素位置。优先跟播放进度；没在播放时退回当前时刻（CMS 的红线就是「现在」）。
+ * 非今天且没在播放时返回 null —— 历史日期上画「今天此刻」是错的。
  */
 const cursorPx = computed(() => {
   const base = dayStartMs.value
@@ -579,12 +440,7 @@ const cursorPx = computed(() => {
   return ((now - base) / DAY_MS) * TIME_AXIS_PX
 })
 
-/**
- * 游标上显示的时刻。
- *
- * <p>只到分钟（{@code HH:mm}），与 CMS 一致 —— 它的游标标签是 60px 宽的
- * 白底红框，塞下 {@code HH:mm} 刚好，带上秒就溢出了。
- */
+/** 只到 HH:mm：CMS 的游标标签是 60px 宽，带秒会溢出。 */
 const cursorClock = computed(() => {
   const text = playhead.value ? playhead.value.clock : fmtClock(nowTick.value)
   return text.slice(0, 5)
@@ -603,15 +459,8 @@ function segTitle(s) {
 }
 
 /**
- * 把鼠标位置换算成「当天第几毫秒 + 百分比」。
- *
- * <p><b>必须按内层 {@code .time-day} 量宽度，不能按外框 {@code .time-rule}</b>：
- * 外框是 {@code max-width:1440px} + {@code overflow:hidden}，窗口窄于 1440px 时
- * 它只有几百像素，而里面那条轨道仍然是完整的 1440px（右侧被裁掉）。
- * 用外框宽度当分母，会把「可见部分」拉伸成一整天 ——
- * 实测点 15:00 附近会跳到 23:00 的录像段，用户完全无法理解。
- *
- * <p>比例夹在 0~100%，所以点到被裁掉的区域之外也会自然落在 24:00。
+ * 鼠标位置 → 当天毫秒 + 百分比。必须按内层 .time-day 量宽度：外框有 max-width:1440px，
+ * 窗口窄时它只有几百像素而轨道仍是 1440px，用它当分母实测点 15:00 会跳到 23:00 的段。
  */
 function trackPoint(ev) {
   const base = dayStartMs.value
@@ -624,30 +473,13 @@ function trackPoint(ev) {
   return { at: base + ratio * DAY_MS, percent: ratio * 100 }
 }
 
-/**
- * 「当前时刻」的脉冲值。
- *
- * <p>游标在未播放时要跟着真实时间走，但 {@code Date.now()} 不是响应式的 ——
- * 直接写在 computed 里，值会被缓存住，游标永远停在进入页面那一刻。
- * 由定时器推进这个 ref 来驱动重算（见 {@link onMounted}）。
- */
+/** 「当前时刻」脉冲：Date.now() 不是响应式的，直接写在 computed 里会被缓存住，需定时器推进。 */
 const nowTick = ref(Date.now())
 
-/** 推进 {@link nowTick} 的定时器句柄。 */
+/** nowTick 的定时器句柄。 */
 let nowTimer = null
 
-/**
- * 时间轴点击：播放命中时刻的那一段。
- *
- * <p>时间轴兼作进度条 —— 点哪播哪。
- * <ul>
- *   <li>正在播同一段 → 当作「定位」（拖动进度条）；</li>
- *   <li>正在播别的段或还没播 → 从该时刻起播。</li>
- * </ul>
- *
- * <p>定位优先用 SIP {@code INFO}（npt），设备原地跳，不必拆会话重新协商 ——
- * 后者的代价是 2~3 秒黑屏。
- */
+/** 时间轴点击：同段 → 定位（SIP INFO npt，毫秒级、不断流）；异段或未播 → 从该时刻起播。 */
 function onTrackClick(ev) {
   const base = dayStartMs.value
   if (base === null) return
@@ -660,23 +492,10 @@ function onTrackClick(ev) {
     ElMessage.info('该时刻没有录像')
     return
   }
-  /*
-   * 时间轴兼作进度条：点哪播哪。
-   *
-   * <p>正在播同一段 → 当作「定位」（拖动进度条）。
-   * 正在播别的段或还没播 → 从该时刻起播。
-   *
-   * <p>定位优先用 SIP {@code INFO}（npt），设备原地跳，
-   * 不必拆会话重新协商 —— 后者的代价是 2~3 秒黑屏。
-   */
   const offset = Math.floor((point.at - parseWall(hit.row.startTime)) / 1000)
   /*
-   * 正在播的<b>就是这一段</b> → 定位，绝不重新拉流。
-   *
-   * <p>早先的条件里带了 {@code && playing.value}：只要播放器那一刻不在
-   * “播放中”状态（缓冲、重连、刚点完还没起画面），同段点击就会走到下面的
-   * {@code play()} —— 那是一次 stop + 重新 INVITE，用户看到的就是
-   * 「拖一下进度条整路重来」。现在只要同一段就走定位。
+   * 同段就走定位，条件里不能带 playing.value：缓冲/重连时它并非 true，
+   * 会掉进下面的 play() → stop + 重新 INVITE，用户看到「拖一下整路重来」。
    */
   if (current.value && hit.row === current.value) {
     seekTo(Math.max(0, offset))
@@ -700,13 +519,6 @@ function prettyTime(v) {
 }
 
 
-
-/*
- * 不再自动选最高档：见 downloadSpeed 上的说明 —— 倍速产物是「快进片」，
- * 只适合快速翻看，不能当存档。默认完整模式，仅在设备确实声明多档时才
- * 提供快进选项供用户主动选择。
- */
-
 async function loadChannels() {
   try {
     const data = await deviceApi.channelList({ start: 0, limit: 1000 })
@@ -716,11 +528,7 @@ async function loadChannels() {
   }
 }
 
-/**
- * 确保已拿到媒体端口（播放地址需要用它与当前主机名重写）。
- *
- * @returns {Promise<boolean>} 是否可用
- */
+/** 确保已拿到媒体端口（播放地址要用它与当前主机名重写）。 */
 async function ensureMediaPort() {
   if (mediaHttpPort.value) return true
   try {
@@ -738,13 +546,7 @@ function onChannelChange() {
   searched.value = false
   deviceUnanswered.value = false
   deviceNotice.value = ''
-  /*
-   * 直接检索当天。
-   *
-   * <p>设备侧的录像检索是<b>串行问答</b>，同通道两个并发查询会互相覆盖
-   * 应答回调（其中一个必然超时，表现为「查询录像老是查不出来」），
-   * 所以一次通道切换只发这一条 SIP 查询。
-   */
+  // 设备侧检索是串行问答，同通道并发查询会互相覆盖应答回调，一次切换只发一条
   search()
 }
 
@@ -791,13 +593,7 @@ function onDayChange() {
   if (query.channelKey) search()
 }
 
-/**
- * 时间轴空位文案。
- *
- * <p><b>「设备没答」不能说成「当日没有录像」</b>：那是在报假警 ——
- * 用户会据此认为设备没录、甚至跑去现场。空列表有三种完全不同的原因，
- * 文案必须分开：还没查 / 设备没答 / 确实没录。
- */
+/** 空列表有三种原因，文案必须分开：「设备没答」说成「当日没有录像」是报假警。 */
 const timelineEmptyText = computed(() => {
   if (!searched.value) return '选择通道后点「检索」'
   if (deviceUnanswered.value) {
@@ -806,13 +602,7 @@ const timelineEmptyText = computed(() => {
   return '当日没有录像'
 })
 
-/**
- * 检索请求序号：只认最后一次发起的结果。
- *
- * <p>设备检索要几秒，用户在这期间换了通道或日期时，先发的那次会晚回来，
- * 直接写 {@code records} 就会把新通道的结果覆盖成旧通道的 ——
- * 界面上表现为「选了 A 通道，时间轴上却是 B 通道的录像」。
- */
+/** 检索序号：只认最后一次的结果。设备检索要几秒，先发的晚回来会把新通道的结果覆盖成旧通道。 */
 let searchSeq = 0
 
 async function search() {
@@ -839,13 +629,7 @@ async function search() {
     searched.value = true
     deviceUnanswered.value = data?.deviceAnswered === false
     deviceNotice.value = data?.notice || ''
-    /*
-     * 设备没应答 ≠ 没有录像。
-     *
-     * <p>后端会在 {@code notice} 里把这两者说清楚（含“下面是缓存结果”）。
-     * 早先不管三七二十一弹「当日无录像」，等于告诉用户“设备没录”，
-     * 而实际上可能是设备侧的录像检索坏了 —— 排查方向直接错掉。
-     */
+    // 设备没应答 ≠ 没有录像：后端 notice 会说明（含“下面是缓存结果”），不要一律弹「当日无录像」
     if (deviceUnanswered.value) {
       ElMessage.warning(data.notice || '设备未应答录像检索')
     } else if (!records.value.length) {
@@ -859,11 +643,7 @@ async function search() {
 }
 
 
-/**
- * 画面起不来时的重拉次数。
- *
- * <p>只在<b>用户主动点播</b>时清零；自动重建沿用计数，否则会变成无限重试。
- */
+/** 画面起不来时的重拉次数。只在用户主动点播时清零，自动重建沿用，否则会无限重试。 */
 let stallRetry = 0
 
 /** 最多重拉几次。超过就停下来告诉用户，而不是一直重试刷设备。 */
@@ -871,30 +651,18 @@ const MAX_STALL_RETRY = 2
 
 /**
  * 发起回放并播放。
- *
  * @param {object} row 录像段
- * @param {object} [opts]
  * @param {boolean} [opts.rebuild] 内部重拉（不清零重试计数）
- * @param {number} [opts.startOffset] 从本段第几秒开始播（拖动定位用，默认 0）
+ * @param {number} [opts.startOffset] 从本段第几秒开始播（拖动定位用）
  */
 async function play(row, opts = {}) {
   if (!opts.rebuild) stallRetry = 0
   const offset = Math.max(0, Math.floor(Number(opts.startOffset) || 0))
-  /*
-   * 列表视图点「回放」时把播放区滚进视野。
-   *
-   * <p>回放不再用弹窗，画面在页面顶部的播放区。用户在表格里点了「回放」，
-   * 播放区可能在屏幕外 —— 画面在下面播、用户看不到，还以为没反应。
-   */
+  // 画面在页面顶部，列表里点「回放」时它可能已在屏幕外，滚进视野
   if (playStage.value) {
     playStage.value.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
-  /*
-   * 【先请求、成功后再起播】
-   *
-   * <p>请求被拒时（典型场景：该通道正在后台下载，回放会话被锁），
-   * 页面只留一条说明原因的提示，不会把播放器切到「有画面但其实是空白」的状态。
-   */
+  // 先请求后起播：请求被拒（如通道正在后台下载、会话被锁）时不会留下「有画面但空白」的状态
   await ensureMediaPort()
 
   let info = null
@@ -918,13 +686,7 @@ async function play(row, opts = {}) {
   segmentSeconds.value = segmentLengthOf(row)
   // 本段从第 offset 秒开始推，媒体时间轴的 0 点对应段内这个位置
   positionOffset.value = offset
-  /*
-   * 新会话一律回到 1 倍速。
-   *
-   * <p>设备是按 INVITE 时的速率起推的，上一段设的 2 倍速不会带过来；
-   * 本地若还停在 2 倍速，缓冲会立刻被抽干（表现为一起播就卡）。
-   * 用户想要倍速，每一段都得重新选一次 —— 与设备侧的行为一致。
-   */
+  // 新会话一律回 1 倍速：设备按 INVITE 时的速率起推，本地若停在上段的 2 倍速会立刻抽干缓冲
   clearRateWatch()
   if (seekTimer) {
     clearTimeout(seekTimer)
@@ -947,84 +709,33 @@ async function play(row, opts = {}) {
     return
   }
   /*
-   * 协议选择：优先 WebRTC，再退回 WebSocket-FLV。
-   *
-   * <p><b>为什么不再是「回放只走 WS-FLV」</b>：那套 video.js 9 + videojs-flvjs
-   * 组合里，flv 源处理器注册不全（{@code Html5.canPlayType()} 调到缺方法的
-   * 处理器直接抛异常），{@code <source type="video/x-flv">} 被判成
-   * 「不支持的类型」—— 播放器只显示一句「无法找到此视频兼容的源」，
-   * 再被起播看门狗判成「流有问题」反复重拉，表现为「一直转圈 / 反复重新播流」。
-   * 实时预览默认走 WebRTC（{@code LIVE_DEFAULT_PROTOCOL}）一直是好的，
-   * 回放没有理由死守 FLV。
-   *
-   * <p>WebRTC 通路还有一个额外好处：媒体时间轴由 ZLM 连续重打时间戳，
-   * 设备 npt 跳转不会像 FLV 那样在 MSE 里留下「缓冲空洞」。
+   * 优先 WebRTC，退回 WS-FLV。不走纯 FLV：video.js 9 + videojs-flvjs 的 flv 源
+   * 处理器注册不全，Html5.canPlayType() 会抛异常，被判成「不支持的类型」后
+   * 起播看门狗反复重拉（表现为一直转圈）。WebRTC 还由 ZLM 连续重打时间戳，
+   * npt 跳转不会像 FLV 那样在 MSE 里留下缓冲空洞。
    */
   const playbackProto = urls.webrtc ? 'webrtc' : 'wsflv'
   await player.play(playbackKey.value, urls, {
     proto: playbackProto,
-    /*
-     * <b>不传 {@code _vod}：设备回放就是直播形式。</b>
-     *
-     * <p>国标回放的媒体面就是「设备主动往平台推一路 RTP」，与直播同一形状 ——
-     * flv.js 也必须按 {@code isLive=true} 处理（它会因此不尝试 seek、
-     * 不等待 duration），这才是真实语义。早先按「点播」传会让 flv.js
-     * 去等一个永远不会来的时长。
-     *
-     * <p><b>代价与弥补</b>：live 模式下没有进度条。本平台的定位入口是
-     * 页面自己的时间轴（点刻度 → SIP INFO 让设备跳），不依赖播放器进度条，
-     * 所以这不是能力缺失。
-     */
-    /*
-     * <b>控制栏保持开启</b>（引擎默认 {@code controls:true}）。
-     *
-     * <p>早先这里传 {@code _noControls: true} 把控制栏关掉，注释写「控制条由
-     * 本页面提供」—— 但页面从未提供过，于是用户拿不到任何播放操作：
-     * 没有暂停、没有音量、没有全屏、没有截图。这就是「播放器不可操作」的由来。
-     * 该开关已于本次一并删除（无任何调用方）。
-     *
-     * <p>控制栏里最终保留 播放/暂停、音量、拉伸(STD)、截图、全屏。
-     * 没有进度条 —— 由引擎按「实时流」统一隐藏（见 {@code useLivePlayer#play}）。
-     */
-    /*
-     * 画面永远起不来时重拉整条流。
-     *
-     * <p><b>这里必须接 onStall，否则那个看门狗是死的</b>：播放器里只能在
-     * “自己无救”时回调出来 —— 它连的是同一个媒体源，重连一万次也没有视频轨。
-     * 真正要做的是停掉回放会话 + 重新 INVITE（换 SSRC、ZLM 重建媒体源）。
-     * 早先这里没传，于是看门狗触发后什么也没发生，界面永远停在
-     * 「等待设备推流…」，只能关掉重播。
-     *
-     * <p>典型成因：设备推流慢（实测某下级平台应答后要 11 秒才推视频），
-     * ZLM 等轨道就绪超时就把 H264 轨<b>永久丢弃</b>，媒体源只剩 PCMA。
-     */
+    // 不传 _vod：国标回放的媒体面就是设备主动推 RTP，与直播同形状。按点播传会让
+    // flv.js 去等一个永远不会来的时长；定位入口是页面自己的时间轴，不依赖进度条。
+    // 控制栏保持开启（引擎默认）：曾传 _noControls:true 而页面并未自备控件，
+    // 导致没有暂停/音量/全屏/截图。进度条由引擎按实时流统一隐藏。
+    // 必须接 onStall，否则看门狗触发后什么也不发生。播放器自己重连没用 —— 连的是同一个媒体源；
+    // 这里要停会话 + 重新 INVITE（换 SSRC、ZLM 重建媒体源）。
+    // 典型成因：某下级平台应答后 11 秒才推视频，ZLM 等轨道超时会把 H264 轨永久丢弃。
     onStall: rebuildStream,
-    /*
-     * 稳定播放 10 秒后把重拉预算还回去。
-     *
-     * <p>否则一个长时间的观看过程里，几次彼此无关的起播故障（设备慢一次、
-     * 丢包坏帧一次…）会把 2 次预算永久耗光，之后再出问题就直接放弃了。
-     */
+    // 稳定播放 10 秒后归还重拉预算，否则几次无关的起播故障会把 2 次预算永久耗光
     onStable: () => { stallRetry = 0 },
-    /*
-     * 国标回放控制：官方进度条/播放控件的动作转成设备 SIP 指令。
-     *
-     * <p>这些是国标协议的语义（INFO 定位 / PLAY / PAUSE / Scale），
-     * 播放器本身不做任何自定义实现。
-     */
+    // 官方控件动作 → 国标 SIP 指令（INFO 定位 / PLAY / PAUSE / Scale）
     vod: {
       duration: segmentSeconds.value,
       onSeek: (sec) => seekTo(sec),
       onPause: () => control('pause'),
       onResume: () => resumePlayback(),
       onRate: (rate) => control('scale', { scale: rate }),
-      /*
-       * 媒体时间轴突变（设备跳转后 PTS 整段前移）。
-       *
-       * <p>段内位置 = {@code positionOffset + 媒体时间}。媒体时间自己跳了
-       * N 秒，就必须把 offset 反向退掉 N 秒，否则「设备跳了 350 秒」会被
-       * 计入两次，进度条与画面立刻对不上。
-       */
+      // 媒体时间轴突变：段内位置 = positionOffset + 媒体时间，媒体自己跳了 N 秒就
+      // 要把 offset 反向退掉 N 秒，否则跳转被计入两次，进度条与画面对不上
       onJump: (delta) => {
         positionOffset.value = (positionOffset.value || 0) - delta
         // 媒体时间轴已经跳到新位置，说明设备执行完了，不用再走兜底
@@ -1046,43 +757,17 @@ function addSeconds(timeStr, seconds) {
 }
 
 /**
- * 拖动/点击进度条定位：发 SIP {@code INFO} 让设备自己跳。
+ * 拖动/点击定位：发 SIP INFO（Range: npt=<秒>-）让设备原地跳，配 200ms 防抖。
  *
- * <h3>为什么可以直接发 npt</h3>
- * 标准附录 D 的 {@code PLAY RTSP/1.0 + Range: npt=<秒>-} 就是正解，
- * WVP-GB28181-pro 的 {@code playSeekCmd} 也是这么实现的（逐字对比过，
- * 连 {@code Content-Type: application/MANSRTSP} 都一样）。
+ * 实测证据：同一次会话发 Range: npt=3600-，画面 OSD 从 00:00:17 跳到 01:00:18。
+ * 曾误判为「设备不支持 npt」改成停流重开，真因是 INFO 的 From/To tag 取反、
+ * 报文落在对话框之外，设备回 200 OK 却不执行。
  *
- * <p><b>之前这里改成「停流 + 重新 INVITE」是误判</b>：那时 INFO 的
- * 对话框 tag 取反了（To 用了自己、From 用了对端），报文落在对话框之外，
- * 设备宽容地回 200 OK 却不执行。修好 tag 之后 npt 一直是生效的，
- * 只是没人回来改这里。
- *
- * <p>实测证据（同一次会话里发 {@code Range: npt=3600-}）：
- * 画面 OSD 从 {@code 00:00:17} 直接跳到 {@code 01:00:18}，正好 +3600 秒。
- *
- * <p>与停流重开相比：
- * <ul>
- *   <li>耗时：INFO 是毫秒级；重新 INVITE 要 2~3 秒协商 + 设备重新起推</li>
- *   <li>不中断：RTP 通道不断，进度条不会闪回 0</li>
- *   <li>不打扰设备：不会反复拆建会话（部分设备有并发会话数限制）</li>
- * </ul>
+ * 防抖：拖动会连续触发，设备每秒只处理几条，多余指令会排队或被丢弃。
+ * 失败只如实提示，不再自动重拉 —— 不支持 npt 时重拉也定位不到目标。
  */
 let seekTimer = null
 let pendingSeek = null
-
-/**
- * 拖动/点击定位：发 SIP {@code INFO} 让设备自己跳（带防抖）。
- *
- * <p><b>为什么防抖</b>：拖动时控件会连续触发多次定位，每次都发 INFO 会把信令
- * 打爆 —— 设备侧的处理能力只有每秒几条，多余的指令要么排队要么被丢弃，
- * 用户看到的是「拖完半天画面才动」。这里只保留最后一次，200ms 后发。
- *
- * <p><b>失败不再自动重新拉流</b>：早先定位失败会 stop + 重新 INVITE，
- * 用户感受到的就是「拖一下整路重来、卡好几秒」。设备不支持 npt 时
- * 重拉也定位不到目标，只是白等一次；改成如实提示，让用户自己决定
- * 要不要重播（时间轴上换个段点就是了）。
- */
 function seekTo(sec) {
   const row = current.value
   if (!row) return
@@ -1117,14 +802,8 @@ function clearSeekFallback() {
 }
 
 /**
- * 定位兜底：npt 是「请设备跳」，设备也可以不理。
- *
- * <p>WVP 的录像时间轴干脆不用 npt —— 拖动就是「停会话 + 按新起点重新 INVITE」
- * （见 {@code web/src/views/device/channel/record.vue} 的 {@code mouseupTimeline}
- * → {@code playRecord}）。那套一定生效，但要 2~3 秒黑屏。
- *
- * <p>这里两者结合：先走 npt（毫秒级、不断流）；6 秒内媒体时间轴还没跳变，
- * 说明设备没执行（或播放器跨不过时间戳断层），就自动退回 WVP 的做法。
+ * 定位兜底：npt 是「请设备跳」，设备可以不理。6 秒内媒体时间轴没跳变就退回
+ * WVP 的做法（停会话 + 按新起点重新 INVITE，代价 2~3 秒黑屏）。
  */
 function armSeekFallback(offset) {
   clearSeekFallback()
@@ -1151,19 +830,10 @@ async function flushSeek(offset) {
       command: 'seek',
       range: offset
     })
-    /*
-     * 乐观地挪动进度显示。
-     *
-     * <p>设备跳转后媒体时间轴并不会重置（我们收到的仍是连续 FLV），
-     * 所以「段内位置 = 偏移 + 媒体已播秒数」。把偏移改成 {@code 目标 - 当前}，
-     * 进度条立刻落到目标处并继续走 —— 否则用户拖完看到进度条弹回原处，
-     * 会以为没生效（其实画面已经跳了）。
-     */
+    // 乐观挪动进度：设备跳转后媒体时间轴不重置，段内位置 = 偏移 + 媒体已播秒数。
+    // 把偏移改成「目标 - 当前」，否则进度条弹回原处，用户以为没生效（画面其实跳了）
     positionOffset.value = Math.max(0, offset - (player.position.value || 0))
-    /*
-     * 设备侧跳转有 1~2 秒的处理时间，期间画面停在旧位置。
-     * 盖一层「定位中…」比让用户以为卡死要好；媒体时间轴一跳就撤掉。
-     */
+    // 设备跳转有 1~2 秒处理时间，期间盖「定位中…」；媒体时间轴一跳就撤掉
     clearSeeking()
     seeking.value = true
     seekingTimer = setTimeout(clearSeeking, 3000)
@@ -1175,12 +845,7 @@ async function flushSeek(offset) {
   }
 }
 
-/**
- * 从本段第 {@code offsetSeconds} 秒重新开始播放（停会话 → 重新 INVITE）。
- *
- * <p>现在只作为<b>兜底路径</b>使用：设备不支持 npt、或媒体源已失效时。
- * 正常的拖动定位与「继续播放」都走 SIP INFO，不再拆会话。
- */
+/** 从本段第 offsetSeconds 秒重新开始播放（停会话 → 重新 INVITE）。只作兜底用。 */
 async function restartAt(offsetSeconds) {
   const row = current.value
   if (!row) return
@@ -1192,12 +857,7 @@ async function restartAt(offsetSeconds) {
   await play(row, { rebuild: true, startOffset: offsetSeconds })
 }
 
-/**
- * 重拉整条回放流（停会话 → 重新 INVITE）。
- *
- * <p>只在「播放器自己无救」时被调用：媒体源已经丢了视频轨、或连上了却
- * 一个字节都收不到。这两种情况重连 WebSocket 都没用，必须换一路流。
- */
+/** 重拉整条回放流。只在媒体源丢了视频轨、或连上却收不到字节时调用 —— 重连 WebSocket 没用。 */
 async function rebuildStream() {
   const row = current.value
   if (!row) return
@@ -1212,28 +872,17 @@ async function rebuildStream() {
 
 /* ==================== 录像下载 ==================== */
 /*
- * 为什么不用 <a href="设备文件路径" download>：
- * 国标设备的录像在设备侧，没有可直接访问的 HTTP 地址（FilePath 多数还是空的）。
- * 所以「下载」= 用回放把这段录像拉下来，同时让 ZLM 录成本地 MP4，
- * 录完再给浏览器一个标准 MP4 链接（支持 Range，断点续传）。
- *
- * 【后台任务】任务由服务端持有多份状态（DownloadService），进度与结果
- * 统一在顶栏的「下载任务」面板里看。本页只负责「发起」，不再自己轮询——
- * 早先进度存在本组件里，用户切走页面就丢了，而且离开时的 playback/stop
- * 还会把下载中的流停掉（下载直接中断）。
+ * 设备的录像没有可直接访问的 HTTP 地址（FilePath 多数为空），所以「下载」= 用回放
+ * 把流拉下来、ZLM 同时录成本地 MP4，录完给浏览器一个支持 Range 的链接。
+ * 任务状态由服务端持有，本页只负责发起；进度存本组件会在切页时丢失，且离开时的
+ * playback/stop 会把下载中的流停掉。
  */
 
 /**
- * 开始下载某段录像（后台执行，可离开本页）。
- *
- * <p>顺序不能颠倒：必须先有回放流，ZLM 才有东西可录。
- * 若用户此时正在看回放，那段流会被这次 download 复用（同一个会话键），
- * 不会重复向设备发起 INVITE。
- *
- * @param row 录像段（起点/终点/大小；框选下载时构造的伪行）
- * @param override 可选覆盖项：{@code seconds} 指定时长、{@code speed} 指定倍速。
- *                 框选区间下载用它把「整段」换成「用户选的那一截」并强制 1 倍速 ——
- *                 框选的目的就是「少下一点、画质别动」，不能再叠加掉帧的倍速。
+ * 开始下载某段录像（后台执行，可离开本页）。顺序不能颠倒：必须先有回放流 ZLM 才能录；
+ * 正在看回放时复用同一会话键，不重复 INVITE。
+ * @param row 录像段（框选下载时是构造的伪行）
+ * @param override seconds 指定时长、speed 指定倍速（框选下载用它强制 1 倍速，不能叠加掉帧的倍速）
  */
 async function startDownload(row, override = {}) {
   const seconds = override.seconds || segmentLengthOf(row)
@@ -1271,28 +920,13 @@ async function startDownload(row, override = {}) {
 /** 正在发起下载的行（防重复点击 / 按钮 loading）。 */
 const downloadingKey = ref('')
 
-/**
- * 下载当前正在回放的那一段。
- *
- * <p>工具栏的「下载」按钮走这里。早先模板绑的是 {@code downloadCurrent}，
- * 但函数从未定义过 —— 点一下就是 {@code ReferenceError}，
- * 表现为「下载按钮没反应」，控制台里只有一条 undefined 的报错。
- *
- * <p>复用列表视图的行下载逻辑（{@link startDownload}）：两者下的是同一段，
- * 只是入口不同，没必要写第二套。
- */
+/** 下载当前回放段（工具栏按钮）。复用 startDownload，两者下的是同一段。 */
 async function downloadCurrent() {
   if (!current.value) return
   await startDownload(current.value)
 }
 
-/**
- * 下载按钮的悬浮提示：把「要等多久」提前说清楚。
- *
- * <p>完整模式（默认）耗时 ≈ 段长本身，下载在后台跑，用户可以去干别的事。
- * 快进模式会快一些，但产物是跳帧画面 —— 这个差别必须在点之前说明，
- * 否则用户拿到文件才发现画面一跳一跳，只会认为平台坏了。
- */
+/** 悬浮提示提前说明耗时与画质差异：完整≈段长；快进快但产物跳帧，不说明会被当成平台坏了。 */
 function downloadHint(row) {
   if (hasTaskOfRow(row)) return '该段已在后台下载，见右上角「下载任务」'
   const sec = segmentLengthOf(row)
@@ -1322,12 +956,9 @@ function hasTaskOfRow(row) {
 }
 
 /**
- * 回放控制：暂停 / 继续 / 倍速 / 拖动。
- *
- * <p><b>必须带 {@code streamid}</b>：同一通道上通常还有一路直播（云端录像保活），
- * 后端按 {@code serial/code} 定位时会拿到直播会话，控制指令就发到错的 SIP 对话框里 ——
- * 设备回 200 却不执行。{@link playbackKey} 正是回放会话键（带 {@code _playback} 后缀），
- * 传它后端就能唯一命中。
+ * 回放控制：暂停 / 继续 / 倍速 / 拖动。必须带 streamid：同一通道通常还有一路直播
+ * （云端录像保活），后端按 serial/code 定位会命中直播会话，指令发到错的 SIP 对话框，
+ * 设备回 200 却不执行。
  */
 async function control(command, extra = {}) {
   if (!current.value) return false
@@ -1349,20 +980,9 @@ async function control(command, extra = {}) {
 }
 
 /**
- * 继续播放：优先发 SIP {@code PLAY npt=now-}，失败再重新协商。
- *
- * <p><b>为什么先试 INFO</b>：「继续」本质上只是让设备接着推，
- * 发一条 INFO 是毫秒级的；而停会话 + 重新 INVITE 要 2~3 秒协商，
- * 用户按下「继续」后要盯着黑屏，体验差距很明显。
- * PAUSE / PLAY 的对话框 tag 已实测正确，正常设备会立即续推。
- *
- * <p><b>为什么要留重开兜底</b>：暂停期间设备停推 RTP，ZLM 对没有数据的
- * RTP 会话有硬超时（实测十几秒到 100 秒），一过就注销媒体源 ——
- * 此后设备即使续推，平台侧也没有可用的源。这种情况 INFO 会「发成功但
- * 没画面」，由播放器的看门狗（12 秒无关键帧 / 20 秒无字节）
- * 触发 {@code onStall} → {@link rebuildStream} 重新协商，用户感知只是慢几秒。
- *
- * <p>所以这里不再主动拆会话：拆会话本身就是「体验很差」的来源。
+ * 继续播放：优先发 SIP PLAY npt=now-（毫秒级），失败才重新协商 —— 停会话 + INVITE 要 2~3 秒黑屏。
+ * 暂停期间设备停推 RTP，ZLM 对空 RTP 会话有硬超时（实测十几秒到 100 秒）会注销媒体源，
+ * 那时 INFO 发成功但没画面，由看门狗（12 秒无关键帧 / 20 秒无字节）触发 rebuildStream。
  */
 async function resumePlayback() {
   const row = current.value
@@ -1381,24 +1001,14 @@ async function resumePlayback() {
 
 /* ==================== 进度显示 ==================== */
 /*
- * 进度条与播放控制全部由 LivePlayer 的<b>官方控制栏</b>提供（含官方进度条）。
- *
- * <p>国标回放是「伪点播」—— 平台收到的是设备持续推来的 FLV 流，流里没有
- * 总时长（ZLM 的 .live.flv 不带 duration 字段）。整段录像的起止时间只有
- * 业务侧知道（来自录像检索应答），由 {@code useLivePlayer} 的 vod 控制层
- * 喂给 video.js 的官方 {@code customDuration}，官方进度条即可正确显示长度。
- *
- * <p>拖动/暂停/倍速同样走官方控件，动作由 vod 控制层转成国标 SIP 指令
- * （{@code INFO} / {@code PLAY} / {@code PAUSE} / {@code Scale}）。
+ * 进度条与播放控制全部由 LivePlayer 官方控制栏提供。国标回放是「伪点播」：
+ * ZLM 的 .live.flv 不带 duration，整段起止只有业务侧知道（录像检索应答），
+ * 由 useLivePlayer 的 vod 层喂给 video.js 的 customDuration。
  */
 
 /** 录像段总时长（秒）。 */
 const segmentSeconds = ref(0)
-/**
- * 本段起始偏移（秒）：从段中间开始播时，媒体时间轴的 0 点对应的段内位置。
- *
- * <p>进度条显示位置 = positionOffset + player.position。
- */
+/** 本段起始偏移（秒）：从段中间起播时，媒体时间轴 0 点对应的段内位置。 */
 const positionOffset = ref(0)
 /** 播放位置（相对录像段起点的秒数）。 */
 const playPosition = computed(() =>
@@ -1408,13 +1018,8 @@ const playPosition = computed(() =>
 const playRate = ref(1)
 
 /**
- * 播放头：当前播放位置在当天时间轴上的位置。
- *
- * <p><b>时间轴兼作进度条</b> —— 它既标出「现在播到哪儿」，也是定位入口。
- * 位置换算：段的起始绝对时刻 + 段内偏移 + 媒体已播放时间，
- * 再换算成「距当天 00:00 的毫秒数 / 一天」得到百分比。
- *
- * @returns {{percent:number, clock:string}|null}
+ * 播放头在当天时间轴上的位置（时间轴兼作进度条）。
+ * 换算：段起始绝对时刻 + 段内偏移 + 媒体已播时间，再除以一天。
  */
 const playhead = computed(() => {
   const row = current.value
@@ -1432,23 +1037,13 @@ const playhead = computed(() => {
 })
 
 /**
- * 倍速切换。
+ * 倍速切换。不能只改本地 playbackRate：拿到的是设备按实时速率推的流，本地 2 倍速
+ * 几秒就把缓冲抽干，真正加速只能让设备发 Scale。
  *
- * <h3>为什么不能只改本地 {@code playbackRate}</h3>
- * 国标回放拿到的是设备<b>按实时速率推上来</b>的流：本地调到 2 倍速，
- * 几秒内就把缓冲抽干，画面一顿一顿。真正的倍速只能让设备加速推
- * （{@code Scale}）。
- *
- * <h3>为什么设备那半必须确认</h3>
- * {@code Scale} 是「请求」不是「保证」。实测南坑水库（下级平台）收到
- * {@code Scale: 2.0} 之后<b>直接停推</b>，媒体源随即被注销、播放器 404。
- * 而上一版用「媒体时间走了多少」当判据本身就是错的 ——
- * 缓冲富余时媒体时间无论如何都按本地速率走，看不出设备有没有加速。
- *
- * <p>所以现在：先只发指令、本地保持 1 倍速，4 秒后看<b>已缓冲末尾</b>
- * 前进了多少秒（它只随收到的数据量走，是设备推送速率唯一可靠的判据）。
- * 达标才把本地也切过去；不达标就记下「该通道不支持信令变速」
- * （存本地，下次不再白试一次把流打死），改用<b>跳播快进</b>。
+ * Scale 是「请求」不是「保证」：南坑水库（下级平台）收到 Scale: 2.0 后直接停推，
+ * 媒体源被注销、播放器 404。判据不能用「媒体时间走了多少」—— 缓冲富余时它总按
+ * 本地速率走。改为只发指令、本地保持 1 倍速，4 秒后看已缓冲末尾前进了多少秒
+ * （只随收到的数据量走）。不达标就记入本地黑名单，改用跳播快进。
  */
 async function onRateChange(rate) {
   clearRateWatch()
@@ -1528,13 +1123,7 @@ function markSpeedUnsupported() {
 /** 跳播快进的定时器句柄。 */
 let jumpTimer = null
 
-/**
- * 跳播快进：用<b>已验证可用</b>的 npt 定位，每隔一会儿把播放点往前推一段。
- *
- * <p>这台设备支持原地 npt 跳转却不支持 {@code Scale}，
- * 于是「快放」只能用「连续跳播」模拟：2 倍速 = 每 2 秒墙钟跳 +4 秒。
- * 跳完那一小段停顿由播放器的空洞跨越吃掉，观感接近快速翻看。
- */
+/** 跳播快进：设备支持 npt 却不支持 Scale，用连续跳播模拟（2 倍速 = 每 2 秒墙钟跳 4 秒）。 */
 function startJumpSpeed() {
   clearJumpTimer()
   speedMode.value = 'jump'
@@ -1594,25 +1183,15 @@ function clearRateWatch() {
 }
 
 /**
- * 回放会话键。
- *
- * <p><b>必须带 {@code _playback} 后缀</b>：直播与回放是两个独立会话
- * （见 {@code RtpSession#getSessionKey}）。用裸的 {@code 设备/通道} 会命中
- * <b>直播</b>会话 —— 自动云端录像会让通道长期有直播流在跑，于是回放弹窗里
- * 播的是实时画面（OSD 显示今天），切 WebRTC 也会拿到直播的地址/或直接 404。
+ * 回放会话键，必须带 _playback 后缀。用裸的「设备/通道」会命中直播会话
+ * （云端录像保活让通道长期有直播流），播出来是实时画面。
  */
 const playbackKey = computed(() => `${serial.value}/${code.value}_playback`)
 
 
 
 
-/**
- * 当前播放画面对应的墙钟时间。
- *
- * <p>保留计算逻辑但不展示在界面上：xgplayer 的控制栏已显示「段内秒数」，
- * 再画一行「当前画面/段内」只是重复。若以后需要（如给截图加水印）
- * 直接取这个 computed 即可。
- */
+/** 当前画面对应的墙钟时间。界面不展示（控制栏已显示段内秒数），留给截图加水印等场景。 */
 const wallClock = computed(() => {
   if (!current.value?.startTime) return '—'
   const base = new Date(String(current.value.startTime).replace(' ', 'T')).getTime()
@@ -1633,20 +1212,9 @@ function segmentLengthOf(row) {
 }
 
 /**
- * 释放当前回放会话（停播放器 + 通知设备停流）。
- *
- * <p>界面上已经没有「停止回放」按钮了（对齐 CMS，它的页面只有
- * 标题/工具栏/播放器/时间轴）。这个方法现在<b>只在离开页面时</b>调用，
- * 见 {@code onUnmounted}。
- *
- * <p>为什么离开页面必须主动停：不停的话设备会继续按回放通道推流，
- * 平台侧会话要等空闲巡检（45 秒）才回收 —— 用户看到的就是
- * 「页面都关了，设备还在被拉流」，白占上行带宽。
- *
- * <p>正在下载时<b>不要</b>主动停流：下载与回放共用同一路回放流（同一个会话键），
- * 停掉它等于把正在录制的源掐了，用户拿到的 MP4 会是半截。
- * 与后端一致：{@code playback/stop} 在下载中也会返回 ok=false 并跳过停流，
- * 真正的保护在服务端。
+ * 释放当前回放会话，只在离开页面时调用（界面上没有「停止回放」按钮）。
+ * 不停的话设备会继续推流，平台会话要等 45 秒空闲巡检才回收，白占上行带宽。
+ * 下载中不停流：下载与回放共用同一会话键，停掉等于掐掉正在录的源（服务端也有同样保护）。
  */
 function releasePlayback() {
   player.stop()
@@ -1693,13 +1261,7 @@ function sleep(ms) {
 }
 
 onMounted(async () => {
-  /*
-   * 时间脉冲：游标在「未播放」状态下显示的是当前时刻，要自己往前走。
-   *
-   * <p>30 秒一次足够：游标位置按分钟算，1 分钟 = 1px，
-   * 更密的刷新用户看不出差别，只是白费 CPU。播放中游标跟的是
-   * {@code playhead}（由播放器 timeupdate 驱动），与本定时器无关。
-   */
+  // 未播放时游标显示当前时刻，靠这个定时器推进。30 秒足够：1 分钟 = 1px，更密看不出差别
   nowTimer = setInterval(() => { nowTick.value = Date.now() }, 30_000)
   await loadChannels()
   // 从通道列表点「设备录像」跳进来时预填设备/通道
@@ -1707,23 +1269,14 @@ onMounted(async () => {
   const code = String(route.query.code || '').trim()
   if (serial && code) {
     query.channelKey = `${serial}/${code}`
-    /*
-     * 预填走的是 query 参数，不会经过 onChannelChange，
-     * 所以这里要自己查一次。
-     *
-     * <p><b>顺序不能反</b>：先检索当天、再判录像状态。原实现只查了状态，
-     * 用户从通道列表点「设备录像」跳进来时时间轴/列表都是空的，
-     * 必须先手动点一次「检索」才看得到内容 —— 而他跳进来的目的
-     * 往往就是直接找某一段。
-     */
+    // 预填走 query 参数不经过 onChannelChange，这里必须自己检索一次
     search()
   }
 })
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
   nowTimer = null
-  // 离开页面时把定位防抖与倍速检查的定时器一并清掉，
-  // 否则它们会在组件销毁后继续跑，触发对已失效会话的请求
+  // 清掉定位防抖与倍速检查的定时器，否则组件销毁后仍会对已失效会话发请求
   clearRateWatch()
   if (seekTimer) {
     clearTimeout(seekTimer)
@@ -1732,31 +1285,17 @@ onUnmounted(() => {
   pendingSeek = null
   clearSeeking()
   clearSeekFallback()
-  /*
-   * 离开页面必须释放设备侧的会话。
-   *
-   * <p>界面上没有「停止回放」按钮了（对齐 CMS），所以这是唯一的释放入口 ——
-   * 只调 {@code player.stop()} 会断掉浏览器与 ZLM 之间的拉流，但设备仍在
-   * 按回放通道推流，平台侧会话要等 45 秒空闲巡检才回收。
-   */
   releasePlayback()
 })
 </script>
 
 <style scoped>
 /* ============================================================
-   CMS（LiveGBS）风格：设备录像时间轴页
-   ------------------------------------------------------------
-   颜色与尺寸取自 CMS 实际渲染值：
-     卡片      #fff，圆角 3px，阴影 0 1px 1px rgba(0,0,0,.1)，内边距 10px
-     主按钮    bg #556677 / border #404d59 / 白字
-     次按钮    bg #f4f4f4 / border #ddd   / 字 #444
-     按钮尺寸  高 29px、字号 12px、圆角 3px（Bootstrap btn-sm）
-     时间轴    外框 #ccc、高 50px；刻度块 #404d59、5×8px；小时格 60×25px、边线 #999
-     游标      2px 红竖线 + 白底红框标签
+   CMS（LiveGBS）风格：尺寸与颜色取自 CMS 实际渲染值
+   （卡片 #fff/3px；按钮高 29px、字 12px；时间轴外框 #ccc 50px；游标 2px 红）。
    ============================================================ */
 
-/* 卡片：对齐 CMS 的 .box */
+/* 对齐 CMS 的 .box */
 .pb-card {
   background: #fff;
   border-radius: 3px;
@@ -1819,10 +1358,8 @@ onUnmounted(() => {
 }
 
 /*
- * CMS 的 .btn：29px 高、12px 字、3px 圆角。
- *
- * <p>不用 el-button —— element-plus 的 small 是 24px、default 是 32px，
- * 和日期框、下拉并排都会差几像素，工具栏看起来就参差不齐。
+ * CMS 的 .btn：29px 高、12px 字。不用 el-button（small 24px / default 32px），
+ * 和日期框并排会差几像素。
  */
 .cms-btn {
   display: inline-flex;
@@ -1897,13 +1434,8 @@ onUnmounted(() => {
 }
 
 /*
- * 日期选择器。
- *
- * <p>宽度用模板上的 {@code style="width:150px"} 设定，不在这里写：
- * Element Plus 的 {@code .el-date-editor.el-input} 是<b>双类</b>选择器
- * （{@code width: var(--el-date-editor-width)}），scoped 下的单类规则压不过它，
- * 实测写 {@code width:150px} 与 {@code --el-date-editor-width} 都无效、
- * 渲染出来仍是 220px， toolbar 因此多占 70px 被迫换行。
+ * 宽度写在模板的 style="width:150px"：Element Plus 的 .el-date-editor.el-input 是
+ * 双类选择器（0,2,0），scoped 单类压不过它，实测仍渲染成 220px 并逼工具栏换行。
  */
 .pb-sel-date {
   margin: 0 8px 0 0;
@@ -1931,11 +1463,7 @@ onUnmounted(() => {
 
 /* ==================== 播放区 ==================== */
 
-/*
- * 700×394 是 CMS 的实测尺寸（16:9）。用 max-width 而不是写死宽度：
- * 窗口更窄时按比例收缩，宽屏时也不无限撑大 —— 录像回放不需要铺满整屏，
- * 太大的画面反而让时间轴被挤出视野。
- */
+/* 700×394 是 CMS 实测尺寸（16:9）。用 max-width：窄屏按比例收缩，宽屏也不会把时间轴挤出视野。 */
 .pb-player {
   position: relative;
   width: 100%;
@@ -1953,19 +1481,9 @@ onUnmounted(() => {
 }
 
 /*
- * 精简回放控制栏。
- *
- * <p>LivePlayer 用的是 video.js 默认控制栏，默认会把这些按钮全摆上：
- * 直播标识、Seek to live、章节、字幕、音轨、画中画。它们对<b>录像回放</b>
- * 全都不适用 —— 回放不是直播（没有「回到直播」这回事）、设备录像也没有
- * 章节和字幕轨。留着只会让控制栏拥挤，还容易让用户以为「点了能回到实时画面」。
- *
- * <p>最终保留：播放/暂停、音量、拉伸（STD）、截图、全屏 —— 与 CMS 一致。
- * <b>没有进度条</b>：进度条由引擎层统一隐藏（{@code .lp-no-seek}，
- * 见 {@code LivePlayerEngine#ensureFillStyle} 的说明），这里不再重复声明。
- *
- * <p>用 {@code :deep} 是因为控制栏是 LivePlayer 在运行时注入的 DOM，
- * 没有本组件的 scopeId，普通 scoped 选择器选不中。
+ * 只保留 播放/暂停、音量、拉伸(STD)、截图、全屏（与 CMS 一致）。隐藏的这些只对直播
+ * 有意义：回放没有「回到直播」，设备录像也没有章节/字幕/音轨。
+ * 用 :deep 是因为控制栏是 LivePlayer 运行时注入的 DOM，没有本组件的 scopeId。
  */
 .pb-player :deep(.vjs-live-control),
 .pb-player :deep(.vjs-seek-to-live-control),
@@ -1989,12 +1507,7 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/*
- * 「定位中…」提示。
- *
- * <p>国标定位是发指令让<b>设备</b>跳，平台这边只是等新数据 ——
- * 那 1~2 秒画面纹丝不动，不解释一下就会被当成「卡死/要重连」。
- */
+/* 国标定位是让设备跳，1~2 秒画面纹丝不动，不提示会被当成卡死。 */
 .pb-seeking {
   position: absolute;
   top: 10px;
@@ -2024,10 +1537,7 @@ onUnmounted(() => {
 
 /* ==================== 时间轴（1:1 对齐 CMS） ==================== */
 
-/*
- * 外框。注意 max-width:1440px 与内层固定 1440px 的组合 ——
- * 这是 CMS 的原样行为：窄窗口时右侧被 overflow:hidden 裁掉。
- */
+/* max-width:1440px + 内层固定 1440px 是 CMS 原样行为：窄窗口右侧被裁掉。 */
 .time-rule {
   position: relative;
   overflow: hidden;
@@ -2050,10 +1560,7 @@ onUnmounted(() => {
   height: 100%;
 }
 
-/*
- * 分钟刻度块：288 个 × 5px（= 5 分钟），float 排成一行。
- * 有录像的点亮成深色，无录像的透出外框的 #ccc。
- */
+/* 288 个 × 5px（= 5 分钟）。有录像的点亮成深色，无录像的透出外框 #ccc。 */
 .time-minute {
   float: left;
   width: 5px;
@@ -2067,10 +1574,7 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/*
- * 小时格：24 个 × 60px（= 1 小时），高 25px。
- * 左/上各一条 #999 细线 —— 这就是 CMS 的网格线，不是装饰。
- */
+/* 24 个 × 60px（= 1 小时）。左/上是 CMS 的网格线，不是装饰。 */
 .time-text-first,
 .time-text {
   float: left;

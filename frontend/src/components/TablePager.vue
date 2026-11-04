@@ -19,13 +19,8 @@
 /**
  * 列表底部分页条。
  *
- * <p>取代原先只显示「共 N 条」的 `.table-footer` —— 那一行在数据量大时
- * 既看不到页码也翻不了页，只能靠后端一次返回全部。
- * 各列表的标题、列宽、筛选条件各不相同，但分页交互完全一致，故抽成组件。
- *
- * <p>用 `:current-page` + `@current-change` 而非 `v-model:current-page`：
- * 页码状态由 {@link usePagination} 持有，翻页要连带触发重新加载，
- * 单向传值 + 事件更直白，也避免两处同时改同一个值。
+ * 用 :current-page + @current-change 而非 v-model：页码由 usePagination 持有，
+ * 翻页要连带触发重新加载，单向传值 + 事件更直白，也避免两处同时改同一个值。
  */
 defineProps({
   /** {@link usePagination} 返回的 pager 对象。 */

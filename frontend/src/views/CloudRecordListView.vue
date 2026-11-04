@@ -1,18 +1,14 @@
 <template>
   <!--
-    云端录像「列表视图」：独立页面（对齐 LiveGBS 的
-    #/cloudrecord/listview/<设备编码>/<通道编码>/<日期>）。
-
-    与时间轴页的区别：这里就是一张录像明细表，不带播放器。
+    云端录像「列表视图」（对齐 LiveGBS 的 #/cloudrecord/listview/...）：
+    录像明细表，不带播放器（点播就地弹窗）。
   -->
   <div class="page is-fill">
     <el-card shadow="never">
-      <!-- 标题：居中 -->
       <div class="box-title">
         云端录像({{ channelName }})-列表视图
       </div>
 
-      <!-- 工具条：左 返回/删除当天，右 日期选择器 + 时间轴视图 -->
       <div class="filter-bar">
         <el-button size="small" @click="goBack">
           <el-icon><ArrowLeft /></el-icon> 返回
@@ -39,7 +35,6 @@
           </template>
         </el-date-picker>
 
-        <!-- 切回时间轴视图 -->
         <el-button size="small" @click="goTimeline">
           <el-icon><Clock /></el-icon> 时间轴视图
         </el-button>
@@ -128,14 +123,9 @@
     </el-card>
 
     <!--
-      点播弹窗。
-
-      <p><b>为什么用弹窗而不是跳转时间轴页</b>：列表视图的用途是「翻记录、
-      找某一段、看一眼」——跳走再回来会丢掉当前页、筛选和滚动位置，
-      来回翻十几次很折磨人。弹窗就地播放，关掉还在原处。
-
-      <p>{@code destroy-on-close} 让关闭时整块 DOM 消失，配合
-      {@code @closed} 释放播放器（不停会继续下载录像数据）。
+      用弹窗而不是跳转时间轴页：列表视图是「翻记录、找一段、看一眼」，
+      跳走再回来会丢掉当前页与滚动位置。
+      destroy-on-close 让关闭时 DOM 消失，配合 @closed 释放播放器。
     -->
     <el-dialog
       v-model="playerVisible"
@@ -157,10 +147,7 @@
         </span>
         <el-tag :type="playStateType" size="small">{{ playState }}</el-tag>
         <span class="player-bar-spacer" />
-        <!--
-          这里不设「停止」按钮：弹窗关闭时会自动停播并释放播放器
-          （见 onPlayerClosed），单独放一个停止键属于重复入口。
-        -->
+        <!-- 不设「停止」：关闭弹窗会自动停播（见 onPlayerClosed），单独放一个键是重复入口 -->
         <el-button
           size="small"
           :disabled="!canDownloadRecord(playingRecord)"
@@ -204,7 +191,6 @@ const auth = useAuthStore()
 
 /** 重要标记：可撤销，cloud:write 即可。 */
 const canWrite = computed(() => auth.can('cloud:write'))
-/** 重要标记（按钮级）。 */
 const canMark = computed(() => auth.can('cloud:mark'))
 /** 删除录像：不可恢复，cloud:delete。 */
 const canDelete = computed(() => auth.can('cloud:delete'))
@@ -217,14 +203,11 @@ const loading = ref(false)
 const tableRef = ref(null)
 
 /**
- * 前端分页。
- *
- * <p>{@code queryDaily} 一次返回当天的全部录像段（一天也就二三十段），
- * 所以这里不往后端要分页参数，直接在浏览器里切页。
+ * 前端分页：queryDaily 一次返回当天全部录像段（一天也就二三十段），
+ * 不用向后端要分页参数。
  */
 const { pager, setTotal, onPageChange, onSizeChange } = usePagination({ pageSize: 10 })
 
-/** 当前页要显示的录像段。 */
 const pagedRecords = computed(() => {
   const start = (pager.page - 1) * pager.size
   return records.value.slice(start, start + pager.size)
@@ -232,7 +215,6 @@ const pagedRecords = computed(() => {
 
 useFillTableRows(tableRef, () => pagedRecords.value.length)
 
-/** 通道标识：设备编码 / 通道编码。 */
 const serial = computed(() => String(route.query.serial || ''))
 const code = computed(() => String(route.query.code || ''))
 
@@ -243,10 +225,8 @@ const loadedMonth = ref('')
 /** 当前 monthFlags 对应的月份（YYYY-MM），日历高亮/禁用时比对用。 */
 const flagsMonth = ref('')
 
-/** 本月有录像的日期。 */
 const recordDaySet = computed(() => new Set(recordDaysOf(monthFlags.value)))
 
-/** 日历格子是否有录像 / 是否禁用（绑定到日期选择器）。 */
 const cellHasRecord = (cell) => isRecordDay(cell, flagsMonth.value, recordDaySet.value)
 const cellDisabled = (date) => isDisabledDate(date, flagsMonth.value, recordDaySet.value)
 
@@ -258,8 +238,6 @@ watch(period, async (value, old) => {
   }
   await loadDaily()
 })
-
-/* ==================== 数据加载 ==================== */
 
 async function loadDaily() {
   if (!serial.value || !code.value) {
@@ -296,10 +274,6 @@ async function loadMonthFlags() {
   }
 }
 
-/* ==================== 格式化 ==================== */
-
-/* fmtCompactTs / formatSize / uploadText / uploadColor 见 utils/cloudRecord.js */
-
 /** 录像时长：优先用 duration（秒），否则按起止时间算。 */
 function fmtDuration(row) {
   let secs = row.duration
@@ -316,18 +290,11 @@ function fmtDuration(row) {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
-/* ==================== 操作 ==================== */
-
-/* ---------- 点播弹窗 ---------- */
-
-/** 弹窗是否显示。 */
 const playerVisible = ref(false)
-/** 当前在播的录像（弹窗底栏展示用）。 */
 const playingRecord = ref(null)
 /** 播放器挂载容器（弹窗内，dialog 打开后才有 DOM）。 */
 const dialogVideoContainer = ref(null)
 
-/** 弹窗标题：通道名 + 起止时间。 */
 const playerTitle = computed(() => {
   const r = playingRecord.value
   if (!r) {
@@ -337,7 +304,6 @@ const playerTitle = computed(() => {
   return `${channelName.value || '录像回放'} · ${span}`
 })
 
-/** 播放状态（展示用，直接映射播放器状态）。 */
 const playState = computed(() => recordPlayer.state.value)
 const playStateType = computed(() => {
   if (playState.value === '播放中') return 'success'
@@ -345,35 +311,20 @@ const playStateType = computed(() => {
   return 'info'
 })
 
-/**
- * 弹窗内的播放器。
- *
- * <p>与实时预览、录像回放是<b>同一个播放器</b>（LivePlayer）：
- * 云端录像是标准 mp4，走 LivePlayer 的官方点播通路
- * （{@code live=false} 显示进度条，支持拖动定位）。
- */
+/** 播放器与实时预览同源（LivePlayer）：云端录像是标准 mp4，走官方点播通路（live=false，带进度条）。 */
 const recordPlayer = useLivePlayer(dialogVideoContainer, {
   onFatal: (msg) => ElMessage.error('播放失败：' + msg)
 })
 
 /**
- * 弹窗点播一段录像。
- *
- * <p>注意 {@code nextTick}：播放器容器在 {@code el-dialog} 内部，
- * 而 dialog 默认是<b>懒渲染</b>的 —— 没打开过时 DOM 根本不存在，
- * 直接拿去建播放器会拿到 null 容器。先开弹窗、等渲染完再播。
- *
- * @param {object} row 录像记录
+ * 弹窗点播一段录像。必须 await nextTick：el-dialog 默认懒渲染，没打开过时
+ * 容器 DOM 不存在，直接拿去建播放器会拿到 null。
  */
 async function play(row) {
   playingRecord.value = { ...row }
   playerVisible.value = true
   await nextTick()
-  /*
-   * 静态地址（/record/**）由 nginx sendfile 直读，鉴权走地址签名
-   * （后端返回的 playUrl 已带 ?e=…&t=…），不需要 token；
-   * 只有退回受保护接口时才带。
-   */
+  // 静态地址（/record/**）走地址签名（playUrl 已带 ?e=…&t=…），不需要 token；只有退回受保护接口时才带
   const authToken = row.playUrl ? '' : (localStorage.getItem('gb_token') || '')
   const source = row.playUrl || `/api/v1/cloudrecord/file/${row.recordId}`
   try {
@@ -384,11 +335,8 @@ async function play(row) {
 }
 
 /**
- * 弹窗完全关闭后释放播放器。
- *
- * <p>用 {@code @closed} 而不是 {@code @close}：{@code close} 在动画开始时就触发，
- * 那时 DOM 还在；{@code closed} 是动画结束、内容真被销毁之后。
- * 不释放的话，播放器会继续下载录像数据（自控下载是持续的 Range 请求）。
+ * 用 @closed 而不是 @close：close 在动画开始时就触发（DOM 还在），
+ * closed 是动画结束、内容真被销毁之后。不释放的话播放器会继续发 Range 请求下载录像。
  */
 function onPlayerClosed() {
   recordPlayer.stop()
@@ -519,15 +467,9 @@ onMounted(async () => {
   cursor: pointer;
 }
 
-/* ==================== 点播弹窗 ==================== */
-
 /*
- * 弹窗内容的样式必须用 :global()。
- *
- * <p>因为 el-dialog 挂了 {@code append-to-body}：DOM 实际挂在 {@code <body>}
- * 下，不在本组件的模板树里，拿不到 scoped 的 {@code data-v-*} 属性 ——
- * 写成普通 scoped 规则会编译成 {@code .player-bar[data-v-xxx]}，永远匹配不上
- * （表现就是「样式写了但没生效」）。
+ * 弹窗内容样式必须用 :global()：el-dialog 挂了 append-to-body，DOM 挂在 <body> 下，
+ * 拿不到 scoped 的 data-v-* 属性，普通 scoped 规则永远匹配不上。
  */
 
 /* 播放器控制条：`video-box` / `video-container` 用全局样式，这行是弹窗独有 */
@@ -546,10 +488,7 @@ onMounted(async () => {
   flex: 1;
 }
 
-/*
- * 弹窗正文去掉默认的上下内边距 —— 16:9 视频本身就有高度，
- * 默认 padding 会把弹窗撑出滚轮。
- */
+/* 弹窗正文去掉默认上下内边距：16:9 视频本身有高度，默认 padding 会把弹窗撑出滚轮 */
 :global(.record-player-dialog .el-dialog__body) {
   padding-top: 8px;
   padding-bottom: 4px;

@@ -52,13 +52,18 @@
         <span>首次部署后请及时修改默认密码</span>
       </div>
     </div>
+
+    <!-- 滑动验证码：每次登录都要过一次，凭证一次性、失败需重验 -->
+    <SlideCaptcha v-model="captchaVisible" @success="onCaptchaSuccess" />
   </div>
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { captchaApi } from '@/api'
+import SlideCaptcha from '@/components/SlideCaptcha.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -68,18 +73,66 @@ const form = reactive({ username: 'admin', password: '' })
 const loading = ref(false)
 const error = ref('')
 
+/** 验证码弹窗开关。 */
+const captchaVisible = ref(false)
+/** 服务端下发的一次性验证凭证，用完即弃。 */
+let captchaId = ''
+
+/**
+ * 本次部署是否要验证码。
+ *
+ * <p>由后端 `gb28181.login.captcha-enabled` 决定，前端不写死：
+ * 本地调试或验证码组件故障时会被关掉，此时接口根本不校验 captchaId，
+ * 前端若仍无条件弹滑块，用户就会卡在「拖了也登不进去」。
+ *
+ * <p>默认 {@code true}：查询失败时按「要验证码」处理，宁可多一步也不放过裸奔。
+ */
+const captchaRequired = ref(true)
+
+onMounted(async () => {
+  try {
+    const r = await captchaApi.required()
+    captchaRequired.value = r?.required !== false
+  } catch {
+    captchaRequired.value = true
+  }
+})
+
+/**
+ * 点「登录」：需要验证码时先过滑块，拿到凭证后再真正提交。
+ *
+ * <p>不在打开页面时就弹验证码 —— 用户还没填完账号密码，先弹个拼图只会打断节奏。
+ */
 async function onSubmit() {
   if (!form.username || !form.password) {
     error.value = '请输入用户名和密码'
     return
   }
+  if (captchaRequired.value && !captchaId) {
+    captchaVisible.value = true
+    return
+  }
+  await doLogin()
+}
+
+/** 验证通过：暂存凭证并自动提交。 */
+function onCaptchaSuccess(id) {
+  captchaId = id || ''
+  if (captchaId) {
+    doLogin()
+  }
+}
+
+async function doLogin() {
   loading.value = true
   error.value = ''
   try {
-    await auth.login(form.username, form.password)
+    await auth.login(form.username, form.password, captchaId)
     router.push(route.query.redirect || '/dashboard')
   } catch (e) {
     error.value = e.message || '登录失败'
+    // 凭证是一次性的，后端已消费；不清理会导致下次点击直接被判失效
+    captchaId = ''
   } finally {
     loading.value = false
   }
