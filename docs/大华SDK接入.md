@@ -245,16 +245,14 @@ io.github.rurulalanana.dahua            ← 大华实现
 国标 Digest 只校验密码，所以这列一直是空的；SDK 登录两个都必填。
 `source` 字段复用既有值：`gb28181`（或历史值 `device`）/ `dahua`。
 
-### 9.3 云台命令路由
+### 9.3 云台命令路由（2026-11 起改为统一接口）
 
-`ControlService.sendPtz()` 按设备 `source` 分流：
-
-| 设备类型 | 路径 |
-|---|---|
-| 国标 | 生成 GB28181 十六进制 PTZ 指令，走 SIP MESSAGE |
-| 大华 | `provider.ptz(ctx, channelCode, direction, 129)` |
-
-`ptzCmdToSdkCommand(hex)` 读十六进制第 7 字节（下标 6~8），按**指令族**映射：
+> **本节已过时的一半已删掉。** 早期 `ControlService.sendPtz()` 用一个
+> `ptzCmdToSdkCommand(hex)` 把国标 PTZCmd 的十六进制反解成方向词，
+> 那层翻译在统一接口后**已不存在**，详见 §9.5。
+>
+> 保留下面这张对照表是因为它记录了一个真实踩过的坑，重新引入「hex 反解」
+> 这种设计时会再踩一次。
 
 | 码值 | 含义 | 方向词 |
 |---|---|---|
@@ -263,7 +261,7 @@ io.github.rurulalanana.dahua            ← 大华实现
 | `0x10` / `0x20` | 变倍放大 / 缩小 | `zoomin` / `zoomout` |
 | `0x41` / `0x42` | 聚焦远 / 近 | `focusfar` / `focusnear` |
 | `0x44` / `0x48` | 光圈放大 / 缩小 | `irisin` / `irisout` |
-| 其它（`0x81`+） | 预置位 / 巡航 / 扫描 / 辅助开关 | `null` → 明确报不支持 |
+| 其它（`0x81`+） | 预置位 / 巡航 / 扫描 / 辅助开关 | 无法映射，必须明确报错 |
 
 > **必须按指令族整体匹配，不能只做方向位与运算。**
 > 聚焦/光圈的码值 `0x41/0x42/0x44/0x48` 低位恰好与方向位重合：
@@ -271,12 +269,108 @@ io.github.rurulalanana.dahua            ← 大华实现
 > 早期只做位与，现场表现是**点光圈云台上下动、点聚焦云台左右动**。
 > 同类还有预置位 `0x81`（低两位 `01`）会被当成「右」——
 > 点「设置预置位」结果镜头转走了。
->
-> 回归测试：`PtzCmdMappingTest`（5 个用例，含逐条码值断言）。
 
-**当前限制**：预置位 / 巡航 / 扫描 / 雨刷补光走 SDK 时会抛
-`该设备通过 X 接入，此云台指令暂未适配（只支持方向、变倍、聚焦、光圈）`，
-不做静默失败 —— 静默把预置位当方向发出去比报错更糟。
+**现在的做法**：接口直接接收方向词，两个实现各自编码（国标编 PTZCmd、
+大华直接调 SDK），那一层反解连同它的坑一起消失。所以 `PtzCmdMappingTest`
+也一并删除了 —— 它测的代码已经不存在。
+
+### 9.3.1 IPC 与 NVR 的云台通道号不同
+
+大华 SDK 里「通道」有两套口径：
+
+| 形态 | 云台/取流通道号 |
+|---|---|
+| IPC（直连单机摄像机，`NET_IPC_SERIAL = 20`） | **0**（设备自身） |
+| NVR / DVR（下挂摄像机） | **1~N** |
+
+用 1 去控 IPC **不会报错、SDK 依然返回 `true`**，只是设备什么都不做。
+实测同一台 IPC：
+
+```
+通道 0：UP 后 tilt -111 → -150，变倍后 zoom 6 → 11   ← 真的在动
+通道 1：前后完全一致                                  ← 死命令
+```
+
+判定靠登录应答的 `NET_DEVICEINFO_Ex.byDVRType`：
+`DahuaSdk.Session#ipc()` → 云台通道用 `index - 1`。登录日志会打印选了哪套口径。
+
+### 9.5 控制命令的统一入口（2026-11 重构）
+
+**一条命令进来，先选实现，再调方法。选实现只发生一次。**
+
+```
+Controller → ControlService（纯转发）
+                → DeviceControlResolver.of(channelId)      ← 唯一一次分歧
+                     ├─ Gb28181DeviceControl  30 项能力全部覆写
+                     └─ DahuaDeviceControl    只覆写做得到的 14 项
+```
+
+| 类 | 位置 | 职责 |
+|---|---|---|
+| `DeviceCapability` | `starter/service/control/` | 30 项能力枚举，是「能力名 + 原因 + 前端可用性」的唯一来源 |
+| `DeviceControl` | 同上 | 32 个方法**全带默认实现，默认就抛「不支持」** |
+| `Gb28181DeviceControl` | 同上 | 国标 MANSCDP 报文，全能力实现 |
+| `DahuaDeviceControl` | 同上 | 大华 SDK，只覆写 14 项，其余继承默认异常 |
+| `DeviceControlResolver` | 同上 | 入口处分流一次，**永不返回 null** |
+
+改造前 `ControlService` 是 1029 行、32 个方法，其中 `providerOf(...) != null`
+出现 31 次，每个方法都是「判协议 → 走国标 / 走 SDK」的双份逻辑，还漏了 2 个
+（`ptzPrecise` / `subscribe` 没有分支，把 SDK 设备当国标往 SIP 里发）。
+
+**接新厂商只需两步**：写一个 `@Component XxxDeviceControl implements DeviceControl`
+覆写做得到的方法，然后在 `capabilities()` 里如实声明。
+Resolver 用 `List<DeviceControl>` 注入，自动收 —— 不用改任何现有代码。
+
+#### 能力表怎么用
+
+```http
+GET /api/v1/device/capabilities?serial=10001
+```
+```json
+{
+  "kind": "dahua",
+  "supported": ["PTZ", "FOCUS_IRIS", "PRESET", "REBOOT", ...],
+  "unsupported": [
+    {"capability": "FORCE_I_FRAME", "label": "强制关键帧",
+     "reason": "大华 NetSDK 没有强制关键帧接口；需要立即刷新画面请改用「重新打开预览」"}
+  ]
+}
+```
+
+前端 `useDeviceCapabilities` composable 取一次，按钮用
+`cap.disabled('FORCE_I_FRAME', 原有禁用条件)` 决定置灰、
+`cap.tip('FORCE_I_FRAME', '默认提示')` 取 tooltip。
+
+**不支持的项连原因一起返回**：只返回支持列表会让用户看到按钮凭空消失，
+以为是自己找错了地方。前端也**不隐藏按钮，只置灰**。
+
+**取不到能力表时一律当「全支持」**：旧后端没有这个端点、或网络抖动时，
+锁死整个云台面板比「点了再报错」更伤可用性。
+
+#### 为什么云台不走 `DeviceAccessProvider#ptz`
+
+那条入口把会话寄在 `DeviceContext` 上，而它由设备表的 `remoteIp/remotePort`
+构造（CLIENT 模式、无 serial）。**设备主动注册时 `remoteIp` 可能是旧地址或
+内网地址**，按 `host:port` 查不到会话，于是报「大华设备未登录」——
+而设备明明刚注册过（实测就是这个问题）。
+
+所以 `DahuaDeviceControl` 的云台改走
+`DahuaCapabilityService.requireSession`：它优先按 SN 取主动注册会话，
+与预置位、巡航、灯光、重启等所有扩展能力同一条路径。
+
+#### 什么不进统一接口
+
+`/api/v1/dahua/**` 下的这些继续保留，因为它们没有国标对应语义：
+
+| 端点 | 为什么不合并 |
+|---|---|
+| `cameraconfig/*` | CGI/RPC2 图像参数（曝光、背光、日夜…），国标无此协议 |
+| `ptz/{tour,scan,pattern,speed,limit,idle,automovement}` | 巡航组/线扫/巡迹是**配置项**，国标 MANSCDP 没有 |
+| `register/*` | 大华主动注册表 |
+| `record/download` | 私有下载协议 |
+
+把 20 个「必然抛不支持」的端点塞进 `/control` 只是把 `if` 搬进接口，不是消除它。
+统一的是**双方都有的语义**，不是「所有端点」。
 
 ### 9.3.1 IPC 与 NVR 的云台通道号不同
 
