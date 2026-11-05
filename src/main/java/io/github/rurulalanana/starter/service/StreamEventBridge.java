@@ -76,9 +76,37 @@ public class StreamEventBridge implements RtpSessionManager.SessionListener {
                     asyncExecutor.run("流上线落库", () -> streamService.markOnline(app + "/" + stream));
                 }
 
+                /**
+                 * 流从 ZLM 消失。
+                 *
+                 * <p><b>必须区分两种下线</b>：国标流是暂时的（设备重启 / 网络抖动，
+                 * 会话与端口都保留着等它恢复），标 {@code NEGOTIATING} 正确；
+                 * <b>SDK 流是真结束</b> —— 平台关掉发布器后 ZLM 里的媒体源就没了，
+                 * 只有下次点播才会重建。若也标 {@code NEGOTIATING}，库里会留下
+                 * 一条永不收敛的记录，{@code /stream/list} 一直显示它（推流数恒为 1），
+                 * 而播放器打不开、读者数恒为 0。
+                 *
+                 * <p>顺带清掉 {@code gb_channel.stream_id}：那是通道列表判断
+                 * 「有流 / 显示停止按钮」的依据，不清就永远显示在推流。
+                 */
                 @Override
                 public void onStreamOffline(String app, String stream) {
-                    asyncExecutor.run("流下线落库", () -> streamService.markOffline(app + "/" + stream));
+                    String streamKey = app + "/" + stream;
+                    asyncExecutor.run("流下线落库", () -> {
+                        if (streamService.isSdkStream(streamKey)) {
+                            /*
+                             * ZLM 对一次流关闭会投递多次下线事件（每个协议/轨道各一次），
+                             * 用返回值判断是否真的改了状态 —— 否则日志一次刷 5 条。
+                             */
+                            boolean changed = streamService.markClosed(streamKey);
+                            deviceService.setChannelStream(app, stream, null);
+                            if (changed) {
+                                log.info("SDK 流已结束，记录置 CLOSED 并清除通道 stream_id: {}", streamKey);
+                            }
+                            return;
+                        }
+                        streamService.markOffline(streamKey);
+                    });
                 }
             });
         }

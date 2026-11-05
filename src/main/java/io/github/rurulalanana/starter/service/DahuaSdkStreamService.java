@@ -192,6 +192,19 @@ public class DahuaSdkStreamService {
         } catch (Throwable t) {
             log.debug("关闭发布器失败: {} {}", key, t.toString());
         }
+        /*
+         * 清通道的 stream_id —— 它是通道列表判断「有流 / 显示停止按钮」的唯一依据。
+         *
+         * 不清的后果（实测）：用户关掉页面 → 60 秒后这里静默回收了 SDK 流，
+         * 但通道列表仍然显示「停止」按钮、numOutputs=1，看起来像一直在推流。
+         * gb_stream 那条记录由 ZLM 的 onStreamOffline 事件置 CLOSED（见 StreamEventBridge），
+         * 这里只负责通道侧。
+         */
+        try {
+            deviceService.setChannelStream(live.app(), live.stream(), null);
+        } catch (Exception e) {
+            log.debug("清除通道 stream_id 失败: {} {}", key, e.toString());
+        }
         log.info("大华 SDK 取流已释放: {}", key);
     }
 
@@ -214,6 +227,11 @@ public class DahuaSdkStreamService {
      *
      * <p>判据用 ZLM 的 {@code total_reader_count}（含 MP4 录制器：
      * {@code protocol.mp4_as_player=1}），所以「只录不看」不会被误关。
+     *
+     * <p><b>必须尊重通道的「常开」设置</b>：{@code gb_channel.on_demand=false}
+     * 表示用户要求这路流一直在线（对应国标语义的「非常开按需」）。
+     * 早先只看读者数，开关设了常开也照样 60 秒回收，
+     * 表现为「设了常开还是过一会儿就断」—— 与国标那条路径的口径保持一致。
      */
     @Scheduled(fixedDelay = 20_000L, initialDelay = 30_000L)
     public void reapIdleStreams() {
@@ -229,8 +247,18 @@ public class DahuaSdkStreamService {
             String key = e.getKey();
             LiveStream live = e.getValue();
             try {
+                /*
+                 * 常开通道不回收：录像录制中的流由 ZLM 的录制定时器维持读者数，
+                 * 但「只开常开、不录像」的通道没有读者也要一直在线。
+                 * 查库有成本，所以先用内存里的 readers 判，只有 0 读者才去查开关。
+                 */
                 int readers = media.readerCount(live.app(), live.stream());
                 if (readers > 0) {
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                if (isKeepAliveChannel(live.app(), live.stream())) {
+                    // 常开：不回收，但要持续刷新时间戳，避免关掉开关后立刻被判超时
                     lastViewerAt.put(key, now);
                     continue;
                 }
@@ -250,6 +278,22 @@ public class DahuaSdkStreamService {
             } catch (Exception ex) {
                 log.debug("回收 SDK 流失败: {} {}", key, ex.toString());
             }
+        }
+    }
+
+    /**
+     * 该通道是否要求流常开（{@code on_demand = false}）。
+     *
+     * <p>查库失败时返回 {@code false}（按按需处理）：宁可多回收一次，
+     * 也不要因为一次数据库抖动把「按需」通道永久占着设备上行。
+     */
+    private boolean isKeepAliveChannel(String deviceId, String channelId) {
+        try {
+            var ch = deviceService.findChannel(deviceId, channelId);
+            return ch != null && Boolean.FALSE.equals(ch.getOnDemand());
+        } catch (Exception e) {
+            log.debug("读取通道按需设置失败（按按需处理）: {}/{} {}", deviceId, channelId, e.toString());
+            return false;
         }
     }
 }

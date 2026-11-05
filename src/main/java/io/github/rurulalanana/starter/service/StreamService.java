@@ -680,6 +680,12 @@ public class StreamService {
             media.closeMediaSource(deviceId, channel);
             requestedStreams.remove(streamKey(deviceId, channel));
             markClosed(deviceId + "/" + channel);
+            /*
+             * 必须显式清通道的 stream_id：它是通道列表判断「有流 / 显示停止按钮」的依据。
+             * 只 markClosed 清的是 gb_stream，通道表那条记录还在，
+             * 表现为「点了停止、流列表空了，通道列表仍然显示在推流」。
+             */
+            deviceService.setChannelStream(deviceId, channel, null);
             return true;
         }
         requestedStreams.remove(streamKey(deviceId, channel));
@@ -967,18 +973,45 @@ public class StreamService {
         }
     }
 
-    /** 标记流已关闭。{@code streamKey} 为复合流标识 {@code <设备编码>/<通道编码>}。 */
-    public void markClosed(String streamKey) {
+    /**
+     * 标记流已关闭。{@code streamKey} 为复合流标识 {@code <设备编码>/<通道编码>}。
+     *
+     * @return 本次是否真的改动了状态（已是 CLOSED 或记录不存在时返回 {@code false}）
+     */
+    public boolean markClosed(String streamKey) {
         if (streamKey == null || streamKey.isBlank()) {
-            return;
+            return false;
         }
         GbStream record = findByStreamKey(streamKey);
         if (record != null && !GbStream.STATE_CLOSED.equals(record.getState())) {
             record.setState(GbStream.STATE_CLOSED);
             record.setUpdateTime(LocalDateTime.now());
             streamMapper.updateById(record);
+            return true;
         }
+        return false;
     }
+
+    /**
+     * 该流是否由平台通过厂商 SDK 直接取流产生（{@code transport=SDK}）。
+     *
+     * <p><b>为什么需要区分</b>：国标流的「下线」是暂时的 —— 设备可能重启、网络可能抖动，
+     * 端口与会话都保留着等它恢复，所以 {@code markOffline} 把它标成 NEGOTIATING 是对的。
+     * <b>SDK 流没有这个「等恢复」的过程</b>：平台一旦关掉发布器，ZLM 里的媒体源就没了，
+     * 只有下次点播才会重建。若也标 NEGOTIATING，就会留下一条永不收敛的僵尸记录
+     * （{@code liveRowsNotIn} 按「非 CLOSED」捞它 {@code /stream/list}），
+     * 表现为「推流数一直是 1，但播放器打不开、读者数恒为 0」。
+     */
+    public boolean isSdkStream(String streamKey) {
+        if (streamKey == null || streamKey.isBlank()) {
+            return false;
+        }
+        GbStream record = findByStreamKey(streamKey);
+        return record != null && TRANSPORT_SDK.equalsIgnoreCase(record.getTransport());
+    }
+
+    /** SDK 取流的 transport 标记（{@code gb_stream.transport}）。 */
+    public static final String TRANSPORT_SDK = "SDK";
 
     /**
      * 平台启动时把库里残留的「非 CLOSED」流记录收敛为 CLOSED。
@@ -1294,18 +1327,46 @@ public class StreamService {
         return out;
     }
 
-    /** 库里未关闭、且不在给定集合里的直播记录（SDK 流就靠它进列表）。 */
+    /**
+     * 库里未关闭、且不在给定集合里的直播记录（SDK 流就靠它进列表）。
+     *
+     * <h3>僵尸记录防御</h3>
+     * 早期 SDK 流结束时不落 CLOSED（见 {@link StreamEventBridge} 里
+     * {@code onStreamOffline} 的注释），库里会留下一条 {@code NEGOTIATING} 的记录，
+     * 这条查询每次都把它捞出来 → 界面「推流数恒为 1」但播放器打不开。
+     *
+     * <p>判据用 ZLM 里是否还有视频轨：SDK 流的媒体源由平台自己的发布器维持，
+     * 发布器关了轨道就没了，比任何时间戳都准。命中即顺手标 CLOSED 自愈，
+     * 下次查询就不会再扫到它（每条僵尸只会被修正一次）。
+     *
+     * <p>只对 {@code transport=SDK} 生效：国标流的 {@code NEGOTIATING} 是「等设备恢复」的
+     * 正常中间态，此时 ZLM 里本来就可能还没有轨道，不能当僵尸处理。
+     */
     private List<GbStream> liveRowsNotIn(java.util.Set<String> skip) {
         try {
             List<GbStream> rows = streamMapper.selectList(Wrappers.<GbStream>lambdaQuery()
                     .eq(GbStream::getStreamType, GbStream.TYPE_LIVE)
                     .ne(GbStream::getState, GbStream.STATE_CLOSED)
                     .orderByDesc(GbStream::getStartTime));
+            ZlmMediaServer media = platform.mediaServer();
             List<GbStream> out = new ArrayList<>();
             for (GbStream r : rows) {
-                if (!skip.contains(r.getStreamKey())) {
-                    out.add(r);
+                if (skip.contains(r.getStreamKey())) {
+                    continue;
                 }
+                if (TRANSPORT_SDK.equalsIgnoreCase(r.getTransport()) && media != null
+                        && media.videoCodecName(r.getApp(), r.getStreamName()) == null) {
+                    r.setState(GbStream.STATE_CLOSED);
+                    r.setUpdateTime(LocalDateTime.now());
+                    try {
+                        streamMapper.updateById(r);
+                    } catch (Exception ignore) {
+                        // 自愈失败不影响本次返回，下次查询会再试
+                    }
+                    log.info("收敛僵尸 SDK 流记录（ZLM 已无视频轨）: {}", r.getStreamKey());
+                    continue;
+                }
+                out.add(r);
             }
             return out;
         } catch (Exception e) {
