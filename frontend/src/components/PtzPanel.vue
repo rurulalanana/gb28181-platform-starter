@@ -7,7 +7,7 @@
         :key="d.cmd"
         class="ptz-btn"
         :style="{ gridArea: d.area }"
-        :disabled="inactive"
+        :disabled="noPtz"
         :aria-label="d.label"
         @pointerdown="beginMove(d.cmd, $event)"
       >
@@ -24,8 +24,8 @@
         class="ptz-btn ptz-talk"
         :class="{ 'is-talking': talking }"
         :type="talking ? 'danger' : 'default'"
-        :disabled="inactive"
-        :title="talking ? '停止喊话' : '开始喊话'"
+        :disabled="noTalk"
+        :title="talking ? '停止喊话' : tip('TALK', '开始喊话')"
         :aria-label="talking ? '停止喊话' : '开始喊话'"
         @click="toggleTalk"
       >
@@ -46,7 +46,7 @@
       <el-button-group class="zoom-group">
         <el-button
           size="small"
-          :disabled="inactive"
+          :disabled="noFi"
           title="放大（变倍+）"
           aria-label="放大（变倍+）"
           @pointerdown="beginMove('zoomin', $event)"
@@ -55,7 +55,7 @@
         </el-button>
         <el-button
           size="small"
-          :disabled="inactive"
+          :disabled="noFi"
           title="缩小（变倍−）"
           aria-label="缩小（变倍−）"
           @pointerdown="beginMove('zoomout', $event)"
@@ -66,18 +66,18 @@
     </div>
     <div class="ptz-row ptz-zoom-row">
       <el-button-group class="zoom-group">
-        <el-button size="small" :disabled="inactive" title="光圈放大" @click="cmd('fi', { command: 'irisin' }, '光圈 +')">
+        <el-button size="small" :disabled="noFi" title="光圈放大" @click="cmd('fi', { command: 'irisin' }, '光圈 +')">
           光圈+
         </el-button>
-        <el-button size="small" :disabled="inactive" title="光圈缩小" @click="cmd('fi', { command: 'irisout' }, '光圈 −')">
+        <el-button size="small" :disabled="noFi" title="光圈缩小" @click="cmd('fi', { command: 'irisout' }, '光圈 −')">
           光圈−
         </el-button>
       </el-button-group>
       <el-button-group class="zoom-group">
-        <el-button size="small" :disabled="inactive" title="聚焦近" @click="cmd('fi', { command: 'focusnear' }, '聚焦近')">
+        <el-button size="small" :disabled="noFi" title="聚焦近" @click="cmd('fi', { command: 'focusnear' }, '聚焦近')">
           聚焦+
         </el-button>
-        <el-button size="small" :disabled="inactive" title="聚焦远" @click="cmd('fi', { command: 'focusfar' }, '聚焦远')">
+        <el-button size="small" :disabled="noFi" title="聚焦远" @click="cmd('fi', { command: 'focusfar' }, '聚焦远')">
           聚焦−
         </el-button>
       </el-button-group>
@@ -156,7 +156,7 @@
                   v-if="row.used"
                   link
                   type="primary"
-                  :disabled="noPreset"
+                  :disabled="noPresetBtn"
                   @click="callPreset(row)"
                 >
                   调用
@@ -164,7 +164,7 @@
                 <el-button
                   link
                   type="primary"
-                  :disabled="noPreset"
+                  :disabled="noPresetBtn"
                   :title="row.used ? '用当前位置覆盖该预置位' : '把当前位置存到该编号'"
                   @click="savePreset(row)"
                 >
@@ -174,7 +174,7 @@
                   v-if="row.used"
                   link
                   type="danger"
-                  :disabled="noPreset"
+                  :disabled="noPresetBtn"
                   @click="removePreset(row)"
                 >
                   删除
@@ -201,28 +201,28 @@
           占满一行后「补光关」会被单独甩到第二行。固定两列等宽后每行严格对齐。
         -->
         <div class="ptz-actions">
-          <el-button size="small" :disabled="noDevice" @click="cmd('wiper', { command: 'on' })">
+          <el-button size="small" :disabled="noAux" :title="tip('AUX_SWITCH', '雨刷')" @click="cmd('wiper', { command: 'on' })">
             <el-icon><Umbrella /></el-icon> 雨刷开
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('wiper', { command: 'off' })">
+          <el-button size="small" :disabled="noAux" @click="cmd('wiper', { command: 'off' })">
             雨刷关
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('fillLight', { command: 'on' })">
+          <el-button size="small" :disabled="noAux" @click="cmd('fillLight', { command: 'on' })">
             <el-icon><Sunny /></el-icon> 补光开
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('fillLight', { command: 'off' })">
+          <el-button size="small" :disabled="noAux" @click="cmd('fillLight', { command: 'off' })">
             补光关
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('record', { command: 'start' })">
+          <el-button size="small" :disabled="noRecording" :title="tip('RECORDING', '设备录像')" @click="cmd('record', { command: 'start' })">
             <el-icon><VideoCamera /></el-icon> 设备录像
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('record', { command: 'stop' })">
+          <el-button size="small" :disabled="noRecording" @click="cmd('record', { command: 'stop' })">
             停止录像
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('guard', { command: 'setguard' })">
+          <el-button size="small" :disabled="noGuard" :title="tip('GUARD', '布防')" @click="cmd('guard', { command: 'setguard' })">
             <el-icon><Lock /></el-icon> 布防
           </el-button>
-          <el-button size="small" :disabled="noDevice" @click="cmd('guard', { command: 'resetguard' })">
+          <el-button size="small" :disabled="noGuard" @click="cmd('guard', { command: 'resetguard' })">
             撤防
           </el-button>
         </div>
@@ -1068,15 +1068,15 @@
           <el-button
             size="small"
             :type="tracking ? 'danger' : 'default'"
-            :disabled="noAdvanced"
-            :title="tracking ? '停止目标跟踪' : '让设备自动跟踪（球机智能分析固件支持才生效）'"
+            :disabled="noTargetTrack"
+            :title="tracking ? '停止目标跟踪' : tip('TARGET_TRACK', '让设备自动跟踪（球机智能分析固件支持才生效）')"
             @click="toggleAutoTrack"
           >
             <el-icon><Aim /></el-icon> {{ tracking ? '停止跟踪' : '自动跟踪' }}
           </el-button>
           <el-button
             size="small"
-            :disabled="noAdvanced"
+            :disabled="noTargetTrack"
             title="在画面上拖拽框选要跟踪的目标"
             @click="$emit('track')"
           >
@@ -1084,12 +1084,15 @@
           </el-button>
         </div>
         <div class="ptz-actions">
-          <el-button size="small" :disabled="noAdvanced" @click="cmd('iframe', {}, '已下发关键帧请求')">
+          <el-button size="small" :disabled="noIFrame"
+                     :title="tip('FORCE_I_FRAME', '请求设备立即编一个 I 帧')"
+                     @click="cmd('iframe', {}, '已下发关键帧请求')">
             <el-icon><Picture /></el-icon> 强制关键帧
           </el-button>
           <el-popconfirm title="确定重启该设备？" @confirm="cmd('teleBoot', {}, '重启指令已下发')">
             <template #reference>
-              <el-button size="small" type="warning" plain :disabled="noAdvanced">
+              <el-button size="small" type="warning" plain :disabled="noReboot"
+                         :title="tip('REBOOT', '设备会断线几十秒，预览与录像全部中断')">
                 <el-icon><RefreshRight /></el-icon> 远程重启
               </el-button>
             </template>
@@ -1102,7 +1105,8 @@
         <div class="ptz-actions-danger">
           <el-popconfirm title="确定格式化设备存储卡？数据将丢失" @confirm="cmd('formatSdCard', { sdCardId: 1 }, '格式化指令已下发')">
             <template #reference>
-              <el-button size="small" type="danger" plain :disabled="noAdvanced">
+              <el-button size="small" type="danger" plain :disabled="noFormatSd"
+                         :title="tip('FORMAT_SD_CARD', '数据将丢失')">
                 <el-icon><Delete /></el-icon> 格式化存储卡
               </el-button>
             </template>
@@ -1119,6 +1123,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '@/utils/confirm'
 import { controlApi, deviceApi, dahuaApi } from '@/api'
+import { useDeviceCapabilities } from '@/composables/useDeviceCapabilities'
 import CameraConfigPanel from '@/components/CameraConfigPanel.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -1188,6 +1193,39 @@ const noPreset = computed(() => blocked.value || !canPreset.value)
 const noDevice = computed(() => blocked.value || !canDevice.value)
 /** 高级操作 tab。 */
 const noAdvanced = computed(() => blocked.value || !canAdvanced.value)
+
+/**
+ * 设备能力表。
+ *
+ * <p>同一批按钮在不同协议上可用性不同：大华 SDK 没有强制关键帧、没有看守位、
+ * 没有拉框缩放；国标则全都有。渲染前先取一次，把做得到的留着、做不到的置灰并显示原因。
+ *
+ * <p><b>取不到能力表时一切按可用处理</b>（见 composable），
+ * 不会因为一次接口失败把整个面板锁死。
+ */
+const cap = useDeviceCapabilities(() => props.serial)
+
+/**
+ * 按能力细分的禁用条件。
+ *
+ * <p>为什么不能直接用 {@code inactive}：方向盘是 {@code PTZ}、变倍光圈是
+ * {@code FOCUS_IRIS}、喊话是 {@code TALK} —— 三者在大华上并非都可用，
+ * 用一个总开关会让它们一起置灰，看不出到底哪项不能用。
+ */
+const noPtz = computed(() => cap.disabled('PTZ', inactive.value))
+const noFi = computed(() => cap.disabled('FOCUS_IRIS', inactive.value))
+const noTalk = computed(() => cap.disabled('TALK', inactive.value))
+const noPresetBtn = computed(() => cap.disabled('PRESET', noPreset.value))
+const noAux = computed(() => cap.disabled('AUX_SWITCH', noDevice.value))
+const noRecording = computed(() => cap.disabled('RECORDING', noDevice.value))
+const noGuard = computed(() => cap.disabled('GUARD', noDevice.value))
+const noReboot = computed(() => cap.disabled('REBOOT', noAdvanced.value))
+const noIFrame = computed(() => cap.disabled('FORCE_I_FRAME', noAdvanced.value))
+const noFormatSd = computed(() => cap.disabled('FORMAT_SD_CARD', noAdvanced.value))
+const noTargetTrack = computed(() => cap.disabled('TARGET_TRACK', noAdvanced.value))
+
+/** 按钮提示：不支持时显示原因，支持时用调用方给的默认提示。 */
+const tip = cap.tip
 
 /** 云台速度（0~255）。固定值不提供调节：速度是调试参数，接口仍做 0~255 夹取。 */
 const SPEED = 129

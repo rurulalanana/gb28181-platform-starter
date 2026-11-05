@@ -179,6 +179,14 @@ export const recordApi = {
 
 /** 设备控制接口（`/api/v1/control/*`）。 */
 export const controlApi = {
+  /**
+   * 该设备支持哪些控制能力（`/device/capabilities`）。
+   *
+   * <p>渲染按钮前先取一次，用 `capabilities.supports(name)` 决定是否置灰：
+   * 不支持的按钮要**可见但禁用并显示原因**，而不是直接隐藏 ——
+   * 隐藏会让用户以为找错地方，看不到原因也无从反馈。
+   */
+  capabilities: (serial) => get('/device/capabilities', { serial }),
   ptz: (params) => post('/control/ptz', params),
   fi: (params) => post('/control/fi', params),
   ptzPrecise: (params) => post('/control/ptzprecise', params),

@@ -29,6 +29,7 @@ import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.ChannelListVo;
 import io.github.rurulalanana.starter.vo.ChannelNavigateVo;
 import io.github.rurulalanana.starter.vo.ChannelVo;
+import io.github.rurulalanana.starter.vo.DeviceCapabilitiesVo;
 import io.github.rurulalanana.starter.vo.DeviceListVo;
 import io.github.rurulalanana.starter.vo.DeviceVo;
 import io.github.rurulalanana.starter.vo.DiscoveredDeviceVo;
@@ -196,6 +197,25 @@ public class DeviceController {
             throw BizException.notFound("设备不存在：" + serial);
         }
         return ApiResponse.ok(deviceView(device));
+    }
+
+    /**
+     * 该设备支持哪些控制能力。
+     *
+     * <p>前端在渲染云台、预置位、重启等按钮前先取一次，把不支持的按钮置灰并显示原因 ——
+     * 而不是让用户点完再收一个 400「该设备不支持」。
+     *
+     * <p>返回值同时包含<b>不支持的项与原因</b>：只返回支持列表会让用户看到按钮凭空消失，
+     * 以为是自己找错了地方。
+     *
+     * <p>这是统一控制契约带来的附加收益：改造前能力信息散在 31 个 {@code if} 分支里，
+     * 前端无从得知，只能「全都显示、点了再看报错」。
+     */
+    @Operation(summary = "设备控制能力清单")
+    @GetMapping("/capabilities")
+    public ApiResponse<DeviceCapabilitiesVo> capabilities(@RequestParam String serial) {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(controlService.capabilities(serial));
     }
 
     @Operation(summary = "在线统计")
