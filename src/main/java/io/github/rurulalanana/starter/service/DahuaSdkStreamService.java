@@ -1,61 +1,75 @@
 package io.github.rurulalanana.starter.service;
 
-import io.github.rurulalanana.dahua.internal.DahuaSdk;
 import io.github.rurulalanana.dahua.ext.DahuaExtAccess;
-import io.github.rurulalanana.gb28181.sip.zlm.PsRtpSender;
-import io.github.rurulalanana.gb28181.sip.zlm.RtpSession;
+import io.github.rurulalanana.dahua.internal.DahuaSdk;
+import io.github.rurulalanana.gb28181.sip.zlm.EsMediaPublisher;
+import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.BizException;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 大华 SDK 取流的编排：SDK 拿 PS → 打 RTP → 灌进 ZLM 的国标收流端口。
+ * 大华 SDK 取流的编排：SDK 拿裸 H264/H265 → 直接喂 ZLM 建流。
  *
- * <h3>为什么必须有这条路径</h3>
+ * <h3>为什么需要这条路径</h3>
  * 平台原有的大华预览走 RTSP：由 ZLM <b>反向</b>连设备的
- * {@code rtsp://<ip>:554/cam/realmonitor}。这在局域网可用，
- * 但设备一旦位于 NAT / 4G 之后，554 从平台侧<b>根本不可达</b> ——
+ * {@code rtsp://<ip>:554/cam/realmonitor}。局域网可用，
+ * 但设备在 NAT / 4G 之后时 554 从平台侧<b>根本不可达</b> ——
  * 实测同一台设备 554 / 37777 / 80 三个端口从公网全部连不上，
  * 只有设备主动连出来的注册连接是通的。此时 RTSP 播放会一直重试、永远出不了图。
  *
  * <p>SDK 取流走的是<b>已建立的登录会话</b>，方向与主动注册一致，天然穿透 NAT。
  *
- * <h3>为什么是「打 RTP 灌 ZLM」而不是自己解 PS</h3>
- * SDK 侧 {@code CLIENT_RealPlayByDataType + EM_REAL_DATA_TYPE_GBPS} 直接给标准 PS
- * （实测首包 {@code 00 00 01 BA}），而 ZLM 的国标收流端口本来就只收 PS over RTP。
- * 于是把 PS 打成 RTP 发过去，ZLM 侧的解复用、轨道建立、SSRC 映射、
- * 会话生命周期、FLV/HLS/WebRTC/RTSP 输出<b>全部原样复用</b>，
- * 与国标设备走完全相同的链路 —— 前端一行都不用改。
+ * <h3>为什么是裸流而不是国标 PS</h3>
+ * 早期试过 {@code EM_REAL_DATA_TYPE_GBPS} 拿 PS 再打 RTP 灌国标收流端口，
+ * 看着更统一，但实测<b>主动注册会话上 SDK 只给大华私有 DHAV、拿不到 PS</b>
+ * （直连会话可以）—— 而 NAT 场景恰恰只有注册会话可用。
+ * 改成要裸 H264 后两种会话都正常，这也是大华官方 demo 的默认用法。
+ * 裸流由 ZLM 的 {@code mk_media_input_h264/265} 直接建流，
+ * 下游 FLV/HLS/WebRTC/RTSP 输出与国标设备完全一致，前端一行都不用改。
  *
  * <h3>什么时候用这条路径</h3>
- * 只在设备<b>当前有 SDK 会话</b>（主动注册或已登录直连）时启用。
- * 没有会话的部署（纯局域网）仍旧走 RTSP，行为不变。
+ * 只在设备<b>当前有 SDK 会话</b>时启用（主动注册或已登录直连）。
+ * 没有会话的部署（纯局域网、SDK 不可用）仍旧走 RTSP 代理，行为不变。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DahuaSdkStreamService {
 
+    /** 首帧等待上限：局域网首帧通常 200ms 内到，NAT 后稍慢，3 秒足够。 */
+    private static final long FIRST_FRAME_WAIT_MS = 3_000L;
+
+    /** 空闲回收宽限：播放器重连的间隙不能被误判成「没人看」。 */
+    private static final long IDLE_GRACE_MS = 60_000L;
+
     private final DahuaCapabilityService capability;
     private final DeviceService deviceService;
+    private final Gb28181MediaPlatform platform;
 
-    /** 一路 SDK 取流。ZLM 侧 RTP 会话的生命周期由 StreamService 管，这里只管 SDK 侧。 */
-    public record LiveStream(String key, DahuaExtAccess.RealPlay realPlay, PsRtpSender sender) {
+    /** 一路 SDK 取流：SDK 句柄 + ZLM 发布器。 */
+    public record LiveStream(String key, String app, String stream,
+                             DahuaExtAccess.RealPlay realPlay, EsMediaPublisher publisher) {
     }
 
     /** 正在取的流：{@code deviceId/channel} → 句柄。 */
     private final Map<String, LiveStream> running = new ConcurrentHashMap<>();
 
+    /** 各流「最近一次确认有观众」的时刻（毫秒），用于空闲回收。 */
+    private final Map<String, Long> lastViewerAt = new ConcurrentHashMap<>();
+
     /**
      * 设备此刻是否能用 SDK 取流。
      *
      * <p>判据是「有活跃 SDK 会话」而不是「设备是主动注册模式」：
-     * 局域网直连的设备同样有会话，走 SDK 一样能出图，没必要非走 RTSP。
+     * 局域网直连的设备同样有会话，走 SDK 一样能出图。
      */
     public boolean available(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) {
@@ -68,15 +82,11 @@ public class DahuaSdkStreamService {
     /**
      * 启动一路 SDK 取流。
      *
-     * <p>调用方（{@link StreamService}）负责先 {@code sessionManager.open(...)}
-     * 拿到收流端口与 SSRC，本方法只负责「SDK 拿 PS → 打进那个端口」。
-     *
      * @param deviceId 设备编号（大华即序列号）
      * @param channel  通道编码（{@code <deviceId>-<n>}）
-     * @param rtp      ZLM 收流会话（已 open，端口就绪）
      * @return 取流句柄；失败抛异常
      */
-    public LiveStream start(String deviceId, String channel, RtpSession rtp) {
+    public LiveStream start(String deviceId, String channel) {
         GbDevice device = deviceService.findDevice(deviceId);
         if (device == null) {
             throw BizException.notFound("设备不存在：" + deviceId);
@@ -85,44 +95,43 @@ public class DahuaSdkStreamService {
         if (session == null || !session.valid()) {
             throw BizException.badRequest("大华设备未登录，无法 SDK 取流：" + deviceId);
         }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            throw BizException.badRequest("媒体服务未启动");
+        }
 
         String key = deviceId + "/" + channel;
         stop(key);
 
         int sdkChannel = sdkChannelOf(session, deviceId, channel);
+
         /*
-         * 收流地址固定用回环 127.0.0.1：RTP 是我们自己发给本进程内嵌的 ZLM，
-         * 走外网地址会绕一圈还可能被防火墙拦。ZLM 按 SSRC 分流，不看来源 IP。
+         * app = 设备编码、stream = 通道编码，与国标收流的口径一致：
+         * 播放地址、ZLM 媒体源路径、前端播放器都不用区分流的来源。
          */
-        PsRtpSender sender;
+        EsMediaPublisher publisher;
         try {
-            sender = new PsRtpSender(key, "127.0.0.1", rtp.getPort(), rtp.getSsrc());
-        } catch (Exception e) {
-            throw BizException.badRequest("RTP 发送器创建失败：" + e.getMessage());
+            publisher = media.createEsPublisher(deviceId, channel);
+        } catch (RuntimeException e) {
+            throw BizException.badRequest("创建媒体源失败：" + e.getMessage());
         }
 
-        DahuaExtAccess ext = capability.ext();
         DahuaExtAccess.RealPlay play;
         try {
-            play = ext.startRealPlay(session, sdkChannel, key, sender::send);
+            // dataType 只作诊断用（H265 也可能报 1004），编码由发布器从 NAL 头判定
+            play = capability.ext().startRealPlay(session, sdkChannel, key,
+                    (es, dataType) -> publisher.push(es));
         } catch (RuntimeException e) {
-            sender.close();
+            publisher.close();
             throw BizException.badRequest("大华 SDK 取流失败：" + e.getMessage());
         }
 
         /*
-         * 快速失败：等第一块 PS。
-         *
-         * <p>为什么要等：SDK 的 {@code EM_REAL_DATA_TYPE_GBPS} 只在<b>直连会话</b>上
-         * 做 DHAV→PS 转换；在<b>主动注册会话</b>上实测只投递 DHAV（{@code dwDataType=0}，
-         * 首字节 {@code 44 48 41 56}），拿不到 PS。此时若直接返回成功，
-         * 平台会留下一个永远 {@code NEGOTIATING} 的会话 —— 前端一直转圈、
-         * 也没有任何可读的错误，比直接报错更难排查。
-         *
-         * <p>2 秒足够：实测直连会话第一块 PS 在 200ms 内到达。
+         * 等首帧：ZLM 在收到媒体数据前不会真正注册流，
+         * 提前返回的播放地址前端打开是 404（表现为「有地址但播不了」）。
          */
-        long deadline = System.currentTimeMillis() + 2000L;
-        while (System.currentTimeMillis() < deadline && sender.blocks() == 0) {
+        long deadline = System.currentTimeMillis() + FIRST_FRAME_WAIT_MS;
+        while (System.currentTimeMillis() < deadline && !publisher.hasFirstFrame()) {
             try {
                 Thread.sleep(50L);
             } catch (InterruptedException ie) {
@@ -130,23 +139,26 @@ public class DahuaSdkStreamService {
                 break;
             }
         }
-        if (sender.blocks() == 0) {
+        if (!publisher.hasFirstFrame()) {
+            // 不留死流：SDK 句柄与媒体源一起收掉，接口明确报错
             try {
                 play.close();
             } catch (Throwable ignored) {
                 // 已失败，清理异常不再向上抛
             }
-            sender.close();
-            throw BizException.badRequest("大华 SDK 没有输出国标 PS 码流："
-                    + "该设备的主动注册会话上 SDK 只给私有 DHAV 封装（不支持转为 PS）。"
-                    + "请改用「设备直连（局域网/端口映射）」或「设备走国标接入」——"
-                    + "详见 docs/排障实录.md §11");
+            publisher.close();
+            throw BizException.badRequest(
+                    "大华 SDK 取流超时：已登录设备但 " + FIRST_FRAME_WAIT_MS
+                            + "ms 内没有拿到视频帧。请检查该通道是否真的有画面"
+                            + "（通道号：IPC 自身是 0，NVR 下挂是 1~N）");
         }
 
-        LiveStream live = new LiveStream(key, play, sender);
+        LiveStream live = new LiveStream(key, deviceId, channel, play, publisher);
         running.put(key, live);
-        log.info("大华 SDK 取流已启动: {} 通道={} rtpPort={} ssrc={}",
-                key, sdkChannel, rtp.getPort(), rtp.getSsrc());
+        lastViewerAt.remove(key);
+        log.info("大华 SDK 取流已启动: {} 通道={} codec={} 累计帧={}",
+                key, sdkChannel, publisher.codecName() == 0 ? "H264" : "H265",
+                publisher.frames());
         return live;
     }
 
@@ -166,6 +178,7 @@ public class DahuaSdkStreamService {
     /** 停止一路 SDK 取流（幂等）。 */
     public void stop(String key) {
         LiveStream live = running.remove(key);
+        lastViewerAt.remove(key);
         if (live == null) {
             return;
         }
@@ -175,11 +188,16 @@ public class DahuaSdkStreamService {
             log.debug("停止 SDK 取流失败: {} {}", key, t.toString());
         }
         try {
-            live.sender().close();
+            live.publisher().close();
         } catch (Throwable t) {
-            log.debug("关闭 RTP 发送器失败: {} {}", key, t.toString());
+            log.debug("关闭发布器失败: {} {}", key, t.toString());
         }
         log.info("大华 SDK 取流已释放: {}", key);
+    }
+
+    /** 某设备通道当前是否已在取流。 */
+    public boolean isRunning(String deviceId, String channel) {
+        return running.containsKey(deviceId + "/" + channel);
     }
 
     /** 当前正在取的流数量（诊断用）。 */
@@ -187,8 +205,51 @@ public class DahuaSdkStreamService {
         return running.size();
     }
 
-    /** 该设备是否已有一路在取。 */
-    public boolean isRunning(String key) {
-        return running.containsKey(key);
+    /**
+     * 空闲回收：没人看就停掉 SDK 取流。
+     *
+     * <p>国标流由 {@code StreamService.reapIdleStreams} 按 RTP 会话回收，
+     * 而 SDK 流<b>没有 RtpSession</b>，那个巡检扫不到 —— 不单独回收的话，
+     * 用户关掉页面后设备会一直被取流，白占设备上行与编码资源。
+     *
+     * <p>判据用 ZLM 的 {@code total_reader_count}（含 MP4 录制器：
+     * {@code protocol.mp4_as_player=1}），所以「只录不看」不会被误关。
+     */
+    @Scheduled(fixedDelay = 20_000L, initialDelay = 30_000L)
+    public void reapIdleStreams() {
+        if (running.isEmpty()) {
+            return;
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, LiveStream> e : running.entrySet()) {
+            String key = e.getKey();
+            LiveStream live = e.getValue();
+            try {
+                int readers = media.readerCount(live.app(), live.stream());
+                if (readers > 0) {
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                Long seen = lastViewerAt.get(key);
+                if (seen == null) {
+                    // 首次采样到 0：先记时间，给播放器重连的间隙留出宽限
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                // 设备断线（SDK 回调停了）也要回收：地址还在但永远没新帧
+                boolean stalled = now - live.publisher().lastFrameAt() > IDLE_GRACE_MS;
+                if (now - seen >= IDLE_GRACE_MS || stalled) {
+                    log.info("回收空闲的大华 SDK 流: {}（{} 秒无观众{}）", key,
+                            (now - seen) / 1000, stalled ? "，且已无新帧" : "");
+                    stop(key);
+                }
+            } catch (Exception ex) {
+                log.debug("回收 SDK 流失败: {} {}", key, ex.toString());
+            }
+        }
     }
 }

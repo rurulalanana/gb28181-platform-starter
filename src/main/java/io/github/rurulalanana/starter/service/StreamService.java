@@ -307,55 +307,40 @@ public class StreamService {
     }
 
     /**
-     * 大华 SDK 取流：SDK 拿 PS → 打 RTP → 灌 ZLM 的国标收流端口。
+     * 大华 SDK 取流：SDK 拿裸 H264/H265 → 直接喂 ZLM 建流。
      *
-     * <p>与国标设备走<b>完全相同的下游链路</b>：ZLM 按 SSRC 认流、建轨道、
-     * 输出 FLV/HLS/WebRTC/RTSP。所以这里只做两件事：
-     * 「开会话拿端口和 SSRC」+「让 SDK 往那个端口灌 PS」。
+     * <p>与国标设备走<b>完全相同的下游链路</b>：ZLM 输出 FLV/HLS/WebRTC/RTSP，
+     * app = 设备编码、stream = 通道编码。区别只在「流由谁喂」：
+     * 国标是设备推 RTP，这里是平台把 SDK 裸流 {@code mk_media_input_h264} 进去。
+     *
+     * <p><b>没有 RtpSession</b>：所以状态不靠 {@code on_mk_media_publish} 回写，
+     * 而是首帧推送成功即视为 ONLINE（{@code DahuaSdkStreamService.start} 已等到首帧）。
      */
     private GbStream startDahuaSdkLive(GbDevice device, String channel, Integer streamNumber) {
         String deviceId = device.getDeviceId();
-        RtpSessionManager sessions = platform.sessionManager();
-        if (sessions == null) {
+        DahuaSdkStreamService dahua = dahuaSdkStream();
+        if (dahua == null) {
+            throw BizException.badRequest("大华取流服务未就绪");
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
             throw BizException.badRequest("媒体服务未启动");
         }
-        // 0 = 主码流 / 1 = 子码流，与国标口径一致（GB/T 28181—2022 附录 G 的 SSRC 后 4 位）
-        int streamNo = resolveSdkStreamNumber(device, streamNumber);
-        /*
-         * 复用平台的国标收流会话：它会分配 RTP 端口、生成 SSRC、登记映射。
-         * deviceSsrc 传 null —— 这条流是我们自己灌的，不需要按设备声明的 SSRC 过滤。
-         */
-        RtpSession session = sessions.open(channel, deviceId, null, 0, null,
-                MediaType.REALTIME, null, streamNo);
-
-        DahuaSdkStreamService.LiveStream live;
-        try {
-            live = dahuaSdkStream().start(deviceId, channel, session);
-        } catch (RuntimeException e) {
-            // 取流没起来就别留一个空会话在 ZLM 里等数据
-            try {
-                sessions.closeByKey(session.getSessionKey());
-            } catch (Throwable ignored) {
-                // 清理失败不影响主异常
-            }
-            throw e;
-        }
+        DahuaSdkStreamService.LiveStream live = dahua.start(deviceId, channel);
 
         GbStream s = new GbStream();
         s.setStreamKey(deviceId + "/" + channel);
         s.setDeviceId(deviceId);
         s.setChannelId(channel);
-        s.setStreamName(session.getStream());
-        s.setApp(session.getZlmApp());
+        s.setStreamName(live.stream());
+        s.setApp(live.app());
         s.setStreamType(GbStream.TYPE_LIVE);
-        // RTP 已经在灌了，但仍要等 ZLM 解出轨道才算真正可播：
-        // 状态先 NEGOTIATING，由 on_mk_media_publish 改成 ONLINE（与国标一致）
-        s.setState(RtpSession.NEGOTIATING);
-        s.setSsrc(session.getSsrc());
-        s.setTransport("UDP");
+        // 已拿到首帧（start 内部等过），流在 ZLM 里真实存在，可以直接标 ONLINE
+        s.setState(RtpSession.ONLINE);
+        s.setTransport("SDK");
         s.setStartTime(LocalDateTime.now());
         s.setUpdateTime(LocalDateTime.now());
-        PlayUrls urls = platform.mediaServer().playUrls(session);
+        PlayUrls urls = media.playUrls(live.app(), live.stream());
         s.setHttpFlv(urls.getHttpFlv());
         s.setWsFlv(urls.getWsFlv());
         s.setHls(urls.getHls());
@@ -364,8 +349,8 @@ public class StreamService {
         s.setRtmp(urls.getRtmp());
         save(s);
         deviceService.setChannelStream(deviceId, channel, s.getStreamKey());
-        log.info("大华 SDK 取流点播已发起: {}/{} ssrc={} rtpPort={}",
-                deviceId, channel, session.getSsrc(), session.getPort());
+        log.info("大华 SDK 取流点播已发起: {}/{} 码流={}", deviceId, channel,
+                streamNumber == null ? "auto" : streamNumber);
         return s;
     }
 
@@ -680,6 +665,16 @@ public class StreamService {
             ZlmMediaServer media = platform.mediaServer();
             if (media == null) {
                 return false;
+            }
+            /*
+             * 两条 SDK 路径都要收：
+             *   · RTSP 代理   → stopProxy + closeMediaSource
+             *   · SDK 取流    → DahuaSdkStreamService.stop（它会自己释放媒体源）
+             * 只收其中一条会留下「接口回成功但设备还在被取流」。
+             */
+            DahuaSdkStreamService dahua = dahuaSdkStream();
+            if (dahua != null) {
+                dahua.stop(deviceId + "/" + channel);
             }
             media.stopProxy(deviceId, channel);
             media.closeMediaSource(deviceId, channel);
@@ -1256,15 +1251,107 @@ public class StreamService {
                 .eq(GbStream::getStreamKey, streamKey).last("limit 1"));
     }
 
-    /** 直播流列表（含内存中会话，保证「刚点播未落库」也能查到）。 */
+    /**
+     * 按流名取返回体，供 {@code /stream/info} 在「没有 RtpSession」时回落。
+     *
+     * <p>SDK 直连设备的流（RTSP 代理 / SDK 取流）不产生 RtpSession，
+     * 只按会话查会让这类流永远报「直播流不存在」。
+     *
+     * @return 不存在或已关闭时返回 {@code null}
+     */
+    public StreamVo describeByStreamKey(String streamKey) {
+        if (streamKey == null || streamKey.isBlank()) {
+            return null;
+        }
+        GbStream row = findByStreamKey(streamKey);
+        if (row == null || GbStream.STATE_CLOSED.equals(row.getState())) {
+            return null;
+        }
+        return describe(row);
+    }
+
+    /**
+     * 直播流列表。
+     *
+     * <p>国标流来自内存会话（保证「刚点播未落库」也能查到）；
+     * <b>SDK 直连设备的流没有 RtpSession</b>（RTSP 代理与 SDK 取流都是），
+     * 只取会话会漏掉它们，界面上「当前推流」永远是 0。因此再把库里
+     * 未关闭的直播记录补进来，按 {@code streamKey} 去重。
+     */
     public List<StreamVo> liveList() {
         List<StreamVo> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
         for (RtpSession s : sessions()) {
             if (s.getType() == MediaType.REALTIME) {
-                out.add(describe(s));
+                StreamVo vo = describe(s);
+                seen.add(vo.getStreamId());
+                out.add(vo);
             }
         }
+        for (GbStream row : liveRowsNotIn(seen)) {
+            out.add(describe(row));
+        }
         return out;
+    }
+
+    /** 库里未关闭、且不在给定集合里的直播记录（SDK 流就靠它进列表）。 */
+    private List<GbStream> liveRowsNotIn(java.util.Set<String> skip) {
+        try {
+            List<GbStream> rows = streamMapper.selectList(Wrappers.<GbStream>lambdaQuery()
+                    .eq(GbStream::getStreamType, GbStream.TYPE_LIVE)
+                    .ne(GbStream::getState, GbStream.STATE_CLOSED)
+                    .orderByDesc(GbStream::getStartTime));
+            List<GbStream> out = new ArrayList<>();
+            for (GbStream r : rows) {
+                if (!skip.contains(r.getStreamKey())) {
+                    out.add(r);
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            log.debug("补充 SDK 流列表失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 库里的流记录 → 返回体（SDK 直连设备用）。
+     *
+     * <p>与 {@link #describe(RtpSession)} 的差别：没有 SSRC/RTP 端口，
+     * 播放地址按 {@code app/stream} 现算；观众数仍走 ZLM 读者计数。
+     */
+    private StreamVo describe(GbStream row) {
+        StreamVo vo = new StreamVo();
+        vo.setStreamId(row.getStreamKey());
+        vo.setDeviceId(row.getDeviceId());
+        vo.setChannelId(row.getChannelId());
+        vo.setSmsId(props.getPlatformId());
+        vo.setState(row.getState());
+        vo.setTransport(row.getTransport());
+        ZlmMediaServer media = platform.mediaServer();
+        if (media != null && row.getApp() != null && row.getStreamName() != null) {
+            PlayUrls urls = media.playUrls(row.getApp(), row.getStreamName());
+            vo.setWebrtc(urls.getWebrtc());
+            vo.setFlv(urls.getHttpFlv());
+            vo.setWsFlv(urls.getWsFlv());
+            vo.setHls(urls.getHls());
+            vo.setRtsp(urls.getRtsp());
+            vo.setRtmp(urls.getRtmp());
+            vo.setReaders(media.readerCount(row.getApp(), row.getStreamName()));
+        }
+        GbChannel channel = deviceService.findChannel(row.getDeviceId(), row.getChannelId());
+        if (channel != null) {
+            vo.setChannelName(channel.displayName());
+            vo.setChannelPtzType(channel.getPtzType());
+        }
+        vo.setDeviceName(deviceNameOf(row.getDeviceId()));
+        if (row.getStartTime() != null) {
+            vo.setStartAt(TimeFormats.toDisplay(row.getStartTime()));
+            vo.setDuration(Math.max(0,
+                    java.time.Duration.between(row.getStartTime(),
+                            java.time.LocalDateTime.now()).getSeconds()));
+        }
+        return vo;
     }
 
     /** 回放流列表。 */

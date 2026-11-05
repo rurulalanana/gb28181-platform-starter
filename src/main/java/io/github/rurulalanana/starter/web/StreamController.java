@@ -114,10 +114,19 @@ public class StreamController {
                                       @RequestParam(defaultValue = "false") Boolean touch) {
         StpUtil.checkLogin();
         RtpSession session = streamService.findSession(streamid);
-        if (session == null) {
+        if (session != null) {
+            return ApiResponse.ok(streamService.describe(session));
+        }
+        /*
+         * SDK 直连设备（RTSP 代理 / SDK 取流）没有 RtpSession，
+         * 只能回落到库里的流记录 —— 不回退的话这类流永远查不到，
+         * 前端轮询会一直拿到「直播流不存在」。
+         */
+        StreamVo row = streamService.describeByStreamKey(streamid);
+        if (row == null) {
             throw BizException.notFound("直播流不存在：" + streamid);
         }
-        return ApiResponse.ok(streamService.describe(session));
+        return ApiResponse.ok(row);
     }
 
     // ==================== 转推 ====================
