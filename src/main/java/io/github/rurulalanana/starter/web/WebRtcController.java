@@ -102,8 +102,15 @@ public class WebRtcController {
         boolean playback = channelId.endsWith("_playback");
         if (session == null && !playback) {
             session = platform.sessionManager().getByChannel(deviceId, channelId);
-            // 流尚未建立时自动点播（避免浏览器拿到空流）
-            if (session == null) {
+            /*
+             * 流尚未建立时自动点播（避免浏览器拿到空流）。
+             *
+             * 判据必须走 hasLiveStream 而不是只看 session：SDK 直连设备（大华等）
+             * 的流没有 RtpSession，只判 session 会恒为 false → 每次都重新点播 →
+             * startLive 内部先 stop 掉刚建好的流 → 重建时设备还没释放，
+             * 报 0x8000040A「创建套接字失败」。表现为「点播成功一瞬间又失败」。
+             */
+            if (session == null && !streamService.hasLiveStream(deviceId, channelId)) {
                 try {
                     streamService.startLive(deviceId, channelId);
                 } catch (Exception e) {

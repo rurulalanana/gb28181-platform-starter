@@ -101,6 +101,25 @@ public class DahuaSdkStreamService {
         }
 
         String key = deviceId + "/" + channel;
+        /*
+         * 已在取流就直接复用，不要「先 stop 再 start」。
+         *
+         * 多画面 / 前端并发请求（/stream/start 与 /webrtc 协商几乎同时到）时，
+         * 后到的请求会把先建好的流拆掉重建，而设备侧还没释放上一路，
+         * CLIENT_RealPlayByDataType 就会报 0x8000040A「创建套接字失败」——
+         * 表现为「点播成功了一瞬间又失败」。
+         *
+         * 复用是安全的：同一通道同一时刻只应有一路 SDK 取流，
+         * 编码与通道号都没变，返回已有句柄即可。
+         */
+        LiveStream existing = running.get(key);
+        if (existing != null && existing.realPlay().active()) {
+            log.info("大华 SDK 取流已在运行，复用: {} codec={} 累计帧={}",
+                    key, existing.publisher().codecName() == 0 ? "H264" : "H265",
+                    existing.publisher().frames());
+            return existing;
+        }
+        // 句柄已失效（设备重连过）：清掉残留再重建
         stop(key);
 
         int sdkChannel = sdkChannelOf(session, deviceId, channel);

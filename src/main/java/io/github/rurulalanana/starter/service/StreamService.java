@@ -1014,6 +1014,54 @@ public class StreamService {
     public static final String TRANSPORT_SDK = "SDK";
 
     /**
+     * 该通道当前是否真的有一路直播流在线。
+     *
+     * <h3>为什么不能只看 RtpSession</h3>
+     * 国标流有 {@code RtpSession}，但 <b>SDK 直连设备（大华等）与 RTSP 代理都没有</b> ——
+     * 它们的流由平台自己的发布器/代理维持，会话表里查不到。
+     *
+     * <p>踩过的坑：WebRTC 控制器用 {@code sessionManager().getByChannel(...) != null}
+     * 判断「流是否已存在」，对 SDK 流恒为 {@code false}，于是它每次都以为流没建好，
+     * 又调一次 {@code startLive} → {@code DahuaSdkStreamService.start} 开头先 {@code stop(key)}
+     * 把刚建好的流拆掉 → 紧接着重建时设备侧还没释放，报
+     * {@code 0x8000040A 创建套接字失败}。表现为「点播成功了一瞬间又失败」。
+     *
+     * <h3>三层判据</h3>
+     * <ol>
+     *   <li>国标：内存里 RTP 会话存在；</li>
+     *   <li>SDK 取流：发布器还在跑（内存 map，最准，不受库里残留记录影响）；</li>
+     *   <li>RTSP 代理等：库里非 CLOSED 且 ZLM 里确实还有视频轨
+     *       （只看库会被僵尸记录骗，只看 ZLM 会把「刚建流、轨道还没就绪」误判成没有）。</li>
+     * </ol>
+     */
+    public boolean hasLiveStream(String deviceId, String channelId) {
+        if (deviceId == null || deviceId.isBlank()
+                || channelId == null || channelId.isBlank()) {
+            return false;
+        }
+        RtpSessionManager sessions = platform.sessionManager();
+        if (sessions != null && sessions.getByChannel(deviceId, channelId) != null) {
+            return true;
+        }
+        DahuaSdkStreamService dahua = dahuaSdkStream();
+        if (dahua != null && dahua.isRunning(deviceId, channelId)) {
+            return true;
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            return false;
+        }
+        try {
+            GbStream row = findByChannel(deviceId, channelId, GbStream.TYPE_LIVE);
+            return row != null && !GbStream.STATE_CLOSED.equals(row.getState())
+                    && media.videoCodecName(row.getApp(), row.getStreamName()) != null;
+        } catch (Exception e) {
+            log.debug("判断直播流是否存在失败（按不存在处理）: {}/{} {}", deviceId, channelId, e.toString());
+            return false;
+        }
+    }
+
+    /**
      * 平台启动时把库里残留的「非 CLOSED」流记录收敛为 CLOSED。
      * 会话是纯内存对象，重启即全没，而库里还留着 {@code ONLINE} / {@code NEGOTIATING}，
      * 界面会显示「推流中」但实际一路都没有；重启后内存为空是既成事实，统一置 CLOSED 是准确的。
